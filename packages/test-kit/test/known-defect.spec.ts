@@ -1,0 +1,88 @@
+import { strict as assert } from 'node:assert';
+import {
+  KnownDefectFixedError,
+  isAssertionError,
+  knownDefectTitle,
+  parseKnownDefectTitle,
+  runKnownDefect,
+  validateDefect,
+  type KnownDefect,
+} from '../src/known-defect';
+
+const DEFECT: KnownDefect = { id: 'F-07', owner: 'PR6', reason: 'pull ignores the site filter' };
+
+describe('runKnownDefect', () => {
+  it('passes when the body fails a Jest assertion', async () => {
+    await expect(runKnownDefect(DEFECT, () => expect(1).toBe(2))).resolves.toBeUndefined();
+  });
+
+  it('passes when an async body fails a Jest assertion after awaiting', async () => {
+    await expect(
+      runKnownDefect(DEFECT, async () => {
+        await Promise.resolve();
+        await expect(Promise.resolve(1)).resolves.toBe(2);
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('passes when the body fails a node:assert assertion', async () => {
+    await expect(runKnownDefect(DEFECT, () => assert.equal(1, 2))).resolves.toBeUndefined();
+  });
+
+  it('fails with the original error when the body throws something other than an assertion', async () => {
+    const boom = new TypeError('harness is broken');
+    await expect(runKnownDefect(DEFECT, () => Promise.reject(boom))).rejects.toBe(boom);
+  });
+
+  it('fails when the body throws a non-error value', async () => {
+    await expect(
+      runKnownDefect(DEFECT, () => {
+        throw 'not an error';
+      }),
+    ).rejects.toBe('not an error');
+  });
+
+  it('fails with "flip it" when the body passes', async () => {
+    const run = runKnownDefect(DEFECT, () => expect(1).toBe(1));
+    await expect(run).rejects.toBeInstanceOf(KnownDefectFixedError);
+    await expect(run).rejects.toThrow('Defect F-07 appears fixed - flip it');
+  });
+});
+
+describe('isAssertionError', () => {
+  it('recognises Jest and node:assert failures only', () => {
+    let jestError: unknown;
+    try {
+      expect(true).toBe(false);
+    } catch (err) {
+      jestError = err;
+    }
+    let nodeError: unknown;
+    try {
+      assert.ok(false);
+    } catch (err) {
+      nodeError = err;
+    }
+    expect(isAssertionError(jestError)).toBe(true);
+    expect(isAssertionError(nodeError)).toBe(true);
+    expect(isAssertionError(new Error('x'))).toBe(false);
+    expect(isAssertionError(null)).toBe(false);
+    expect(isAssertionError('x')).toBe(false);
+  });
+});
+
+describe('known defect metadata', () => {
+  it('round-trips the id and owner through the test title', () => {
+    const title = knownDefectTitle(DEFECT, 'returns only accessible sites');
+    expect(title).toBe('[known defect F-07 -> PR6] returns only accessible sites');
+    expect(parseKnownDefectTitle(title)).toEqual({ id: 'F-07', owner: 'PR6' });
+    expect(parseKnownDefectTitle('returns only accessible sites')).toBeUndefined();
+  });
+
+  it('rejects malformed ids, owners and empty reasons', () => {
+    expect(() => validateDefect({ ...DEFECT, id: '7' })).toThrow('F-07');
+    expect(() => validateDefect({ ...DEFECT, owner: 'later' })).toThrow('PR6');
+    expect(() => validateDefect({ ...DEFECT, reason: ' ' })).toThrow('needs a reason');
+    expect(() => validateDefect(DEFECT)).not.toThrow();
+  });
+});
