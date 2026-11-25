@@ -18,11 +18,11 @@ export class PullService {
   constructor(private readonly db: Db) {}
 
   async pull(user: AuthUser, cursor: number, limit: number, clientId?: string): Promise<PullResponse> {
-    const sites = await accessibleSites(this.db.pool, user);
+    const sites = await accessibleSites(this.db, user);
     const siteFilter = cursor === 0 ? sites : null;
     const take = Math.min(Math.max(limit, 1), 500);
 
-    const { rows } = await this.db.pool.query<LogRow>(
+    const { rows } = await this.db.query<LogRow>(
       `SELECT version, site_id, entity, entity_id, op, data
          FROM change_log
         WHERE version > $1 AND ($2::uuid[] IS NULL OR site_id = ANY($2))
@@ -42,7 +42,7 @@ export class PullService {
 
     let lastMutationId = 0;
     if (clientId) {
-      const res = await this.db.pool.query<{ last_mutation_id: string }>(
+      const res = await this.db.query<{ last_mutation_id: string }>(
         `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
         [clientId],
       );

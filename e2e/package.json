@@ -1,0 +1,15 @@
+{
+  "name": "@fieldsync/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser end-to-end tests against the built server and web app on a real Postgres.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@fieldsync/server": "*",
+    "@playwright/test": "1.65.0",
+    "@types/pg": "^8.10.9",
+    "pg": "^8.11.3"
+  }
+}

@@ -39,7 +39,7 @@ export class PushService {
   }
 
   async lastMutationId(clientId: string): Promise<number> {
-    const { rows } = await this.db.pool.query<{ last_mutation_id: string }>(
+    const { rows } = await this.db.query<{ last_mutation_id: string }>(
       `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
       [clientId],
     );

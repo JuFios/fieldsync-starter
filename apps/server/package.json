@@ -5,8 +5,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main",
+    "migrate": "node dist/database/migrate",
     "dev": "tsc -p tsconfig.build.json --watch",
-    "test": "jest"
+    "test": "jest",
+    "test:unit": "jest --selectProjects unit",
+    "test:integration": "jest --selectProjects integration"
   },
   "dependencies": {
     "@fieldsync/sync-core": "*",
@@ -15,17 +18,13 @@
     "@nestjs/platform-express": "^10.3.0",
     "pg": "^8.11.3",
     "reflect-metadata": "^0.2.1",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "typeorm": "0.3.31"
   },
   "devDependencies": {
+    "@fieldsync/test-kit": "*",
     "@nestjs/testing": "^10.3.0",
     "@types/express": "^4.17.21",
     "@types/pg": "^8.10.9"
-  },
-  "jest": {
-    "moduleFileExtensions": ["js", "json", "ts"],
-    "rootDir": ".",
-    "testRegex": "test/.*\\.spec\\.ts$",
-    "transform": { "^.+\\.ts$": "ts-jest" }
   }
 }

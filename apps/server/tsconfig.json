@@ -1,1 +1,13 @@
-{ "extends": "../../tsconfig.base.json", "include": ["src", "test"] }
+{
+  "extends": "../../tsconfig.base.json",
+  // Tests resolve the workspace packages from source, as Jest does at run time (moduleNameMapper), so
+  // typechecking and running them never depend on a build of those packages. The build itself uses
+  // tsconfig.build.json, which keeps resolving them through node_modules.
+  "compilerOptions": {
+    "paths": {
+      "@fieldsync/sync-core": ["../../packages/sync-core/src"],
+      "@fieldsync/test-kit": ["../../packages/test-kit/src"]
+    }
+  },
+  "include": ["src", "test"]
+}

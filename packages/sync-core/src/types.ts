@@ -3,12 +3,7 @@ export type EntityName = 'ticket' | 'part';
 export type Row = Record<string, unknown>;
 
 export type MutatorName =
-  | 'ticket.create'
-  | 'ticket.update'
-  | 'ticket.setStatus'
-  | 'ticket.delete'
-  | 'part.add'
-  | 'part.adjust';
+  'ticket.create' | 'ticket.update' | 'ticket.setStatus' | 'ticket.delete' | 'part.add' | 'part.adjust';
 
 export interface Mutation {
   /** Strictly increasing per client, starting at 1. */

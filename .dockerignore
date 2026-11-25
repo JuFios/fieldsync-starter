@@ -1,0 +1,15 @@
+# Keep the build context to sources and manifests: no local secrets, host-built artifacts or VCS data.
+.git
+.github
+**/node_modules
+**/dist
+**/.next
+**/coverage
+**/*.tsbuildinfo
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+test-results
+playwright-report
+blob-report

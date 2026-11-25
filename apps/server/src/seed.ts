@@ -1,4 +1,4 @@
-import type { Pool } from 'pg';
+import type { Sql } from './db';
 
 export const DEMO = {
   siteA: '00000000-0000-4000-8000-0000000000a1',
@@ -8,12 +8,12 @@ export const DEMO = {
   techB: '00000000-0000-4000-8000-000000000003',
 };
 
-export async function seedDemo(pool: Pool): Promise<void> {
-  await pool.query(
+export async function seedDemo(sql: Sql): Promise<void> {
+  await sql.query(
     `INSERT INTO sites (id, name) VALUES ($1, 'North Plant'), ($2, 'South Plant') ON CONFLICT DO NOTHING`,
     [DEMO.siteA, DEMO.siteB],
   );
-  await pool.query(
+  await sql.query(
     `INSERT INTO users (id, name, role, token) VALUES
        ($1, 'Alice (admin)', 'admin', 'admin-token'),
        ($2, 'Tom (North Plant)', 'technician', 'tech-a-token'),
@@ -21,8 +21,10 @@ export async function seedDemo(pool: Pool): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [DEMO.admin, DEMO.techA, DEMO.techB],
   );
-  await pool.query(
-    `INSERT INTO user_sites (user_id, site_id) VALUES ($1, $2), ($3, $4) ON CONFLICT DO NOTHING`,
-    [DEMO.techA, DEMO.siteA, DEMO.techB, DEMO.siteB],
-  );
+  await sql.query(`INSERT INTO user_sites (user_id, site_id) VALUES ($1, $2), ($3, $4) ON CONFLICT DO NOTHING`, [
+    DEMO.techA,
+    DEMO.siteA,
+    DEMO.techB,
+    DEMO.siteB,
+  ]);
 }

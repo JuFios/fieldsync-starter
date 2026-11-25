@@ -1,0 +1,41 @@
+import { Logger } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { SafeTypeOrmLogger } from './logger';
+import { MIGRATIONS } from './migrations';
+
+export const MIGRATIONS_TABLE = 'schema_migrations';
+
+export interface DataSourceSettings {
+  url: string;
+  poolSize: number;
+  /** Shown in pg_stat_activity, e.g. "fieldsync-server". */
+  applicationName: string;
+  /** Overrides the migration list (tests). */
+  migrations?: Array<new () => unknown>;
+}
+
+/**
+ * The one place that configures TypeORM. No entities: queries are SQL (see the README decision
+ * record); TypeORM provides the pool, transactions and migrations.
+ */
+export function createDataSource(settings: DataSourceSettings): DataSource {
+  const logger = new Logger('Database');
+  return new DataSource({
+    type: 'postgres',
+    url: settings.url,
+    applicationName: settings.applicationName,
+    poolSize: settings.poolSize,
+    // Idle pooled connections can be closed by Postgres at any time; log it instead of crashing.
+    poolErrorHandler: (err: Error) => logger.warn(`Idle database connection failed: ${err.message}`),
+    entities: [],
+    synchronize: false,
+    migrationsRun: false,
+    migrations: settings.migrations ?? MIGRATIONS,
+    migrationsTableName: MIGRATIONS_TABLE,
+    // Each migration in its own transaction, so a migration can opt out (`transaction = false`),
+    // which CREATE INDEX CONCURRENTLY requires.
+    migrationsTransactionMode: 'each',
+    logger: new SafeTypeOrmLogger(logger),
+    logging: ['error', 'warn', 'migration'],
+  });
+}

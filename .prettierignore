@@ -1,0 +1,12 @@
+# Generated or vendored
+node_modules
+dist
+.next
+coverage
+package-lock.json
+apps/web/next-env.d.ts
+test-results
+playwright-report
+blob-report
+# Markdown is formatted by hand: Prettier would re-align every table on each edit.
+*.md

@@ -1,7 +1,10 @@
 import type { EntityName, MutatorName, Row, TicketStatus } from './types';
 
 export class MutationRejected extends Error {
-  constructor(readonly code: string, message?: string) {
+  constructor(
+    readonly code: string,
+    message?: string,
+  ) {
     super(message ?? code);
     this.name = 'MutationRejected';
   }
@@ -45,12 +48,39 @@ function text(value: unknown, max: number, field: string): string {
 
 const now = () => new Date().toISOString();
 
-interface CreateArgs { siteId: string; title: string; description: string }
-interface UpdateArgs { id: string; siteId: string; title: string; description: string }
-interface StatusArgs { id: string; siteId: string; from: TicketStatus; to: TicketStatus }
-interface DeleteArgs { id: string; siteId: string }
-interface PartAddArgs { id: string; ticketId: string; siteId: string; name: string; quantity: number }
-interface PartAdjustArgs { id: string; siteId: string; delta: number }
+interface CreateArgs {
+  siteId: string;
+  title: string;
+  description: string;
+}
+interface UpdateArgs {
+  id: string;
+  siteId: string;
+  title: string;
+  description: string;
+}
+interface StatusArgs {
+  id: string;
+  siteId: string;
+  from: TicketStatus;
+  to: TicketStatus;
+}
+interface DeleteArgs {
+  id: string;
+  siteId: string;
+}
+interface PartAddArgs {
+  id: string;
+  ticketId: string;
+  siteId: string;
+  name: string;
+  quantity: number;
+}
+interface PartAdjustArgs {
+  id: string;
+  siteId: string;
+  delta: number;
+}
 
 export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.create': def<CreateArgs>({
