@@ -40,3 +40,27 @@ export function useIntegration(env: Record<string, string> = {}): IntegrationCon
   });
   return ctx;
 }
+
+/**
+ * Terminates the server's connections to the test database (never the tests' own), optionally only
+ * those in a given pg_stat_activity state, and waits until they are gone. Returns how many there were.
+ */
+export async function terminateServerConnections(ctx: IntegrationContext, state?: string): Promise<number> {
+  const { rows } = await ctx.db.query<{ pid: number }>(
+    `SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid()
+        AND application_name <> $1 AND ($2::text IS NULL OR state = $2)`,
+    [TEST_APPLICATION_NAME, state ?? null],
+  );
+  const pids = rows.map((r) => r.pid);
+  if (pids.length === 0) return 0;
+  await ctx.db.query('SELECT pg_terminate_backend(pid) FROM unnest($1::int[]) AS pid', [pids]);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const left = await ctx.db.query('SELECT 1 FROM pg_stat_activity WHERE pid = ANY($1::int[])', [pids]);
+    if (left.rowCount === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  // Give the server's sockets a moment to observe the closed connections.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return pids.length;
+}
