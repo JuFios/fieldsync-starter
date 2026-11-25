@@ -65,21 +65,20 @@ class Reader {
     return fallback;
   }
 
-  /** A required Postgres URL. The value is a secret, so problems never include it. */
+  /**
+   * A required Postgres connection string. Only the scheme is checked: the rest follows libpq
+   * rules that pg implements (Unix sockets as `?host=/dir`, defaults from PG* variables), and an
+   * unreachable database is reported when the server connects. The value is a secret, so problems
+   * never include it.
+   */
   postgresUrl(name: string): string {
     const raw = this.raw(name);
     if (raw === undefined) {
       this.problems.push(`${name} is required (a postgres:// connection string)`);
       return '';
     }
-    let url: URL | undefined;
-    try {
-      url = new URL(raw);
-    } catch {
-      url = undefined;
-    }
-    if (!url || !['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname) {
-      this.problems.push(`${name} must be a postgres:// or postgresql:// URL with a host (value not shown)`);
+    if (!/^postgres(?:ql)?:\/\//i.test(raw)) {
+      this.problems.push(`${name} must be a postgres:// or postgresql:// connection string (value not shown)`);
       return '';
     }
     return raw;

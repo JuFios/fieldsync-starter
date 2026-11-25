@@ -81,9 +81,22 @@ describe('loadConfig', () => {
     expect(() => loadConfig({})).toThrow('DATABASE_URL is required');
   });
 
-  it.each(['mysql://u:p@h/db', 'not a url', 'postgres://'])('rejects DATABASE_URL=%s without echoing it', (url) => {
-    const problems = problemsOf({ DATABASE_URL: url });
-    expect(problems).toEqual(['DATABASE_URL must be a postgres:// or postgresql:// URL with a host (value not shown)']);
+  it.each(['mysql://u:p@h/db', 'not a url', 'http://db:5432/fieldsync', 'socket:/var/run/postgresql'])(
+    'rejects DATABASE_URL=%s without echoing it',
+    (url) => {
+      const problems = problemsOf({ DATABASE_URL: url });
+      expect(problems).toEqual([
+        'DATABASE_URL must be a postgres:// or postgresql:// connection string (value not shown)',
+      ]);
+    },
+  );
+
+  it.each([
+    'postgresql://app:secret@/fieldsync?host=/var/run/postgresql',
+    'postgres:///fieldsync?host=/tmp',
+    'POSTGRES://app@db.internal/fieldsync?sslmode=require',
+  ])('accepts DATABASE_URL=%s, including Unix-socket forms that pg understands', (url) => {
+    expect(loadConfig({ DATABASE_URL: url }).databaseUrl).toBe(url);
   });
 
   it('reports every problem at once and never includes the database URL', () => {

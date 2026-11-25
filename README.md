@@ -122,7 +122,7 @@ errors.
 | Server variable | Default | Valid values | Meaning |
 |---|---|---|---|
 | `PORT` | `3001` | 1–65535 | HTTP port of the API |
-| `DATABASE_URL` | required | `postgres://` or `postgresql://` URL with a host | Database connection |
+| `DATABASE_URL` | required | A `postgres://` or `postgresql://` connection string (libpq rules, e.g. `?host=/var/run/postgresql` for a Unix socket) | Database connection |
 | `DB_POOL_MAX` | `20` | 1–1000 | Maximum connections in the server's pool |
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
