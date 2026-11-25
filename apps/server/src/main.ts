@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { createApp } from './app.factory';
-import { ConfigError, loadConfig, loadDotEnv } from './config';
+import { loadConfig, loadDotEnv } from './config';
+import { describeStartupError } from './startup-error';
 
 async function bootstrap() {
   loadDotEnv();
@@ -12,8 +13,7 @@ async function bootstrap() {
 }
 
 bootstrap().catch((err: unknown) => {
-  // A configuration problem is the operator's to fix: print the report, not a stack trace.
   // eslint-disable-next-line no-console
-  console.error(err instanceof ConfigError ? err.message : err);
+  console.error(describeStartupError(err));
   process.exit(1);
 });
