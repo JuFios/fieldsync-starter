@@ -1,4 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
+import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../../src/app.factory';
 import { loadConfig } from '../../src/config';
@@ -32,7 +33,7 @@ export async function startApp(databaseUrl: string, env: Record<string, string> 
     await app?.close();
     throw err;
   }
-  const { port } = app.getHttpServer().address() as AddressInfo;
+  const { port } = (app.getHttpServer() as Server).address() as AddressInfo;
   const running = app;
   return { app: running, url: `http://127.0.0.1:${port}`, close: () => running.close() };
 }

@@ -24,7 +24,7 @@ export class HttpTransport implements Transport {
 
   async pull(cursor: number, clientId: string, limit = 500): Promise<PullResponse> {
     const qs = new URLSearchParams({ cursor: String(cursor), clientId, limit: String(limit) });
-    const res = await this.fetchImpl(`${this.baseUrl}/sync/pull?${qs}`, {
+    const res = await this.fetchImpl(`${this.baseUrl}/sync/pull?${qs.toString()}`, {
       headers: { authorization: `Bearer ${this.token}` },
     });
     if (!res.ok) throw new Error(`pull failed: HTTP ${res.status}`);

@@ -12,12 +12,12 @@ const ADMIN = { id: 'u0', role: 'admin' as const };
  */
 function fakeDb(allSites: string[], assigned: Record<string, string[]>) {
   return {
-    query: async (sql: string, params: unknown[] = []) => {
+    query: (sql: string, params: unknown[] = []) => {
       if (/FROM user_sites WHERE user_id = \$1/.test(sql)) {
-        return { rows: (assigned[params[0] as string] ?? []).map((site_id) => ({ site_id })) };
+        return Promise.resolve({ rows: (assigned[params[0] as string] ?? []).map((site_id) => ({ site_id })) });
       }
-      if (/FROM sites/.test(sql)) return { rows: allSites.map((id) => ({ id })) };
-      throw new Error(`unexpected query: ${sql}`);
+      if (/FROM sites/.test(sql)) return Promise.resolve({ rows: allSites.map((id) => ({ id })) });
+      return Promise.reject(new Error(`unexpected query: ${sql}`));
     },
   } as never;
 }

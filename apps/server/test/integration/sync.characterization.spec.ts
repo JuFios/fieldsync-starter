@@ -19,7 +19,7 @@ describeWithDb('sync API (characterization)', () => {
     const qs = new URLSearchParams({ cursor: String(cursor) });
     if (opts.clientId) qs.set('clientId', opts.clientId);
     if (opts.limit) qs.set('limit', String(opts.limit));
-    return ctx.api.get<PullResponse>(`/sync/pull?${qs}`, user.token);
+    return ctx.api.get<PullResponse>(`/sync/pull?${qs.toString()}`, user.token);
   };
 
   const create = (id: number, siteId: string, title: string): Mutation => ({
@@ -260,7 +260,7 @@ describeWithDb('sync API (characterization)', () => {
     it('deletes entries older than the retention period and reports how many', async () => {
       const site = await ctx.fixtures.site();
       const insert = (age: string) =>
-        ctx.db.query(
+        ctx.db.query<{ version: string }>(
           `INSERT INTO change_log (site_id, entity, entity_id, op, data, created_at)
            VALUES ($1, 'ticket', $2, 'put', '{}', now() - $3::interval) RETURNING version`,
           [site, randomUUID(), age],
