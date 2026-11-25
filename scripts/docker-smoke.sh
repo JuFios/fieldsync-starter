@@ -43,7 +43,8 @@ echo "== build"
 docker compose build
 
 echo "== image checks"
-docker compose create --no-recreate server web >/dev/null
+# Force new containers: ones left by an interrupted run would still point at the old images.
+docker compose create --force-recreate server web >/dev/null
 for service in server web; do
   image=$(docker inspect --format '{{.Image}}' "$(docker compose ps --all --quiet "$service")")
   uid=$(docker run --rm --entrypoint id "$image" -u)
