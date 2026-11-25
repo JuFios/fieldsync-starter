@@ -5,9 +5,10 @@ on:
     branches: [main, solution]
   pull_request:
 
+# A newer push to a pull request supersedes the older run; runs on main and solution always finish.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
