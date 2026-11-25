@@ -1,80 +1,104 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Pool, PoolClient } from 'pg';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import type { DataSource, QueryRunner } from 'typeorm';
 import { AppConfig } from './config';
+import { createDataSource } from './database/data-source';
+import { pendingMigrations } from './database/migrator';
 import { seedDemo } from './seed';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS sites (
-  id uuid PRIMARY KEY,
-  name text NOT NULL
-);
-CREATE TABLE IF NOT EXISTS users (
-  id uuid PRIMARY KEY,
-  name text NOT NULL,
-  role text NOT NULL CHECK (role IN ('admin', 'technician')),
-  token text NOT NULL UNIQUE
-);
-CREATE TABLE IF NOT EXISTS user_sites (
-  user_id uuid NOT NULL REFERENCES users (id),
-  site_id uuid NOT NULL REFERENCES sites (id),
-  PRIMARY KEY (user_id, site_id)
-);
-CREATE TABLE IF NOT EXISTS entities (
-  entity text NOT NULL,
-  id uuid NOT NULL,
-  site_id uuid NOT NULL,
-  data jsonb,
-  deleted boolean NOT NULL DEFAULT false,
-  version bigint NOT NULL,
-  PRIMARY KEY (entity, id)
-);
-CREATE INDEX IF NOT EXISTS entities_site_idx ON entities (site_id);
-CREATE TABLE IF NOT EXISTS change_log (
-  version bigserial PRIMARY KEY,
-  site_id uuid NOT NULL,
-  entity text NOT NULL,
-  entity_id uuid NOT NULL,
-  op text NOT NULL,
-  data jsonb,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS change_log_created_idx ON change_log (created_at);
-CREATE TABLE IF NOT EXISTS clients (
-  client_id text PRIMARY KEY,
-  user_id uuid NOT NULL,
-  last_mutation_id bigint NOT NULL DEFAULT 0
-);
-`;
+export interface SqlResult<T> {
+  rows: T[];
+  /** Rows returned, or rows changed by INSERT/UPDATE/DELETE. */
+  rowCount: number;
+}
+
+/**
+ * Runs one SQL statement with positional parameters. Implemented by {@link Db} (a pooled
+ * connection per statement) and by the transaction handle {@link Db.tx} passes to its callback.
+ * The result has the same shape for every statement type.
+ */
+export interface Sql {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<SqlResult<T>>;
+}
+
+async function run<T>(runner: QueryRunner, sql: string, params?: unknown[]): Promise<SqlResult<T>> {
+  // The structured result avoids TypeORM's raw shape, which is [rows, count] for UPDATE/DELETE.
+  const result = await runner.query(sql, params, true);
+  const rows = (result.records ?? []) as T[];
+  return { rows, rowCount: result.affected ?? rows.length };
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 @Injectable()
-export class Db implements OnModuleInit, OnModuleDestroy {
-  readonly pool: Pool;
+export class Db implements Sql, OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(Db.name);
+  readonly dataSource: DataSource;
 
   constructor(private readonly config: AppConfig) {
-    this.pool = new Pool({ connectionString: config.databaseUrl, max: config.dbPoolMax });
+    this.dataSource = createDataSource({
+      url: config.databaseUrl,
+      poolSize: config.dbPoolMax,
+      applicationName: 'fieldsync-server',
+    });
   }
 
   async onModuleInit(): Promise<void> {
-    await this.pool.query(SCHEMA);
-    if (this.config.seedDemo) await seedDemo(this.pool);
+    await this.dataSource.initialize();
+    const pending = await pendingMigrations(this.dataSource);
+    if (pending.length > 0) {
+      throw new Error(
+        `The database schema is not up to date (pending migrations: ${pending.join(', ')}). ` +
+          `Run "npm run migrate" before starting the server.`,
+      );
+    }
+    if (this.config.seedDemo) await seedDemo(this);
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.pool.end();
+    if (this.dataSource.isInitialized) await this.dataSource.destroy();
   }
 
-  async tx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+  async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<SqlResult<T>> {
+    const runner = this.dataSource.createQueryRunner();
     try {
-      await client.query('BEGIN');
-      const result = await fn(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
+      return await run<T>(runner, sql, params);
     } finally {
-      client.release();
+      await runner.release();
+    }
+  }
+
+  /**
+   * Runs `fn` in a transaction on one connection: commits when it resolves, rolls back when it
+   * throws and rethrows its error. If the rollback itself fails (typically because the connection
+   * is gone), that failure is logged and the original error still reaches the caller. Connections
+   * that broke are not returned to the pool (TypeORM and pg-pool discard them).
+   */
+  async tx<T>(fn: (sql: Sql) => Promise<T>): Promise<T> {
+    const runner = this.dataSource.createQueryRunner();
+    try {
+      await runner.connect();
+      await runner.startTransaction();
+      try {
+        const result = await fn({ query: (sql, params) => run(runner, sql, params) });
+        await runner.commitTransaction();
+        return result;
+      } catch (err) {
+        await this.rollbackAfter(runner, err);
+        throw err;
+      }
+    } finally {
+      await runner.release();
+    }
+  }
+
+  private async rollbackAfter(runner: QueryRunner, cause: unknown): Promise<void> {
+    if (runner.isReleased || !runner.isTransactionActive) return;
+    try {
+      await runner.rollbackTransaction();
+    } catch (err) {
+      this.logger.warn(`Rollback failed after "${messageOf(cause)}": ${messageOf(err)}`);
     }
   }
 }

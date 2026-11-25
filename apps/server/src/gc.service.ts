@@ -24,9 +24,9 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
   }
 
   async collect(): Promise<number> {
-    const res = await this.db.pool.query(`DELETE FROM change_log WHERE created_at < now() - make_interval(secs => $1)`, [
+    const res = await this.db.query(`DELETE FROM change_log WHERE created_at < now() - make_interval(secs => $1)`, [
       this.config.changelogRetentionSeconds,
     ]);
-    return res.rowCount ?? 0;
+    return res.rowCount;
   }
 }

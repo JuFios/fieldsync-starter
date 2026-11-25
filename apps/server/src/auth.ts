@@ -21,7 +21,7 @@ export class AuthGuard implements CanActivate {
       token = req.query.token;
     }
     if (!token) throw new UnauthorizedException();
-    const { rows } = await this.db.pool.query<AuthUser>(`SELECT id, role FROM users WHERE token = $1`, [token]);
+    const { rows } = await this.db.query<AuthUser>(`SELECT id, role FROM users WHERE token = $1`, [token]);
     if (rows.length === 0) throw new UnauthorizedException();
     req.user = rows[0];
     return true;

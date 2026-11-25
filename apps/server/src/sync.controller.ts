@@ -43,8 +43,8 @@ export class SyncController {
 
   @Get('me')
   async me(@Req() req: AuthedRequest) {
-    const siteIds = await accessibleSites(this.db.pool, req.user);
-    const { rows } = await this.db.pool.query(`SELECT id, name FROM sites WHERE id = ANY($1) ORDER BY name`, [siteIds]);
+    const siteIds = await accessibleSites(this.db, req.user);
+    const { rows } = await this.db.query(`SELECT id, name FROM sites WHERE id = ANY($1) ORDER BY name`, [siteIds]);
     return { id: req.user.id, role: req.user.role, sites: rows };
   }
 
@@ -66,7 +66,7 @@ export class SyncController {
 
   @Get('sync/stream')
   async stream(@Req() req: AuthedRequest, @Res() res: Response) {
-    const sites = await accessibleSites(this.db.pool, req.user);
+    const sites = await accessibleSites(this.db, req.user);
     this.streams.add(sites, res);
   }
 }

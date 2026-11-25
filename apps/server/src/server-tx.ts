@@ -1,7 +1,7 @@
 import { MUTATORS, MutationRejected, type EntityName, type Mutation, type MutatorTx, type Row } from '@fieldsync/sync-core';
-import type { PoolClient } from 'pg';
 import { authorize } from './access';
 import type { AuthUser } from './auth';
+import type { Sql } from './db';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -52,7 +52,7 @@ function assertUuids(args: Record<string, unknown>): void {
 }
 
 /** Applies one mutation inside the caller's transaction; returns the site ids it touched. */
-export async function applyMutation(c: PoolClient, user: AuthUser, m: Mutation): Promise<string[]> {
+export async function applyMutation(c: Sql, user: AuthUser, m: Mutation): Promise<string[]> {
   const def = MUTATORS[m.name];
   if (!def) throw new MutationRejected('UNKNOWN_MUTATOR', `Unknown mutator ${String(m.name)}`);
   assertUuids(m.args);
