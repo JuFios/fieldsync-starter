@@ -7,8 +7,8 @@ import { runMigrations } from './migrator';
 async function main(): Promise<void> {
   loadDotEnv();
   const config = loadConfig();
-  // One connection holds the migration lock, another runs the migrations.
-  const ds = createDataSource({ url: config.databaseUrl, poolSize: 2, applicationName: 'fieldsync-migrate' });
+  // Migrations run one after another on one connection; the lock has a connection of its own.
+  const ds = createDataSource({ url: config.databaseUrl, poolSize: 1, applicationName: 'fieldsync-migrate' });
   await ds.initialize();
   try {
     const applied = await runMigrations(ds);

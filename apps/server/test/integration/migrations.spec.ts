@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from 'pg';
@@ -19,6 +20,17 @@ class SlowTable9999999999998 implements MigrationInterface {
   }
   async down(q: QueryRunner): Promise<void> {
     await q.query('DROP TABLE slow_marker');
+  }
+}
+
+class LongTable9999999999997 implements MigrationInterface {
+  name = 'LongTable9999999999997';
+  async up(q: QueryRunner): Promise<void> {
+    await q.query('SELECT pg_sleep(0.8)');
+    await q.query('CREATE TABLE long_marker (id int)');
+  }
+  async down(q: QueryRunner): Promise<void> {
+    await q.query('DROP TABLE long_marker');
   }
 }
 
@@ -182,9 +194,20 @@ describeWithDb('database migrations', () => {
     expect(rows).toEqual([{ name: INITIAL }, { name: 'SlowTable9999999999998' }]);
   });
 
+  /** Warnings the migrator logged about its lock while `fn` ran. */
+  async function lockWarnings(fn: () => Promise<unknown>): Promise<string[]> {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      await fn();
+      return warn.mock.calls.map((args) => String(args[0])).filter((m) => m.includes('migration lock'));
+    } finally {
+      warn.mockRestore();
+    }
+  }
+
   it('gives up with a clear message when another run holds the lock for too long', async () => {
     const db = await emptyDatabase();
-    // One connection, so the check below runs on the connection that waited for the lock.
+    await sql(db, (c) => c.query(`ALTER DATABASE ${db.name} SET lock_timeout = '7s'`));
     const ds = await dataSource(db, undefined, 1);
     await sql(db, async (holder) => {
       await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
@@ -193,29 +216,48 @@ describeWithDb('database migrations', () => {
       );
     });
     expect(await pendingMigrations(ds)).toEqual([INITIAL]);
-    // The timeout applies to taking the lock only; the pooled connection is left with no timeout set.
-    expect(await ds.query(`SHOW lock_timeout`)).toEqual([{ lock_timeout: '0' }]);
+    // The lock's own timeout never leaks into the application's connections.
+    expect(await ds.query(`SHOW lock_timeout`)).toEqual([{ lock_timeout: '7s' }]);
   });
 
-  it('reports the migrations as applied when the lock connection drops while they run', async () => {
+  it('keeps the lock through migrations that outlast the idle session timeout', async () => {
+    const db = await emptyDatabase();
+    await sql(db, (c) => c.query(`ALTER DATABASE ${db.name} SET idle_session_timeout = '300ms'`));
+    const ds = await dataSource(db, [...MIGRATIONS, LongTable9999999999997]);
+    let applied: string[] = [];
+
+    const warnings = await lockWarnings(async () => {
+      applied = await runMigrations(ds);
+    });
+
+    expect(applied).toEqual([INITIAL, 'LongTable9999999999997']);
+    expect(warnings).toEqual([]);
+  });
+
+  it('reports the migrations as applied, and the lost lock, when the lock connection drops while they run', async () => {
     const db = await emptyDatabase();
     const ds = await dataSource(db, [...MIGRATIONS, SlowTable9999999999998]);
-    const run = runMigrations(ds);
-    await sql(db, async (c) => {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const { rows } = await c.query<{ pid: number }>(
-          `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND database =
+    let run: Promise<string[]> = Promise.resolve([]);
+    const warnings = await lockWarnings(async () => {
+      run = runMigrations(ds);
+      await sql(db, async (c) => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const { rows } = await c.query<{ pid: number }>(
+            `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND database =
              (SELECT oid FROM pg_database WHERE datname = current_database())`,
-        );
-        if (rows.length) {
-          await c.query('SELECT pg_terminate_backend($1)', [rows[0].pid]);
-          return;
+          );
+          if (rows.length) {
+            await c.query('SELECT pg_terminate_backend($1)', [rows[0].pid]);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
         }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      throw new Error('the migration lock was never taken');
+        throw new Error('the migration lock was never taken');
+      });
+      await run;
     });
 
     await expect(run).resolves.toEqual([INITIAL, 'SlowTable9999999999998']);
+    expect(warnings).toEqual([expect.stringContaining('The migration lock was lost during the run')]);
   });
 });

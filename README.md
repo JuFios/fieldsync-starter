@@ -179,10 +179,11 @@ handful of trivial reads.
 - `Db.tx`: commits or rolls back, logs a failed rollback instead of throwing it so the original
   error reaches the caller (TypeORM's `rollbackTransaction` throws), and always releases.
 - `npm run migrate` holds a Postgres advisory lock: TypeORM takes no lock, so two processes would
-  both apply the same pending migrations. A run waits at most 10 minutes for another one and then
-  fails with a message naming the lock, so a stuck run cannot hang later deploys silently; failing
-  to release the lock never replaces the outcome of the migrations (Postgres releases it with the
-  connection).
+  both apply the same pending migrations. The lock has a connection of its own, outside the pool,
+  with idle-session timeouts switched off (it is idle while the migrations run). A run waits at most
+  10 minutes for another one and then fails with a message naming the lock, so a stuck run cannot
+  hang later deploys silently. If the lock connection is lost anyway, the run still reports what it
+  applied and warns that another run may have run at the same time.
 - `migrationsTransactionMode: 'each'`: in the default `all` mode TypeORM refuses any migration
   that sets `transaction = false`.
 - A TypeORM logger that never writes query parameters (they carry tokens and user data).
