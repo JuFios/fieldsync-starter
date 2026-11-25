@@ -3,16 +3,17 @@
 #
 # For each finding it breaks the behaviour the starter test is named after (a "sabotage" edit to
 # the source), then runs
-#   - the starter test, from the `main` branch, against the sabotaged starter code,
+#   - the starter test, from the original code (the main branch), against the sabotaged starter code,
 #   - the replacement test, from the current commit, against the same sabotage, and
 #   - the replacement test against the intact code (a control: its failure must come from the
 #     sabotage, not from a broken harness).
-# A vacuous starter test still passes; its replacement fails, and passes on intact code. Nothing is changed in this checkout:
-# both runs use temporary git worktrees that are removed on exit.
+# A vacuous starter test still passes; its replacement fails, and passes on intact code. Nothing
+# is changed in this checkout: both runs use temporary git worktrees that are removed on exit.
 #
 # Needs: installed dependencies (npm ci), built packages (npm run build:core && npm run
 # build:test-kit) and DATABASE_URL for the findings whose replacements are Postgres tests.
 # Usage: DATABASE_URL=postgres://... scripts/audit-starter-tests.sh
+#        (STARTER_REF overrides where the original code is taken from; default main, then origin/main)
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
@@ -34,7 +35,20 @@ checkout() {
   ln -s "$repo/node_modules" "$1/node_modules"
   if [ -d "$repo/apps/server/node_modules" ]; then ln -s "$repo/apps/server/node_modules" "$1/apps/server/node_modules"; fi
 }
-checkout "$starter" main
+starter_ref=${STARTER_REF:-}
+if [ -z "$starter_ref" ]; then
+  for ref in main origin/main; do
+    if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+      starter_ref=$ref
+      break
+    fi
+  done
+fi
+if [ -z "$starter_ref" ]; then
+  echo "audit: the original code was not found (no main or origin/main); set STARTER_REF" >&2
+  exit 1
+fi
+checkout "$starter" "$starter_ref"
 checkout "$current" HEAD
 
 # Replaces a fixed string in a file of a worktree; fails if it is not there exactly once.
