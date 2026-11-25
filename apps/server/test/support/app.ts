@@ -34,7 +34,8 @@ export async function startApp(databaseUrl: string, env: Record<string, string> 
 
   let app: INestApplication | undefined;
   try {
-    app = await createApp({ logger: false });
+    // abortOnError: false makes Nest reject instead of aborting the Jest worker on a bootstrap error.
+    app = await createApp({ logger: false, abortOnError: false });
     await app.listen(0, '127.0.0.1');
   } catch (err) {
     await app?.close();
