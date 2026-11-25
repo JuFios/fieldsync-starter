@@ -35,6 +35,24 @@ class RejectingTransport implements Transport {
   }
 }
 
+/** A transport whose requests never complete unless the caller aborts them. */
+class HangingTransport implements Transport {
+  pushCalls = 0;
+
+  push(_req: PushRequest, init?: { signal?: AbortSignal }): Promise<PushResponse> {
+    this.pushCalls += 1;
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  }
+
+  pull(_cursor: number, _clientId: string, _limit?: number, init?: { signal?: AbortSignal }): Promise<PullResponse> {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  }
+}
+
 /**
  * In-memory stand-in for the server's push contract: per client, a mutation with an id at or below
  * the last applied id is a duplicate; the next id is applied.
@@ -103,6 +121,26 @@ describe('SyncClient', () => {
       const [first, second] = transport.pushedIds;
       expect(first).toEqual([1]);
       expect(second).toEqual([2]);
+    },
+  );
+
+  knownDefect(
+    { id: 'F-13', owner: 'PR5', reason: 'requests have no timeout, so a hung request blocks syncing forever' },
+    'gives up on a request that never answers and retries',
+    async () => {
+      jest.useFakeTimers();
+      const transport = new HangingTransport();
+      const client = makeClient(transport);
+      try {
+        client.mutate('ticket.create', { siteId: SITE, title: 'Stuck', description: '' });
+        expect(client.status).toBe('syncing');
+        await jest.advanceTimersByTimeAsync(5 * 60_000);
+        expect(client.status).not.toBe('syncing');
+        expect(transport.pushCalls).toBeGreaterThan(1);
+      } finally {
+        client.dispose();
+        jest.useRealTimers();
+      }
     },
   );
 
