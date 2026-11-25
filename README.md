@@ -73,7 +73,8 @@ changes that add migrations.
 
 | Command | What it runs | Needs |
 |---|---|---|
-| `npm run lint` | ESLint for all packages, the server, e2e and (via `next lint`) the web app | |
+| `npm run lint` | ESLint with type information for all packages, the server, e2e and (via `next lint`) the web app; warnings fail | |
+| `npm run format:check` | Prettier check (`npm run format` applies it); Markdown is formatted by hand | |
 | `npm run typecheck` | `tsc --noEmit` for sync-core, test-kit, server, web and e2e | |
 | `npm run test:unit` | Unit tests of test-kit, sync-core and the server | |
 | `npm run test:integration` | Server tests on a real Postgres | `DATABASE_URL` |
@@ -448,12 +449,14 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 ### F-18: CI was not reproducible and did not typecheck the web app (other)
 
 - **What.** There was no lockfile and CI ran `npm install`, so each run could resolve different
-  dependency versions; `npm run typecheck` skipped `apps/web`.
+  dependency versions; `npm run typecheck` skipped `apps/web`; the only custom lint rule was a
+  warning, and warnings never failed CI.
 - **Reproduce.** `npm ci` fails on the original repository (no lockfile).
-- **Fix.** The lockfile is committed and CI runs `npm ci`; typecheck covers every package; CI is
-  split into lint/typecheck/unit/build, integration (Postgres 16, `REQUIRE_DB=1`), e2e and docker
-  jobs.
-- **Commits.** `6472816`, `c07f58e`.
+- **Fix.** The lockfile is committed and CI runs `npm ci`; typecheck covers every package; lint uses
+  type information (unhandled promises, unsafe `any`, exhaustive switches) and fails on warnings;
+  formatting is checked with Prettier; CI is split into lint/format/typecheck/unit/build,
+  integration (Postgres 16, `REQUIRE_DB=1`), e2e and docker jobs.
+- **Commits.** `6472816`, `c07f58e`, `b67ea1e`, `7024909`.
 
 ## Changes to starter tests
 
@@ -468,6 +471,9 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
 | `apps/server/test/sync.integration.spec.ts` | Removed; replaced by `test/integration/sync.characterization.spec.ts` | F-05 |
 | Jest configuration | Server tests resolve the workspace packages from source; integration tests are a separate project with global setup | Tests could pass against a stale `sync-core` build; integration tests need a database per file |
+
+All files, the starter's included, were formatted with Prettier in a separate formatting-only
+commit (`88d20f0`), listed in `.git-blame-ignore-revs` so that `git blame` skips it.
 
 Evidence, from `scripts/audit-starter-tests.sh` (each starter test runs against code that breaks
 the behaviour its name claims):
