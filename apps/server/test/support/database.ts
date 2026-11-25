@@ -86,10 +86,14 @@ export interface TestDatabase {
   drop(): Promise<void>;
 }
 
-/** Creates a database for one test file, cloned from the run's template. */
-export async function createTestDatabase(): Promise<TestDatabase> {
-  const name = newDatabaseName('file');
-  await withMaintenanceClient((c) => c.query(`CREATE DATABASE ${quoteIdent(name)} TEMPLATE ${quoteIdent(templateDatabase())}`));
+/**
+ * Creates a database for one test file, cloned from the run's migrated template, or an empty one
+ * (`{ empty: true }`) for tests of the migrations themselves.
+ */
+export async function createTestDatabase(opts: { empty?: boolean } = {}): Promise<TestDatabase> {
+  const name = newDatabaseName(opts.empty ? 'empty' : 'file');
+  const template = opts.empty ? '' : ` TEMPLATE ${quoteIdent(templateDatabase())}`;
+  await withMaintenanceClient((c) => c.query(`CREATE DATABASE ${quoteIdent(name)}${template}`));
   return {
     name,
     url: urlFor(name),

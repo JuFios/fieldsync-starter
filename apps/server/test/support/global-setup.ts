@@ -1,3 +1,5 @@
+import { createDataSource } from '../../src/database/data-source';
+import { runMigrations } from '../../src/database/migrator';
 import {
   dropDatabase,
   hasDatabase,
@@ -6,6 +8,8 @@ import {
   runStartedAt,
   setTemplateDatabase,
   startRun,
+  templateDatabase,
+  urlFor,
   withMaintenanceClient,
 } from './database';
 
@@ -34,4 +38,16 @@ export default async function globalSetup(): Promise<void> {
     await client.query(`CREATE DATABASE ${quoteIdent(template)}`);
     setTemplateDatabase(template);
   });
+  // Migrate the template once; every test file clones it. No connection may stay open to it.
+  const ds = createDataSource({
+    url: urlFor(templateDatabase()),
+    poolSize: 2,
+    applicationName: 'fieldsync-test-setup',
+  });
+  await ds.initialize();
+  try {
+    await runMigrations(ds);
+  } finally {
+    await ds.destroy();
+  }
 }
