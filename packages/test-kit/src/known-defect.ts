@@ -9,6 +9,10 @@
  * - any other error            -> the test fails (a broken harness must not look like a reproduced defect);
  * - the body passes            -> the test fails with "defect F-NN appears fixed - flip it".
  *
+ * Only the assertion that shows the defect may use `expect`. Every other check in the body (setup
+ * steps, the state the scenario relies on) must use {@link precondition}: a failing `expect` there
+ * would be taken for the defect and hide a regression.
+ *
  * The defect id, owner and reason are encoded in the test title so that the known-defect reporter
  * can list them without sharing state between Jest workers.
  */
@@ -34,6 +38,19 @@ export class KnownDefectFixedError extends Error {
     );
     this.name = 'KnownDefectFixedError';
   }
+}
+
+/** A known-defect scenario could not be set up; never counts as the defect being reproduced. */
+export class PreconditionError extends Error {
+  constructor(message: string) {
+    super(`Precondition failed: ${message}`);
+    this.name = 'PreconditionError';
+  }
+}
+
+/** Checks a step a known-defect body relies on, without it counting as the expected failure. */
+export function precondition(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new PreconditionError(message);
 }
 
 /** True for failures raised by `expect(...)` (Jest) and by `node:assert`. */

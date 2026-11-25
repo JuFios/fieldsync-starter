@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { PullResponse } from '@fieldsync/sync-core';
-import { knownDefect } from '@fieldsync/test-kit';
+import { knownDefect, precondition } from '@fieldsync/test-kit';
 import type { TestUser } from '../support/fixtures';
 import { describeWithDb, useIntegration } from '../support/integration';
 
@@ -17,7 +17,7 @@ describeWithDb('pull returns only accessible sites', () => {
       },
       user.token,
     );
-    expect(res.status).toBe(201);
+    precondition(res.status === 201, `creating "${title}" answered ${res.status}`);
   }
 
   const pull = (user: TestUser, cursor: number) =>
@@ -52,10 +52,11 @@ describeWithDb('pull returns only accessible sites', () => {
       const { north, south, techNorth, techSouth } = await twoSites();
       await createTicket(techNorth, north, 'North first');
       const initial = await pull(techNorth, 0);
+      precondition(initial.status === 200, `initial pull answered ${initial.status}`);
       await createTicket(techSouth, south, 'South later');
 
       const next = await pull(techNorth, initial.body.nextCursor);
-      expect(next.status).toBe(200);
+      precondition(next.status === 200, `incremental pull answered ${next.status}`);
       expect(next.body.changes.filter((c) => c.siteId !== north)).toEqual([]);
     },
   );

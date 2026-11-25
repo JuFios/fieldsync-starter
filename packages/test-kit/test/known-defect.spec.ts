@@ -1,9 +1,11 @@
 import { strict as assert } from 'node:assert';
 import {
   KnownDefectFixedError,
+  PreconditionError,
   isAssertionError,
   knownDefectTitle,
   parseKnownDefectTitle,
+  precondition,
   runKnownDefect,
   validateDefect,
   type KnownDefect,
@@ -40,6 +42,15 @@ describe('runKnownDefect', () => {
         throw 'not an error';
       }),
     ).rejects.toBe('not an error');
+  });
+
+  it('fails when a precondition of the scenario does not hold, even before the defect assertion', async () => {
+    const run = runKnownDefect(DEFECT, () => {
+      precondition(false, 'push answered 500 while creating the fixture');
+      expect(1).toBe(2);
+    });
+    await expect(run).rejects.toBeInstanceOf(PreconditionError);
+    await expect(run).rejects.toThrow('Precondition failed: push answered 500 while creating the fixture');
   });
 
   it('fails with "flip it" when the body passes', async () => {

@@ -1,4 +1,4 @@
-import { knownDefect } from '@fieldsync/test-kit';
+import { knownDefect, precondition } from '@fieldsync/test-kit';
 import { MemoryStorage, SyncClient, type SyncClientOptions, type Transport } from '../src';
 import type { PullResponse, PushRequest, PushResponse } from '../src';
 
@@ -138,7 +138,7 @@ describe('SyncClient', () => {
       client.mutate('ticket.create', { siteId: SITE, title: 'next', description: '' });
       await client.sync();
       const [first, second] = transport.pushedIds;
-      expect(first).toEqual([1]);
+      precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
       expect(second).toEqual([2]);
     },
   );
@@ -151,7 +151,7 @@ describe('SyncClient', () => {
       const transport = new HangingTransport();
       const client = makeClient(transport);
       client.mutate('ticket.create', { siteId: SITE, title: 'Stuck', description: '' });
-      expect(client.status).toBe('syncing');
+      precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
       await jest.advanceTimersByTimeAsync(5 * 60_000);
       expect(client.status).not.toBe('syncing');
       expect(transport.pushCalls).toBeGreaterThan(1);
