@@ -35,6 +35,32 @@ class RejectingTransport implements Transport {
   }
 }
 
+/**
+ * In-memory stand-in for the server's push contract: per client, a mutation with an id at or below
+ * the last applied id is a duplicate; the next id is applied.
+ */
+class FakeServer {
+  readonly applied: Array<{ clientId: string; id: number; title: unknown }> = [];
+  private readonly last = new Map<string, number>();
+
+  transport(): Transport {
+    return {
+      push: (req) => {
+        const results = req.mutations.map((m) => {
+          const last = this.last.get(req.clientId) ?? 0;
+          if (m.id <= last) return { id: m.id, status: 'duplicate' as const };
+          this.last.set(req.clientId, m.id);
+          this.applied.push({ clientId: req.clientId, id: m.id, title: m.args.title });
+          return { id: m.id, status: 'applied' as const };
+        });
+        return Promise.resolve({ results, lastMutationId: this.last.get(req.clientId) ?? 0 });
+      },
+      pull: (_cursor, clientId) =>
+        Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: this.last.get(clientId) ?? 0 }),
+    };
+  }
+}
+
 function makeClient(transport: Transport = new OfflineTransport()): SyncClient {
   return new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
 }
@@ -80,6 +106,41 @@ describe('SyncClient', () => {
     },
   );
 
-  it.todo('keeps unsynced mutations across a reload');
-  it.todo('does not lose mutations when two tabs share one clientId');
+  knownDefect(
+    { id: 'F-10', owner: 'PR5', reason: 'the pending queue is never persisted' },
+    'keeps unsynced mutations across a reload',
+    async () => {
+      const storage = new MemoryStorage();
+      const before = new SyncClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+      before.mutate('ticket.create', { siteId: SITE, title: 'Written offline', description: '' });
+      await before.sync();
+      before.dispose();
+
+      const after = new SyncClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+      try {
+        expect(after.pendingCount).toBe(1);
+        expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
+      } finally {
+        after.dispose();
+      }
+    },
+  );
+
+  knownDefect(
+    { id: 'F-11', owner: 'PR5', reason: 'tabs sharing one clientId allocate the same mutation ids' },
+    'does not lose mutations when two tabs share one clientId',
+    async () => {
+      const server = new FakeServer();
+      const storage = new MemoryStorage();
+      const tabA = new SyncClient({ clientId: 'c1', transport: server.transport(), storage });
+      const tabB = new SyncClient({ clientId: 'c1', transport: server.transport(), storage });
+      tabA.mutate('ticket.create', { siteId: SITE, title: 'From tab A', description: '' });
+      await tabA.sync();
+      tabB.mutate('ticket.create', { siteId: SITE, title: 'From tab B', description: '' });
+      await tabB.sync();
+      tabA.dispose();
+      tabB.dispose();
+      expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
+    },
+  );
 });
