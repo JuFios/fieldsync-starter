@@ -4,8 +4,8 @@ import { resolve } from 'node:path';
 /**
  * End-to-end tests drive the production builds (`npm run build` first) in Chromium against a
  * dedicated database. DATABASE_URL names a maintenance database on the Postgres to use; the e2e
- * database (E2E_DATABASE, default fieldsync_e2e) is recreated and migrated on every run and kept
- * afterwards for inspection.
+ * database (E2E_DATABASE, default fieldsync_e2e; the name must end with _e2e) is recreated and
+ * migrated on every run and kept afterwards for inspection.
  */
 const root = resolve(__dirname, '..');
 const maintenanceUrl = process.env.DATABASE_URL;
@@ -47,7 +47,7 @@ export default defineConfig({
       env: {
         DATABASE_URL: e2eUrl.toString(),
         E2E_MAINTENANCE_URL: maintenanceUrl,
-        PORT: apiUrl.port || '80',
+        PORT: apiUrl.port || (apiUrl.protocol === 'https:' ? '443' : '80'),
         SEED_DEMO: 'false',
       },
       reuseExistingServer: false,

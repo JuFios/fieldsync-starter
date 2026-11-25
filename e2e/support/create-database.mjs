@@ -12,8 +12,9 @@ if (!maintenanceUrl || !targetUrl) {
   process.exit(1);
 }
 const name = decodeURIComponent(new URL(targetUrl).pathname.slice(1));
-if (!/^[a-z0-9_]+$/.test(name)) {
-  console.error(`create-database: unexpected database name "${name}"`);
+if (!/^[a-z0-9_]+_e2e$/.test(name)) {
+  // The database is dropped and recreated: never do that to one that is not meant for e2e.
+  console.error(`create-database: refusing to recreate "${name}"; the e2e database name must end with _e2e`);
   process.exit(1);
 }
 
