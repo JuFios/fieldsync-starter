@@ -1,32 +1,58 @@
+# Local stack: postgres -> migrate (one-shot) -> server -> web.
+# Settings come from the environment or a root .env file (see .env.example).
+x-server-build: &server-build
+  context: .
+  dockerfile: apps/server/Dockerfile
+
 services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: fieldsync
-      POSTGRES_PASSWORD: fieldsync
-      POSTGRES_DB: fieldsync
-    ports: ["5432:5432"]
+      POSTGRES_USER: ${POSTGRES_USER:-fieldsync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fieldsync}
+      POSTGRES_DB: ${POSTGRES_DB:-fieldsync}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes: [postgres-data:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fieldsync"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 3s
+      timeout: 3s
       retries: 20
-  server:
-    build:
-      context: .
-      dockerfile: apps/server/Dockerfile
+
+  migrate:
+    # Same Dockerfile as the server; BuildKit shares the layers, so this costs no second build.
+    build: *server-build
+    command: ["node", "apps/server/dist/database/migrate.js"]
     environment:
-      PORT: 3001
-      DATABASE_URL: postgres://fieldsync:fieldsync@postgres:5432/fieldsync
-      SEED_DEMO: "true"
+      DATABASE_URL: postgres://${POSTGRES_USER:-fieldsync}:${POSTGRES_PASSWORD:-fieldsync}@postgres:5432/${POSTGRES_DB:-fieldsync}
     depends_on:
       postgres:
         condition: service_healthy
-    ports: ["3001:3001"]
+    restart: "no"
+
+  server:
+    build: *server-build
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://${POSTGRES_USER:-fieldsync}:${POSTGRES_PASSWORD:-fieldsync}@postgres:5432/${POSTGRES_DB:-fieldsync}
+      SEED_DEMO: ${SEED_DEMO:-true}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports: ["${SERVER_PORT:-3001}:3001"]
+    restart: unless-stopped
+
   web:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:3001
-    depends_on: [server]
-    ports: ["3000:3000"]
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    depends_on:
+      server:
+        condition: service_healthy
+    ports: ["${WEB_PORT:-3000}:3000"]
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
