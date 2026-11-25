@@ -6,18 +6,20 @@
   },
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "e2e"
   ],
   "scripts": {
     "build:core": "npm run build -w @fieldsync/sync-core",
     "build:test-kit": "npm run build -w @fieldsync/test-kit",
     "build": "npm run build:core && npm run build -w @fieldsync/server && npm run build -w @fieldsync/web",
     "migrate": "npm run migrate -w @fieldsync/server",
-    "lint": "eslint \"packages/*/{src,test}/**/*.ts\" \"apps/server/{src,test}/**/*.ts\" && npm run lint -w @fieldsync/web",
-    "typecheck": "npm run build:core && tsc --noEmit -p packages/sync-core/tsconfig.json && tsc --noEmit -p packages/test-kit/tsconfig.json && tsc --noEmit -p apps/server/tsconfig.json",
+    "lint": "eslint \"packages/*/{src,test}/**/*.ts\" \"apps/server/{src,test}/**/*.ts\" \"e2e/**/*.{ts,mjs}\" && npm run lint -w @fieldsync/web",
+    "typecheck": "npm run build:core && tsc --noEmit -p packages/sync-core/tsconfig.json && tsc --noEmit -p packages/test-kit/tsconfig.json && tsc --noEmit -p apps/server/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "npm run build:core && npm run build:test-kit && npm test -w @fieldsync/test-kit && npm test -w @fieldsync/sync-core && npm test -w @fieldsync/server",
     "test:unit": "npm run build:core && npm run build:test-kit && npm test -w @fieldsync/test-kit && npm test -w @fieldsync/sync-core && npm run test:unit -w @fieldsync/server",
-    "test:integration": "npm run build:test-kit && npm run test:integration -w @fieldsync/server"
+    "test:integration": "npm run build:test-kit && npm run test:integration -w @fieldsync/server",
+    "test:e2e": "npm test -w @fieldsync/e2e"
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",
