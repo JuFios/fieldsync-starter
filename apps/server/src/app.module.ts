@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { DynamicModule, Module } from '@nestjs/common';
 import { AuthGuard } from './auth';
+import { AppConfig } from './config';
 import { Db } from './db';
 import { GcService } from './gc.service';
 import { HealthController } from './health.controller';
@@ -12,4 +13,8 @@ import { SyncController } from './sync.controller';
   controllers: [SyncController, HealthController],
   providers: [Db, AuthGuard, PushService, PullService, StreamService, GcService],
 })
-export class AppModule {}
+export class AppModule {
+  static forRoot(config: AppConfig): DynamicModule {
+    return { module: AppModule, providers: [{ provide: AppConfig, useValue: config }] };
+  }
+}

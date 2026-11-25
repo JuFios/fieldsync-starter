@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Pool, PoolClient } from 'pg';
+import { AppConfig } from './config';
 import { seedDemo } from './seed';
 
 const SCHEMA = `
@@ -47,11 +48,15 @@ CREATE TABLE IF NOT EXISTS clients (
 
 @Injectable()
 export class Db implements OnModuleInit, OnModuleDestroy {
-  readonly pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 20 });
+  readonly pool: Pool;
+
+  constructor(private readonly config: AppConfig) {
+    this.pool = new Pool({ connectionString: config.databaseUrl, max: config.dbPoolMax });
+  }
 
   async onModuleInit(): Promise<void> {
     await this.pool.query(SCHEMA);
-    if (process.env.SEED_DEMO === 'true') await seedDemo(this.pool);
+    if (this.config.seedDemo) await seedDemo(this.pool);
   }
 
   async onModuleDestroy(): Promise<void> {
