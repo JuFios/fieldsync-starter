@@ -1,7 +1,13 @@
 {
   "name": "fieldsync",
   "private": true,
-  "workspaces": ["packages/*", "apps/*"],
+  "engines": {
+    "node": ">=20.12 <21"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "build:core": "npm run build -w @fieldsync/sync-core",
     "build": "npm run build:core && npm run build -w @fieldsync/server && npm run build -w @fieldsync/web",
