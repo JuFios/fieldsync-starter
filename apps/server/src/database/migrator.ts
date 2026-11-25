@@ -14,6 +14,9 @@ export const MIGRATION_LOCK_KEY = 7_302_118_440;
  */
 export const MIGRATION_LOCK_TIMEOUT_MS = 10 * 60_000;
 
+/** First TCP keepalive probe on the idle lock connection; below common NAT and proxy idle timeouts. */
+const LOCK_KEEPALIVE_DELAY_MS = 30_000;
+
 /** SQLSTATE lock_not_available: lock_timeout expired. */
 const LOCK_NOT_AVAILABLE = '55P03';
 
@@ -39,21 +42,31 @@ export async function pendingMigrations(ds: DataSource): Promise<string[]> {
  * names of the migrations this run applied.
  *
  * The lock lives on a dedicated connection outside the pool: its session settings never reach the
- * application's connections, idle-session timeouts are switched off for it (it sits idle while the
- * migrations run on other connections), and closing it at the end always releases the lock, even
- * if unlocking failed.
+ * application's connections, idle-session and statement timeouts are switched off for it (it sits
+ * idle while the migrations run on other connections, and waiting for the lock is bounded by
+ * `lockTimeoutMs` alone), TCP keepalive stops network middleboxes from dropping it, and closing it
+ * at the end always releases the lock, even if unlocking failed.
+ *
+ * The lock connection is opened from the DataSource's url, so every connection setting (TLS
+ * included) must be part of DATABASE_URL. Session-level locks need a direct connection to Postgres
+ * (or a pooler in session mode); behind transaction pooling the lock would protect nothing.
  */
 export async function runMigrations(ds: DataSource, opts: { lockTimeoutMs?: number } = {}): Promise<string[]> {
   const url = (ds.options as { url?: string }).url;
   if (!url) throw new Error('runMigrations needs a DataSource configured with a url');
-  const lock = new Client({ connectionString: url, application_name: 'fieldsync-migration-lock' });
+  const lock = new Client({
+    connectionString: url,
+    application_name: 'fieldsync-migration-lock',
+    keepAlive: true,
+    keepAliveInitialDelayMillis: LOCK_KEEPALIVE_DELAY_MS,
+  });
   let lost: Error | undefined;
   // Without a listener, a dropped connection would crash the process.
   lock.on('error', (err) => {
     lost = err;
   });
-  await lock.connect();
   try {
+    await lock.connect();
     await acquireLock(lock, opts.lockTimeoutMs ?? MIGRATION_LOCK_TIMEOUT_MS);
     try {
       const applied = await ds.runMigrations({ transaction: 'each' });
@@ -68,6 +81,8 @@ export async function runMigrations(ds: DataSource, opts: { lockTimeoutMs?: numb
 
 async function acquireLock(lock: Client, timeoutMs: number): Promise<void> {
   await lock.query(`SELECT set_config('lock_timeout', $1, false)`, [`${timeoutMs}ms`]);
+  // A role or database statement_timeout would otherwise cut the wait short with a vaguer error.
+  await lock.query(`SELECT set_config('statement_timeout', '0', false)`);
   // Postgres 14+ ends idle sessions after idle_session_timeout; this one is idle by design.
   await lock.query(
     `SELECT set_config('idle_session_timeout', '0', false) WHERE current_setting('server_version_num')::int >= 140000`,

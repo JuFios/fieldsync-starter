@@ -124,7 +124,7 @@ errors.
 | Server variable | Default | Valid values | Meaning |
 |---|---|---|---|
 | `PORT` | `3001` | 1–65535 | HTTP port of the API |
-| `DATABASE_URL` | required | A `postgres://` or `postgresql://` connection string (libpq rules, e.g. `?host=/var/run/postgresql` for a Unix socket) | Database connection |
+| `DATABASE_URL` | required | A `postgres://` or `postgresql://` connection string (libpq rules, e.g. `?host=/var/run/postgresql` for a Unix socket) | Database connection; every connection setting, TLS included (`sslmode`, ...), belongs in it |
 | `DB_POOL_MAX` | `20` | 1–1000 | Maximum connections in the server's pool |
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
@@ -180,7 +180,10 @@ handful of trivial reads.
   error reaches the caller (TypeORM's `rollbackTransaction` throws), and always releases.
 - `npm run migrate` holds a Postgres advisory lock: TypeORM takes no lock, so two processes would
   both apply the same pending migrations. The lock has a connection of its own, outside the pool,
-  with idle-session timeouts switched off (it is idle while the migrations run). A run waits at most
+  with idle-session and statement timeouts switched off (it is idle while the migrations run) and
+  TCP keepalive on. It is a session-level lock, so `migrate` must reach Postgres directly or through
+  a pooler in session mode; behind transaction pooling (e.g. PgBouncer's transaction mode) it would
+  protect nothing. A run waits at most
   10 minutes for another one and then fails with a message naming the lock, so a stuck run cannot
   hang later deploys silently. If the lock connection is lost anyway, the run still reports what it
   applied and warns that another run may have run at the same time.

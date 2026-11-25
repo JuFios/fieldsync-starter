@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from 'pg';
-import type { DataSource, MigrationInterface, QueryRunner } from 'typeorm';
+import { DataSource, type MigrationInterface, type QueryRunner } from 'typeorm';
 import { createDataSource, MIGRATIONS_TABLE } from '../../src/database/data-source';
 import { MIGRATIONS } from '../../src/database/migrations';
 import { MIGRATION_LOCK_KEY, pendingMigrations, runMigrations } from '../../src/database/migrator';
@@ -220,10 +220,32 @@ describeWithDb('database migrations', () => {
     expect(await ds.query(`SHOW lock_timeout`)).toEqual([{ lock_timeout: '7s' }]);
   });
 
+  it('waits for the lock up to its own timeout even when statements have a shorter one', async () => {
+    const db = await emptyDatabase();
+    await sql(db, (c) => c.query(`ALTER DATABASE ${db.name} SET statement_timeout = '200ms'`));
+    const ds = await dataSource(db, undefined, 1);
+    await sql(db, async (holder) => {
+      await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+      await expect(runMigrations(ds, { lockTimeoutMs: 800 })).rejects.toThrow(
+        'Another migration run has held the migration lock for more than 800 ms',
+      );
+    });
+  });
+
   it('keeps the lock through migrations that outlast the idle session timeout', async () => {
     const db = await emptyDatabase();
     await sql(db, (c) => c.query(`ALTER DATABASE ${db.name} SET idle_session_timeout = '300ms'`));
-    const ds = await dataSource(db, [...MIGRATIONS, LongTable9999999999997]);
+    // The setting must reach only the lock's session: the DataSource's own connections opt out, so
+    // a pooled connection that waits a little before the migrations cannot be ended under them.
+    const base = createDataSource({
+      url: db.url,
+      poolSize: 3,
+      applicationName: 'fieldsync-test',
+      migrations: [...MIGRATIONS, LongTable9999999999997],
+    });
+    const ds = new DataSource({ ...base.options, extra: { options: '-c idle_session_timeout=0' } });
+    sources.push(ds);
+    await ds.initialize();
     let applied: string[] = [];
 
     const warnings = await lockWarnings(async () => {
