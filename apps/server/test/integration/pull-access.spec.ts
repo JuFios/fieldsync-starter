@@ -11,7 +11,10 @@ describeWithDb('pull returns only accessible sites', () => {
   async function createTicket(user: TestUser, siteId: string, title: string): Promise<void> {
     const res = await ctx.api.post(
       '/sync/push',
-      { clientId: randomUUID(), mutations: [{ id: 1, name: 'ticket.create', args: { siteId, title, description: '' } }] },
+      {
+        clientId: randomUUID(),
+        mutations: [{ id: 1, name: 'ticket.create', args: { siteId, title, description: '' } }],
+      },
       user.token,
     );
     expect(res.status).toBe(201);

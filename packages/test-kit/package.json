@@ -10,9 +10,15 @@
     "test": "jest"
   },
   "jest": {
-    "moduleFileExtensions": ["js", "json", "ts"],
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
     "rootDir": ".",
     "testRegex": "test/.*\\.spec\\.ts$",
-    "transform": { "^.+\\.ts$": "ts-jest" }
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    }
   }
 }

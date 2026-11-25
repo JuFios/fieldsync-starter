@@ -22,6 +22,8 @@ async function main(): Promise<void> {
 main().catch((err: unknown) => {
   // Print the message only: errors from the driver can carry query parameters.
   // eslint-disable-next-line no-console
-  console.error(err instanceof ConfigError ? err.message : `Migration failed: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(
+    err instanceof ConfigError ? err.message : `Migration failed: ${err instanceof Error ? err.message : String(err)}`,
+  );
   process.exit(1);
 });

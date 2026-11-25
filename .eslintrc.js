@@ -19,7 +19,12 @@ module.exports = {
     {
       files: ['**/*.ts', '**/*.tsx', 'e2e/**/*.mjs'],
       parserOptions: {
-        project: ['./packages/*/tsconfig.json', './apps/server/tsconfig.json', './apps/web/tsconfig.json', './e2e/tsconfig.json'],
+        project: [
+          './packages/*/tsconfig.json',
+          './apps/server/tsconfig.json',
+          './apps/web/tsconfig.json',
+          './e2e/tsconfig.json',
+        ],
         tsconfigRootDir: __dirname,
       },
       extends: ['plugin:@typescript-eslint/recommended-type-checked'],

@@ -81,7 +81,8 @@ describeWithDb('database migrations', () => {
     }
   }
 
-  const snapshot = (db: TestDatabase) => sql(db, async (c) => (await c.query<{ item: string }>(SNAPSHOT)).rows.map((r) => r.item));
+  const snapshot = (db: TestDatabase) =>
+    sql(db, async (c) => (await c.query<{ item: string }>(SNAPSHOT)).rows.map((r) => r.item));
 
   async function starterDatabase(): Promise<TestDatabase> {
     const db = await emptyDatabase();
@@ -170,7 +171,10 @@ describeWithDb('database migrations', () => {
     const runs = await Promise.all([1, 2, 3].map(async () => runMigrations(await dataSource(db, migrations))));
 
     expect(runs.flat().sort()).toEqual([INITIAL, 'SlowTable9999999999998'].sort());
-    const rows = await sql(db, async (c) => (await c.query<{ name: string }>(`SELECT name FROM ${MIGRATIONS_TABLE} ORDER BY id`)).rows);
+    const rows = await sql(
+      db,
+      async (c) => (await c.query<{ name: string }>(`SELECT name FROM ${MIGRATIONS_TABLE} ORDER BY id`)).rows,
+    );
     expect(rows).toEqual([{ name: INITIAL }, { name: 'SlowTable9999999999998' }]);
   });
 });

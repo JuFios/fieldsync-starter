@@ -22,7 +22,13 @@ const RESULTS: RunResults = {
 describe('known-defect reporter', () => {
   it('collects only known-defect tests, sorted by id', () => {
     expect(collectKnownDefects(RESULTS)).toEqual([
-      { id: 'F-07', owner: 'PR6', title: '[known defect F-07 -> PR6] filters by site', status: 'failed', file: '/repo/b.spec.ts' },
+      {
+        id: 'F-07',
+        owner: 'PR6',
+        title: '[known defect F-07 -> PR6] filters by site',
+        status: 'failed',
+        file: '/repo/b.spec.ts',
+      },
       {
         id: 'F-10',
         owner: 'PR5',

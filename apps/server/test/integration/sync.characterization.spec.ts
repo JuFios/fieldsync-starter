@@ -178,7 +178,13 @@ describeWithDb('sync API (characterization)', () => {
       const changes = await initialPull(tech);
       const latest = (entity: string, id: string) => changes.filter((c) => c.entity === entity && c.id === id).at(-1);
       expect(latest('ticket', ticket)?.data).toMatchObject({ status: 'in_progress' });
-      expect(latest('part', part)?.data).toEqual({ id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 5 });
+      expect(latest('part', part)?.data).toEqual({
+        id: part,
+        ticketId: ticket,
+        siteId: site,
+        name: 'Seal',
+        quantity: 5,
+      });
       const versions = changes.map((c) => c.version);
       expect(versions).toEqual([...versions].sort((x, y) => x - y));
 
@@ -217,7 +223,11 @@ describeWithDb('sync API (characterization)', () => {
       const part = randomUUID();
 
       await push(tech, clientId, [
-        { id: 2, name: 'part.add', args: { id: part, ticketId: randomUUID(), siteId: site, name: 'Seal', quantity: 1 } },
+        {
+          id: 2,
+          name: 'part.add',
+          args: { id: part, ticketId: randomUUID(), siteId: site, name: 'Seal', quantity: 1 },
+        },
       ]);
 
       expect(await logSize()).toBe(before);

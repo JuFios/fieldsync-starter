@@ -21,8 +21,10 @@ export async function seedDemo(sql: Sql): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [DEMO.admin, DEMO.techA, DEMO.techB],
   );
-  await sql.query(
-    `INSERT INTO user_sites (user_id, site_id) VALUES ($1, $2), ($3, $4) ON CONFLICT DO NOTHING`,
-    [DEMO.techA, DEMO.siteA, DEMO.techB, DEMO.siteB],
-  );
+  await sql.query(`INSERT INTO user_sites (user_id, site_id) VALUES ($1, $2), ($3, $4) ON CONFLICT DO NOTHING`, [
+    DEMO.techA,
+    DEMO.siteA,
+    DEMO.techB,
+    DEMO.siteB,
+  ]);
 }

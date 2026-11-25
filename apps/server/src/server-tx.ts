@@ -1,4 +1,11 @@
-import { MUTATORS, MutationRejected, type EntityName, type Mutation, type MutatorTx, type Row } from '@fieldsync/sync-core';
+import {
+  MUTATORS,
+  MutationRejected,
+  type EntityName,
+  type Mutation,
+  type MutatorTx,
+  type Row,
+} from '@fieldsync/sync-core';
 import { authorize } from './access';
 import type { AuthUser } from './auth';
 import type { Sql } from './db';

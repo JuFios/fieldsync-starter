@@ -25,7 +25,12 @@ export default function TicketPage() {
   }, [ticket?.id]);
 
   if (!client) return <p>Loading…</p>;
-  if (!ticket) return <p>Ticket not found. <Link href="/">Back</Link></p>;
+  if (!ticket)
+    return (
+      <p>
+        Ticket not found. <Link href="/">Back</Link>
+      </p>
+    );
 
   const siteId = String(ticket.siteId);
   const status = ticket.status as TicketStatus;
@@ -69,7 +74,13 @@ export default function TicketPage() {
         <button
           onClick={() => {
             if (!partName.trim()) return;
-            client.mutate('part.add', { id: crypto.randomUUID(), ticketId: id, siteId, name: partName.trim(), quantity: 1 });
+            client.mutate('part.add', {
+              id: crypto.randomUUID(),
+              ticketId: id,
+              siteId,
+              name: partName.trim(),
+              quantity: 1,
+            });
             setPartName('');
           }}
         >
@@ -82,7 +93,9 @@ export default function TicketPage() {
           <h3>Rejected changes</h3>
           <ul>
             {client.rejections.map((r) => (
-              <li key={r.mutation.id}>{r.mutation.name}: {r.error}</li>
+              <li key={r.mutation.id}>
+                {r.mutation.name}: {r.error}
+              </li>
             ))}
           </ul>
         </section>

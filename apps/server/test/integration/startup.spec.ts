@@ -33,7 +33,10 @@ describeWithDb('server startup', () => {
     for (let start = 0; start < 2; start += 1) {
       const server = await startApp(db.url, { SEED_DEMO: 'true' });
       try {
-        const me = await new Api(server.url).get<{ role: string; sites: Array<{ name: string }> }>('/me', 'tech-a-token');
+        const me = await new Api(server.url).get<{ role: string; sites: Array<{ name: string }> }>(
+          '/me',
+          'tech-a-token',
+        );
         expect(me.status).toBe(200);
         expect(me.body).toMatchObject({ role: 'technician', sites: [{ name: 'North Plant' }] });
         const admin = await new Api(server.url).get<{ sites: unknown[] }>('/me', 'admin-token');

@@ -119,7 +119,12 @@ describe('SyncClient', () => {
     await client.sync(); // the attempt started by the first mutation
     await client.sync(); // a fresh attempt sends the whole queue
     expect(transport.pushedIds.at(-1)).toEqual([1, 2, 3]);
-    expect(client.rows('ticket').map((t) => t.title).sort()).toEqual(['A', 'B', 'C']);
+    expect(
+      client
+        .rows('ticket')
+        .map((t) => t.title)
+        .sort(),
+    ).toEqual(['A', 'B', 'C']);
   });
 
   knownDefect(

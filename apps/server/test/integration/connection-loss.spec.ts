@@ -42,7 +42,9 @@ describeWithDb('losing database connections', () => {
         '/sync/push',
         {
           clientId,
-          mutations: [{ id: 2, name: 'ticket.setStatus', args: { id: ticketId, siteId: site, from: 'open', to: 'done' } }],
+          mutations: [
+            { id: 2, name: 'ticket.setStatus', args: { id: ticketId, siteId: site, from: 'open', to: 'done' } },
+          ],
         },
         tech.token,
       );

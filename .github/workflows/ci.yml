@@ -47,13 +47,13 @@ jobs:
           POSTGRES_USER: fieldsync
           POSTGRES_PASSWORD: fieldsync
           POSTGRES_DB: fieldsync
-        ports: ["5432:5432"]
+        ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U fieldsync -d fieldsync" --health-interval 3s --health-timeout 3s --health-retries 20
     env:
       DATABASE_URL: postgres://fieldsync:fieldsync@localhost:5432/fieldsync
       # Fail instead of skipping if the database is not configured.
-      REQUIRE_DB: "1"
+      REQUIRE_DB: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -75,7 +75,7 @@ jobs:
           POSTGRES_USER: fieldsync
           POSTGRES_PASSWORD: fieldsync
           POSTGRES_DB: fieldsync
-        ports: ["5432:5432"]
+        ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U fieldsync -d fieldsync" --health-interval 3s --health-timeout 3s --health-retries 20
     env:
