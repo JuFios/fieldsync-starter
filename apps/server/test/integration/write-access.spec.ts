@@ -42,7 +42,7 @@ describeWithDb('write access is checked against the stored data', () => {
   });
 
   knownDefect(
-    { id: 'F-08', owner: 'PR6', reason: 'write access is checked against the siteId the client sends' },
+    { id: 'F-08', owner: 'access-control', reason: 'write access is checked against the siteId the client sends' },
     "does not change the status of another site's ticket by claiming an accessible siteId",
     async () => {
       const { north, ticketId, techNorth } = await southTicketAndNorthTech();
@@ -54,7 +54,7 @@ describeWithDb('write access is checked against the stored data', () => {
   );
 
   knownDefect(
-    { id: 'F-08', owner: 'PR6', reason: 'write access is checked against the siteId the client sends' },
+    { id: 'F-08', owner: 'access-control', reason: 'write access is checked against the siteId the client sends' },
     "does not add a part to another site's ticket by claiming an accessible siteId",
     async () => {
       const { north, ticketId, techNorth } = await southTicketAndNorthTech();

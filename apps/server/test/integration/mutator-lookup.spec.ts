@@ -7,7 +7,7 @@ describeWithDb('mutator lookup', () => {
   const ctx = useIntegration();
 
   knownDefect(
-    { id: 'F-12', owner: 'PR3', reason: 'mutators are looked up through the object prototype' },
+    { id: 'F-12', owner: 'sync-protocol', reason: 'mutators are looked up through the object prototype' },
     'rejects names inherited from Object.prototype as unknown mutators',
     async () => {
       const site = await ctx.fixtures.site();

@@ -20,15 +20,15 @@
 export interface KnownDefect {
   /** Found-issues id from the README, e.g. `F-07`. */
   id: string;
-  /** The change that owns the fix, e.g. `PR6`. */
+  /** The area whose change fixes it, as a lowercase slug, e.g. `access-control`. */
   owner: string;
   /** One line: what is wrong. */
   reason: string;
 }
 
 const ID = /^F-\d{2,}$/;
-const OWNER = /^PR\d+$/;
-const TITLE = /^\[known defect (F-\d{2,}) -> (PR\d+)\] /;
+const OWNER = /^[a-z]+(?:-[a-z]+)*$/;
+const TITLE = /^\[known defect (F-\d{2,}) -> ([a-z]+(?:-[a-z]+)*)\] /;
 
 export class KnownDefectFixedError extends Error {
   constructor(readonly defect: KnownDefect) {
@@ -62,7 +62,8 @@ export function isAssertionError(err: unknown): boolean {
 
 export function validateDefect(defect: KnownDefect): void {
   if (!ID.test(defect.id)) throw new Error(`Known defect id must look like F-07, got "${defect.id}"`);
-  if (!OWNER.test(defect.owner)) throw new Error(`Known defect owner must look like PR6, got "${defect.owner}"`);
+  if (!OWNER.test(defect.owner))
+    throw new Error(`Known defect owner must be a lowercase area slug like access-control, got "${defect.owner}"`);
   if (defect.reason.trim().length === 0) throw new Error(`Known defect ${defect.id} needs a reason`);
 }
 

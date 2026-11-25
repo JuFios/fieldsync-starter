@@ -46,7 +46,7 @@ describeWithDb('pull returns only accessible sites', () => {
   });
 
   knownDefect(
-    { id: 'F-07', owner: 'PR6', reason: 'the site filter is applied only when cursor is 0' },
+    { id: 'F-07', owner: 'access-control', reason: 'the site filter is applied only when cursor is 0' },
     'incremental pull returns only changes for sites the user can access',
     async () => {
       const { north, south, techNorth, techSouth } = await twoSites();

@@ -128,7 +128,7 @@ describe('SyncClient', () => {
   });
 
   knownDefect(
-    { id: 'F-09', owner: 'PR3', reason: 'mutation ids are derived from lastMutationId + queue length' },
+    { id: 'F-09', owner: 'sync-protocol', reason: 'mutation ids are derived from lastMutationId + queue length' },
     'never reuses a mutation id after the server rejects a mutation',
     async () => {
       const transport = new RejectingTransport();
@@ -144,7 +144,11 @@ describe('SyncClient', () => {
   );
 
   knownDefect(
-    { id: 'F-13', owner: 'PR5', reason: 'requests have no timeout, so a hung request blocks syncing forever' },
+    {
+      id: 'F-13',
+      owner: 'offline-client',
+      reason: 'requests have no timeout, so a hung request blocks syncing forever',
+    },
     'gives up on a request that never answers and retries',
     async () => {
       jest.useFakeTimers();
@@ -159,7 +163,7 @@ describe('SyncClient', () => {
   );
 
   knownDefect(
-    { id: 'F-10', owner: 'PR5', reason: 'the pending queue is never persisted' },
+    { id: 'F-10', owner: 'offline-client', reason: 'the pending queue is never persisted' },
     'keeps unsynced mutations across a reload',
     async () => {
       const storage = new MemoryStorage();
@@ -175,7 +179,7 @@ describe('SyncClient', () => {
   );
 
   knownDefect(
-    { id: 'F-11', owner: 'PR5', reason: 'tabs sharing one clientId allocate the same mutation ids' },
+    { id: 'F-11', owner: 'offline-client', reason: 'tabs sharing one clientId allocate the same mutation ids' },
     'does not lose mutations when two tabs share one clientId',
     async () => {
       const server = new FakeServer();

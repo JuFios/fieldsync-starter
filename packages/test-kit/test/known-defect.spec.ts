@@ -11,7 +11,7 @@ import {
   type KnownDefect,
 } from '../src/known-defect';
 
-const DEFECT: KnownDefect = { id: 'F-07', owner: 'PR6', reason: 'pull ignores the site filter' };
+const DEFECT: KnownDefect = { id: 'F-07', owner: 'access-control', reason: 'pull ignores the site filter' };
 
 describe('runKnownDefect', () => {
   it('passes when the body fails a Jest assertion', async () => {
@@ -85,14 +85,14 @@ describe('isAssertionError', () => {
 describe('known defect metadata', () => {
   it('round-trips the id and owner through the test title', () => {
     const title = knownDefectTitle(DEFECT, 'returns only accessible sites');
-    expect(title).toBe('[known defect F-07 -> PR6] returns only accessible sites');
-    expect(parseKnownDefectTitle(title)).toEqual({ id: 'F-07', owner: 'PR6' });
+    expect(title).toBe('[known defect F-07 -> access-control] returns only accessible sites');
+    expect(parseKnownDefectTitle(title)).toEqual({ id: 'F-07', owner: 'access-control' });
     expect(parseKnownDefectTitle('returns only accessible sites')).toBeUndefined();
   });
 
   it('rejects malformed ids, owners and empty reasons', () => {
     expect(() => validateDefect({ ...DEFECT, id: '7' })).toThrow('F-07');
-    expect(() => validateDefect({ ...DEFECT, owner: 'later' })).toThrow('PR6');
+    expect(() => validateDefect({ ...DEFECT, owner: 'PR6' })).toThrow('access-control');
     expect(() => validateDefect({ ...DEFECT, reason: ' ' })).toThrow('needs a reason');
     expect(() => validateDefect(DEFECT)).not.toThrow();
   });

@@ -9,12 +9,12 @@ const RESULTS: RunResults = {
       testFilePath: '/repo/a.spec.ts',
       testResults: [
         { title: 'ordinary test', status: 'passed' },
-        { title: '[known defect F-10 -> PR5] keeps the queue across a reload', status: 'passed' },
+        { title: '[known defect F-10 -> offline-client] keeps the queue across a reload', status: 'passed' },
       ],
     },
     {
       testFilePath: '/repo/b.spec.ts',
-      testResults: [{ title: '[known defect F-07 -> PR6] filters by site', status: 'failed' }],
+      testResults: [{ title: '[known defect F-07 -> access-control] filters by site', status: 'failed' }],
     },
   ],
 };
@@ -24,15 +24,15 @@ describe('known-defect reporter', () => {
     expect(collectKnownDefects(RESULTS)).toEqual([
       {
         id: 'F-07',
-        owner: 'PR6',
-        title: '[known defect F-07 -> PR6] filters by site',
+        owner: 'access-control',
+        title: '[known defect F-07 -> access-control] filters by site',
         status: 'failed',
         file: '/repo/b.spec.ts',
       },
       {
         id: 'F-10',
-        owner: 'PR5',
-        title: '[known defect F-10 -> PR5] keeps the queue across a reload',
+        owner: 'offline-client',
+        title: '[known defect F-10 -> offline-client] keeps the queue across a reload',
         status: 'passed',
         file: '/repo/a.spec.ts',
       },
@@ -42,8 +42,8 @@ describe('known-defect reporter', () => {
   it('prints a count and one line per defect', () => {
     expect(formatSummary('core', collectKnownDefects(RESULTS))).toBe(
       'Known defects (core): 2\n' +
-        '  F-07 -> PR6 [failed] filters by site\n' +
-        '  F-10 -> PR5 [passed] keeps the queue across a reload\n',
+        '  F-07 -> access-control [failed] filters by site\n' +
+        '  F-10 -> offline-client [passed] keeps the queue across a reload\n',
     );
     expect(formatSummary('core', [])).toBe('Known defects (core): 0\n');
   });
@@ -59,7 +59,7 @@ describe('known-defect reporter', () => {
       expect(write).toHaveBeenCalledWith(expect.stringContaining('Known defects (core): 2'));
       const markdown = readFileSync(file, 'utf8');
       expect(markdown).toContain('### Known defects (core): 2');
-      expect(markdown).toContain('| F-07 | PR6 | failed | filters by site |');
+      expect(markdown).toContain('| F-07 | access-control | failed | filters by site |');
     } finally {
       write.mockRestore();
       if (previous === undefined) delete process.env.GITHUB_STEP_SUMMARY;

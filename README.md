@@ -99,7 +99,7 @@ changes that add migrations.
   sites and users. The web bundle has the API URL compiled in, so build with the default
   `NEXT_PUBLIC_API_URL` (`http://localhost:3001`); ports 3000 and 3001 must be free.
 - **Known-defect tests.** A defect that is reproduced but fixed by a later change is tracked with
-  `knownDefect({ id, owner, reason }, name, body)` from `@fieldsync/test-kit`. The body asserts the
+  `knownDefect({ id, owner, reason }, name, body)` (the owner is the area whose change fixes it, e.g. `access-control`) from `@fieldsync/test-kit`. The body asserts the
   correct behaviour. The test passes only while the body fails with an assertion error; any other
   error fails it (a broken harness must not look like a reproduced defect), and a body that passes
   fails it with "defect F-NN appears fixed - flip it". Only the assertion that shows the defect uses
