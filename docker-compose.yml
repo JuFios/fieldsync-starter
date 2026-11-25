@@ -1,5 +1,7 @@
 # Local stack: postgres -> migrate (one-shot) -> server -> web.
-# Settings come from the environment or a root .env file (see .env.example).
+# Settings come from the environment or a root .env file (see .env.example). Ports are published on
+# BIND_ADDRESS (default 127.0.0.1): the defaults include a well-known database password and, with
+# SEED_DEMO, well-known tokens, which must not be reachable from the network by accident.
 x-server-build: &server-build
   context: .
   dockerfile: apps/server/Dockerfile
@@ -11,7 +13,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-fieldsync}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fieldsync}
       POSTGRES_DB: ${POSTGRES_DB:-fieldsync}
-    ports: ['${POSTGRES_PORT:-5432}:5432']
+    ports: ['${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432']
     volumes: [postgres-data:/var/lib/postgresql/data]
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
@@ -39,7 +41,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    ports: ['${SERVER_PORT:-3001}:3001']
+    ports: ['${BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-3001}:3001']
     restart: unless-stopped
 
   web:
@@ -47,11 +49,12 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+        # The browser calls the API where the host publishes it.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:${SERVER_PORT:-3001}}
     depends_on:
       server:
         condition: service_healthy
-    ports: ['${WEB_PORT:-3000}:3000']
+    ports: ['${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3000']
     restart: unless-stopped
 
 volumes:

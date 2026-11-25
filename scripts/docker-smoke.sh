@@ -3,6 +3,7 @@
 #   - the containers do not run as root;
 #   - no .env files from the build context end up in the images;
 #   - the web bundle calls the API on the port the server is published on;
+#   - ports are published on 127.0.0.1 only (the defaults carry well-known credentials);
 #   - `docker compose up` brings the stack up in order: postgres -> migrate -> server -> web,
 #     the server and web report healthy, and the API answers.
 # Runs in its own compose project with its own volumes and host ports, and removes them on exit.
@@ -73,6 +74,15 @@ for service in server web; do
   container=$(docker compose ps --all --quiet "$service")
   health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
   [ "$health" = "healthy" ] || fail "$service health is '$health', expected 'healthy'"
+done
+
+for published in "postgres 5432" "server 3001" "web 3000"; do
+  set -- $published
+  address=$(docker compose port "$1" "$2" 2>/dev/null || true)
+  case "$address" in
+    127.0.0.1:*) ;;
+    *) fail "$1 is published on '$address', expected 127.0.0.1 only" ;;
+  esac
 done
 
 curl --fail --silent "http://localhost:$SERVER_PORT/health" >/dev/null || fail "server /health did not answer"

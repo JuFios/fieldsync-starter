@@ -130,9 +130,11 @@ errors.
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
 
-Docker compose reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`,
-`SERVER_PORT`, `WEB_PORT`, `SEED_DEMO` and `NEXT_PUBLIC_API_URL` (all with defaults; see
-`.env.example`). The web app has one setting, `NEXT_PUBLIC_API_URL`, compiled into the bundle at
+Docker compose reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `BIND_ADDRESS`,
+`POSTGRES_PORT`, `SERVER_PORT`, `WEB_PORT`, `SEED_DEMO` and `NEXT_PUBLIC_API_URL` (all with
+defaults; see `.env.example`). Ports are published on `127.0.0.1` unless `BIND_ADDRESS` says
+otherwise, since the defaults include a well-known database password and demo tokens; the web
+bundle calls the API on `SERVER_PORT` unless `NEXT_PUBLIC_API_URL` is set. The web app has one setting, `NEXT_PUBLIC_API_URL`, compiled into the bundle at
 build time (`apps/web/.env.example`).
 
 Test settings (`DATABASE_URL`, `REQUIRE_DB`, `E2E_DATABASE`, `E2E_WEB_PORT`) are described in the
