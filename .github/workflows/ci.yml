@@ -5,9 +5,11 @@ on:
     branches: [main, solution]
   pull_request:
 
-# A newer push to a pull request supersedes the older run; runs on main and solution always finish.
+# A newer push to a pull request supersedes the older run. Pushes to main and solution get a group
+# per commit, so every commit there gets its own complete run (a shared group would let a newer
+# push cancel an older one that is still waiting).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
