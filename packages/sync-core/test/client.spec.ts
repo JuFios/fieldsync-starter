@@ -1,5 +1,5 @@
 import { knownDefect } from '@fieldsync/test-kit';
-import { MemoryStorage, SyncClient, type Transport } from '../src';
+import { MemoryStorage, SyncClient, type SyncClientOptions, type Transport } from '../src';
 import type { PullResponse, PushRequest, PushResponse } from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
@@ -79,9 +79,26 @@ class FakeServer {
   }
 }
 
-function makeClient(transport: Transport = new OfflineTransport()): SyncClient {
-  return new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+/**
+ * Every client a test creates, disposed after each test: a client that is not disposed keeps a
+ * retry timer alive, so a failing assertion would otherwise leave Jest hanging instead of failing.
+ */
+const clients: SyncClient[] = [];
+
+function newClient(opts: SyncClientOptions): SyncClient {
+  const client = new SyncClient(opts);
+  clients.push(client);
+  return client;
 }
+
+function makeClient(transport: Transport = new OfflineTransport()): SyncClient {
+  return newClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+}
+
+afterEach(() => {
+  for (const client of clients.splice(0)) client.dispose();
+  jest.useRealTimers();
+});
 
 describe('SyncClient', () => {
   it('shows a locally created ticket before the server confirms it', () => {
@@ -91,7 +108,6 @@ describe('SyncClient', () => {
     expect(tickets).toHaveLength(1);
     expect(tickets[0]).toMatchObject({ siteId: SITE, title: 'Leaking valve', status: 'open' });
     expect(client.pendingCount).toBe(1);
-    client.dispose();
   });
 
   it('numbers local mutations sequentially', async () => {
@@ -104,7 +120,6 @@ describe('SyncClient', () => {
     await client.sync(); // a fresh attempt sends the whole queue
     expect(transport.pushedIds.at(-1)).toEqual([1, 2, 3]);
     expect(client.rows('ticket').map((t) => t.title).sort()).toEqual(['A', 'B', 'C']);
-    client.dispose();
   });
 
   knownDefect(
@@ -117,7 +132,6 @@ describe('SyncClient', () => {
       await client.sync();
       client.mutate('ticket.create', { siteId: SITE, title: 'next', description: '' });
       await client.sync();
-      client.dispose();
       const [first, second] = transport.pushedIds;
       expect(first).toEqual([1]);
       expect(second).toEqual([2]);
@@ -131,16 +145,11 @@ describe('SyncClient', () => {
       jest.useFakeTimers();
       const transport = new HangingTransport();
       const client = makeClient(transport);
-      try {
-        client.mutate('ticket.create', { siteId: SITE, title: 'Stuck', description: '' });
-        expect(client.status).toBe('syncing');
-        await jest.advanceTimersByTimeAsync(5 * 60_000);
-        expect(client.status).not.toBe('syncing');
-        expect(transport.pushCalls).toBeGreaterThan(1);
-      } finally {
-        client.dispose();
-        jest.useRealTimers();
-      }
+      client.mutate('ticket.create', { siteId: SITE, title: 'Stuck', description: '' });
+      expect(client.status).toBe('syncing');
+      await jest.advanceTimersByTimeAsync(5 * 60_000);
+      expect(client.status).not.toBe('syncing');
+      expect(transport.pushCalls).toBeGreaterThan(1);
     },
   );
 
@@ -149,18 +158,14 @@ describe('SyncClient', () => {
     'keeps unsynced mutations across a reload',
     async () => {
       const storage = new MemoryStorage();
-      const before = new SyncClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+      const before = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
       before.mutate('ticket.create', { siteId: SITE, title: 'Written offline', description: '' });
       await before.sync();
-      before.dispose();
+      before.dispose(); // the page goes away
 
-      const after = new SyncClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
-      try {
-        expect(after.pendingCount).toBe(1);
-        expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
-      } finally {
-        after.dispose();
-      }
+      const after = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+      expect(after.pendingCount).toBe(1);
+      expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
     },
   );
 
@@ -170,14 +175,12 @@ describe('SyncClient', () => {
     async () => {
       const server = new FakeServer();
       const storage = new MemoryStorage();
-      const tabA = new SyncClient({ clientId: 'c1', transport: server.transport(), storage });
-      const tabB = new SyncClient({ clientId: 'c1', transport: server.transport(), storage });
+      const tabA = newClient({ clientId: 'c1', transport: server.transport(), storage });
+      const tabB = newClient({ clientId: 'c1', transport: server.transport(), storage });
       tabA.mutate('ticket.create', { siteId: SITE, title: 'From tab A', description: '' });
       await tabA.sync();
       tabB.mutate('ticket.create', { siteId: SITE, title: 'From tab B', description: '' });
       await tabB.sync();
-      tabA.dispose();
-      tabB.dispose();
       expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
     },
   );
