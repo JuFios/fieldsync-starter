@@ -14,7 +14,7 @@
     "build:test-kit": "npm run build -w @fieldsync/test-kit",
     "build": "npm run build:core && npm run build -w @fieldsync/server && npm run build -w @fieldsync/web",
     "migrate": "npm run migrate -w @fieldsync/server",
-    "lint": "eslint --max-warnings 0 \"packages/*/{src,test}/**/*.ts\" \"apps/server/{src,test}/**/*.ts\" \"e2e/**/*.{ts,mjs}\" && npm run lint -w @fieldsync/web",
+    "lint": "npm run build:core && eslint --max-warnings 0 \"packages/*/{src,test}/**/*.ts\" \"apps/server/{src,test}/**/*.ts\" \"e2e/**/*.{ts,mjs}\" && npm run lint -w @fieldsync/web",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "npm run build:core && tsc --noEmit -p packages/sync-core/tsconfig.json && tsc --noEmit -p packages/test-kit/tsconfig.json && tsc --noEmit -p apps/server/tsconfig.json && tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
