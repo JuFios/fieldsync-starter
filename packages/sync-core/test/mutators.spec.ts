@@ -27,10 +27,23 @@ const SITE = '33333333-3333-4333-8333-333333333333';
 
 const ticket = (status: string): Row => ({ id: TICKET, siteId: SITE, title: 't', description: '', status });
 
+/** Runs a mutator that must reject and returns the rejection, failing the test if it does not throw. */
+function rejectionOf(run: () => void): MutationRejected {
+  let thrown: unknown;
+  try {
+    run();
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeInstanceOf(MutationRejected);
+  return thrown as MutationRejected;
+}
+
 describe('ticket mutators', () => {
   it('creates a ticket in the open status', () => {
     const tx = new FakeTx();
     MUTATORS['ticket.create'].apply(tx, { siteId: SITE, title: 'Broken pump', description: '' });
+    expect(tx.rows.size).toBe(1);
     const [created] = [...tx.rows.values()];
     expect(created.status).toBe('open');
     expect(created.siteId).toBe(SITE);
@@ -38,9 +51,11 @@ describe('ticket mutators', () => {
 
   it('rejects an update for a ticket that does not exist', () => {
     const tx = new FakeTx();
-    expect(() =>
+    const err = rejectionOf(() =>
       MUTATORS['ticket.update'].apply(tx, { id: TICKET, siteId: SITE, title: 'x', description: '' }),
-    ).toThrow(MutationRejected);
+    );
+    expect(err.code).toBe('NOT_FOUND');
+    expect(tx.rows.size).toBe(0);
   });
 
   it('moves a ticket along an allowed transition', () => {
@@ -51,20 +66,20 @@ describe('ticket mutators', () => {
 
   it('rejects an invalid status transition', () => {
     const tx = new FakeTx([['ticket', TICKET, ticket('done')]]);
-    try {
-      MUTATORS['ticket.setStatus'].apply(tx, { id: TICKET, siteId: SITE, from: 'done', to: 'in_progress' });
-    } catch (err) {
-      expect(err).toBeInstanceOf(MutationRejected);
-    }
+    const err = rejectionOf(() =>
+      MUTATORS['ticket.setStatus'].apply(tx, { id: TICKET, siteId: SITE, from: 'done', to: 'in_progress' }),
+    );
+    expect(err.code).toBe('INVALID_TRANSITION');
+    expect(tx.get('ticket', TICKET)?.status).toBe('done');
   });
 });
 
 describe('part mutators', () => {
   it('does not let a quantity go below zero', () => {
     const tx = new FakeTx([['part', PART, { id: PART, quantity: 1 }]]);
-    expect(() => MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: -2 })).toThrow(
-      MutationRejected,
-    );
+    const err = rejectionOf(() => MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: -2 }));
+    expect(err.code).toBe('NEGATIVE_QUANTITY');
+    expect(tx.get('part', PART)?.quantity).toBe(1);
   });
 
   it('adds to the quantity', () => {
