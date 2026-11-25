@@ -1,1 +1,6 @@
-{ "extends": "../../tsconfig.base.json", "include": ["src", "test"] }
+{
+  "extends": "../../tsconfig.base.json",
+  // Tests use test-kit from source, as Jest does (moduleNameMapper), so typecheck needs no build of it.
+  "compilerOptions": { "paths": { "@fieldsync/test-kit": ["../../packages/test-kit/src"] } },
+  "include": ["src", "test"]
+}
