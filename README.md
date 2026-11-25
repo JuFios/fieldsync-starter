@@ -94,15 +94,17 @@ changes that add migrations.
   application on an ephemeral port. With `REQUIRE_DB=1` (set in CI) a missing `DATABASE_URL` fails
   the run instead of skipping the suites.
 - **E2e tests** recreate and migrate a dedicated database (`E2E_DATABASE`, default
-  `fieldsync_e2e`) on every run, start the built server and web app, and give every test its own
+  `fieldsync_e2e`; the name must end with `_e2e`, so no other database can be dropped by mistake)
+  on every run, start the built server and web app, and give every test its own
   sites and users. The web bundle has the API URL compiled in, so build with the default
   `NEXT_PUBLIC_API_URL` (`http://localhost:3001`); ports 3000 and 3001 must be free.
 - **Known-defect tests.** A defect that is reproduced but fixed by a later change is tracked with
   `knownDefect({ id, owner, reason }, name, body)` from `@fieldsync/test-kit`. The body asserts the
   correct behaviour. The test passes only while the body fails with an assertion error; any other
   error fails it (a broken harness must not look like a reproduced defect), and a body that passes
-  fails it with "defect F-NN appears fixed - flip it". Every run prints the open known defects, and
-  CI lists them in the job summary.
+  fails it with "defect F-NN appears fixed - flip it". Only the assertion that shows the defect uses
+  `expect`; every setup check in the body uses `precondition()`, whose failure is never taken for
+  the defect. Every run prints the open known defects, and CI lists them in the job summary.
 
 ## Configuration
 
@@ -133,7 +135,8 @@ Docker compose reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTG
 `.env.example`). The web app has one setting, `NEXT_PUBLIC_API_URL`, compiled into the bundle at
 build time (`apps/web/.env.example`).
 
-Test settings: `DATABASE_URL`, `REQUIRE_DB`, `E2E_DATABASE`, `E2E_WEB_PORT`.
+Test settings (`DATABASE_URL`, `REQUIRE_DB`, `E2E_DATABASE`, `E2E_WEB_PORT`) are described in the
+root `.env.example`.
 
 ## Architecture & data flow
 
