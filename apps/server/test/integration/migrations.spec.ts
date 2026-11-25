@@ -4,7 +4,7 @@ import { Client } from 'pg';
 import type { DataSource, MigrationInterface, QueryRunner } from 'typeorm';
 import { createDataSource, MIGRATIONS_TABLE } from '../../src/database/data-source';
 import { MIGRATIONS } from '../../src/database/migrations';
-import { pendingMigrations, runMigrations } from '../../src/database/migrator';
+import { MIGRATION_LOCK_KEY, pendingMigrations, runMigrations } from '../../src/database/migrator';
 import { createTestDatabase, type TestDatabase } from '../support/database';
 import { describeWithDb } from '../support/integration';
 
@@ -64,8 +64,12 @@ describeWithDb('database migrations', () => {
     return db;
   }
 
-  async function dataSource(db: TestDatabase, migrations?: Array<new () => unknown>): Promise<DataSource> {
-    const ds = createDataSource({ url: db.url, poolSize: 3, applicationName: 'fieldsync-test', migrations });
+  async function dataSource(
+    db: TestDatabase,
+    migrations?: Array<new () => unknown>,
+    poolSize = 3,
+  ): Promise<DataSource> {
+    const ds = createDataSource({ url: db.url, poolSize, applicationName: 'fieldsync-test', migrations });
     sources.push(ds);
     await ds.initialize();
     return ds;
@@ -176,5 +180,42 @@ describeWithDb('database migrations', () => {
       async (c) => (await c.query<{ name: string }>(`SELECT name FROM ${MIGRATIONS_TABLE} ORDER BY id`)).rows,
     );
     expect(rows).toEqual([{ name: INITIAL }, { name: 'SlowTable9999999999998' }]);
+  });
+
+  it('gives up with a clear message when another run holds the lock for too long', async () => {
+    const db = await emptyDatabase();
+    // One connection, so the check below runs on the connection that waited for the lock.
+    const ds = await dataSource(db, undefined, 1);
+    await sql(db, async (holder) => {
+      await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+      await expect(runMigrations(ds, { lockTimeoutMs: 300 })).rejects.toThrow(
+        'Another migration run has held the migration lock for more than 300 ms',
+      );
+    });
+    expect(await pendingMigrations(ds)).toEqual([INITIAL]);
+    // The timeout applies to taking the lock only; the pooled connection is left with no timeout set.
+    expect(await ds.query(`SHOW lock_timeout`)).toEqual([{ lock_timeout: '0' }]);
+  });
+
+  it('reports the migrations as applied when the lock connection drops while they run', async () => {
+    const db = await emptyDatabase();
+    const ds = await dataSource(db, [...MIGRATIONS, SlowTable9999999999998]);
+    const run = runMigrations(ds);
+    await sql(db, async (c) => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const { rows } = await c.query<{ pid: number }>(
+          `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND database =
+             (SELECT oid FROM pg_database WHERE datname = current_database())`,
+        );
+        if (rows.length) {
+          await c.query('SELECT pg_terminate_backend($1)', [rows[0].pid]);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error('the migration lock was never taken');
+    });
+
+    await expect(run).resolves.toEqual([INITIAL, 'SlowTable9999999999998']);
   });
 });
