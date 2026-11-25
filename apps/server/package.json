@@ -6,7 +6,9 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main",
     "dev": "tsc -p tsconfig.build.json --watch",
-    "test": "jest"
+    "test": "jest",
+    "test:unit": "jest --selectProjects unit",
+    "test:integration": "jest --selectProjects integration"
   },
   "dependencies": {
     "@fieldsync/sync-core": "*",
@@ -22,29 +24,5 @@
     "@types/express": "^4.17.21",
     "@types/pg": "^8.10.9",
     "@fieldsync/test-kit": "*"
-  },
-  "jest": {
-    "moduleFileExtensions": [
-      "js",
-      "json",
-      "ts"
-    ],
-    "rootDir": ".",
-    "testRegex": "test/.*\\.spec\\.ts$",
-    "transform": {
-      "^.+\\.ts$": "ts-jest"
-    },
-    "moduleNameMapper": {
-      "^@fieldsync/(sync-core|test-kit)$": "<rootDir>/../../packages/$1/src"
-    },
-    "reporters": [
-      "default",
-      [
-        "@fieldsync/test-kit/dist/reporter",
-        {
-          "label": "server"
-        }
-      ]
-    ]
   }
 }
