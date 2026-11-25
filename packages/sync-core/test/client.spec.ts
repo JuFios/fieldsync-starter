@@ -3,8 +3,12 @@ import type { PullResponse, PushRequest, PushResponse } from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 
+/** A transport with no network: every request fails. Records the mutation ids of each push attempt. */
 class OfflineTransport implements Transport {
-  push(_req: PushRequest): Promise<PushResponse> {
+  readonly pushedIds: number[][] = [];
+
+  push(req: PushRequest): Promise<PushResponse> {
+    this.pushedIds.push(req.mutations.map((m) => m.id));
     return Promise.reject(new Error('offline'));
   }
 
@@ -13,25 +17,31 @@ class OfflineTransport implements Transport {
   }
 }
 
-function makeClient(): SyncClient {
-  return new SyncClient({ clientId: 'c1', transport: new OfflineTransport(), storage: new MemoryStorage() });
+function makeClient(transport: Transport = new OfflineTransport()): SyncClient {
+  return new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
 }
 
 describe('SyncClient', () => {
   it('shows a locally created ticket before the server confirms it', () => {
     const client = makeClient();
     client.mutate('ticket.create', { siteId: SITE, title: 'Leaking valve', description: '' });
-    expect(client.rows('ticket')).toHaveLength(1);
+    const tickets = client.rows('ticket');
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]).toMatchObject({ siteId: SITE, title: 'Leaking valve', status: 'open' });
     expect(client.pendingCount).toBe(1);
     client.dispose();
   });
 
-  it('numbers local mutations sequentially', () => {
-    const client = makeClient();
+  it('numbers local mutations sequentially', async () => {
+    const transport = new OfflineTransport();
+    const client = makeClient(transport);
     client.mutate('ticket.create', { siteId: SITE, title: 'A', description: '' });
     client.mutate('ticket.create', { siteId: SITE, title: 'B', description: '' });
-    expect(client.rows('ticket')).toHaveLength(2);
-    expect(client.pendingCount).toBe(2);
+    client.mutate('ticket.create', { siteId: SITE, title: 'C', description: '' });
+    await client.sync(); // the attempt started by the first mutation
+    await client.sync(); // a fresh attempt sends the whole queue
+    expect(transport.pushedIds.at(-1)).toEqual([1, 2, 3]);
+    expect(client.rows('ticket').map((t) => t.title).sort()).toEqual(['A', 'B', 'C']);
     client.dispose();
   });
 
