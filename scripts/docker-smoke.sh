@@ -2,6 +2,7 @@
 # Builds the Docker images and checks them:
 #   - the containers do not run as root;
 #   - no .env files from the build context end up in the images;
+#   - the web bundle calls the API on the port the server is published on;
 #   - `docker compose up` brings the stack up in order: postgres -> migrate -> server -> web,
 #     the server and web report healthy, and the API answers.
 # Runs in its own compose project with its own volumes and host ports, and removes them on exit.
@@ -53,6 +54,9 @@ for service in server web; do
     "find / -xdev \( -name '.env' -o -name '.env.*' \) ! -name '.env.example' 2>/dev/null; grep -rls $CANARY /app 2>/dev/null || true")
   [ -z "$leaked" ] || fail "$service image contains files from the build context that must stay out: $leaked"
 done
+web_image=$(docker inspect --format '{{.Image}}' "$(docker compose ps --all --quiet web)")
+docker run --rm --entrypoint sh "$web_image" -c "grep -rqs 'http://localhost:$SERVER_PORT' /app/apps/web/.next/static" ||
+  fail "the web bundle does not call the API at http://localhost:$SERVER_PORT (SERVER_PORT)"
 
 echo "== stack"
 docker compose up --detach --wait --wait-timeout 180 server web || fail "the stack did not become healthy"
