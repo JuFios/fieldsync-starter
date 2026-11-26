@@ -14,7 +14,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { MAX_PUSH_MUTATIONS } from '@fieldsync/sync-core';
+import { MAX_PUSH_MUTATIONS, REJECTION_CODES } from '@fieldsync/sync-core';
 import { IntegerIn } from './validation';
 
 /** Most changes one pull returns. */
@@ -97,4 +97,111 @@ export class PullQueryDto {
   @IsOptional()
   @IsUUID()
   clientId?: string;
+}
+
+// Answers, for the OpenAPI description (the services return the sync-core types they mirror).
+
+export class MutationResultDto {
+  @ApiProperty({ example: 1 })
+  id!: number;
+
+  @ApiProperty({ enum: ['applied', 'duplicate', 'rejected'] })
+  status!: 'applied' | 'duplicate' | 'rejected';
+
+  @ApiPropertyOptional({
+    description: 'Applied and duplicate: change-log version of the last change; absent when nothing changed.',
+  })
+  version?: number;
+
+  @ApiPropertyOptional({ enum: REJECTION_CODES, description: 'Rejected only: why.' })
+  code?: string;
+
+  @ApiPropertyOptional({ description: 'Rejected only: the reason, for people.' })
+  message?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Rejected only, for some codes: STATUS_CONFLICT { current, allowed }, INVALID_TRANSITION { from, to, allowed }, ' +
+      'NEGATIVE_QUANTITY { quantity, delta }, FIELD_CONFLICT { fields: [{ field, current, yours }] }.',
+    type: 'object',
+    additionalProperties: true,
+  })
+  details?: Record<string, unknown>;
+}
+
+export class PushResponseDto {
+  @ApiProperty({ type: [MutationResultDto], description: 'One result per mutation, in order.' })
+  results!: MutationResultDto[];
+
+  @ApiProperty({ description: 'The last mutation id the server handled for the client.' })
+  lastMutationId!: number;
+}
+
+export class ChangeDto {
+  @ApiProperty()
+  version!: number;
+
+  @ApiProperty({ enum: ['ticket', 'part'] })
+  entity!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  siteId!: string;
+
+  @ApiProperty({ enum: ['put', 'del'] })
+  op!: string;
+
+  @ApiProperty({ type: 'object', additionalProperties: true, nullable: true, description: 'The row; null for del.' })
+  data!: Record<string, unknown> | null;
+}
+
+export class PullResponseDto {
+  @ApiProperty({ type: [ChangeDto] })
+  changes!: ChangeDto[];
+
+  @ApiProperty({ description: 'The cursor for the next pull.' })
+  nextCursor!: number;
+
+  @ApiProperty({ description: 'True when changes follow this page.' })
+  hasMore!: boolean;
+
+  @ApiProperty({ description: 'The last mutation id the server handled for clientId (0 without one).' })
+  lastMutationId!: number;
+}
+
+export class ProblemDto {
+  @ApiProperty({ example: 'about:blank' })
+  type!: string;
+
+  @ApiProperty({ example: 'Conflict' })
+  title!: string;
+
+  @ApiProperty({ example: 409 })
+  status!: number;
+
+  @ApiProperty({ example: 'Mutation 3 does not follow the last applied one; expected 2' })
+  detail!: string;
+
+  @ApiProperty({
+    enum: [
+      'BAD_REQUEST',
+      'UNAUTHORIZED',
+      'FORBIDDEN',
+      'NOT_FOUND',
+      'MUTATION_OUT_OF_ORDER',
+      'PAYLOAD_TOO_LARGE',
+      'TOO_MANY_REQUESTS',
+      'TRANSIENT',
+      'INTERNAL',
+    ],
+  })
+  code!: string;
+
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true, example: { expected: 2 } })
+  details?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ type: [String], description: 'One message per invalid field (400).' })
+  errors?: string[];
 }
