@@ -68,7 +68,7 @@ async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSum
       }
       const summary: ProfileSummary = { profile: name, ms: Date.now() - started, report };
       summaries.push(summary);
-      console.log(formatProfileSummary(summary, PROFILES[name].allowed));
+      console.log(formatProfileSummary(summary, PROFILES[name].allowed, options.path));
     }
   } finally {
     await server?.close();

@@ -11,9 +11,15 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /**
  * The summary of one profile: runs and time, runs per signature with their paths (known defects
- * labelled as such, anything else as UNEXPECTED) and the average run statistics.
+ * labelled as such, anything else as UNEXPECTED) and the average run statistics. A search names its
+ * runs by their index, which is their fast-check path; a replay of one run (`--path`) names it by
+ * `replayedPath`.
  */
-export function formatProfileSummary(summary: ProfileSummary, allowed: readonly Signature[]): string {
+export function formatProfileSummary(
+  summary: ProfileSummary,
+  allowed: readonly Signature[],
+  replayedPath?: string,
+): string {
   const { profile, ms, report } = summary;
   const runs = report.results.length;
   const clean = report.results.filter((r) => r.violations.length === 0).length;
@@ -22,10 +28,10 @@ export function formatProfileSummary(summary: ProfileSummary, allowed: readonly 
       `(${(ms / Math.max(runs, 1)).toFixed(0)} ms/run), ${clean} without violations` +
       `${report.failure ? `, stopped at path ${report.failure.path} by an unexpected violation` : ''}`,
   ];
-  const bySignature = new Map<Signature, number[]>();
+  const bySignature = new Map<Signature, string[]>();
   report.results.forEach((r, path) => {
     for (const signature of new Set(r.violations.map((v) => v.signature))) {
-      bySignature.set(signature, [...(bySignature.get(signature) ?? []), path]);
+      bySignature.set(signature, [...(bySignature.get(signature) ?? []), replayedPath ?? String(path)]);
     }
   });
   for (const [signature, paths] of bySignature) {
