@@ -264,21 +264,17 @@ describe('SyncClient', () => {
     expect(client.pendingCount).toBe(0);
   });
 
-  knownDefect(
-    { id: 'F-09', owner: 'sync-protocol', reason: 'mutation ids are derived from lastMutationId + queue length' },
-    'never reuses a mutation id after the server rejects a mutation',
-    async () => {
-      const transport = new RejectingTransport();
-      const client = makeClient(transport);
-      client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
-      await client.sync();
-      client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
-      await client.sync();
-      const [first, second] = transport.pushedIds;
-      precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
-      expect(second).toEqual([2]);
-    },
-  );
+  it('never reuses a mutation id after the server rejects a mutation', async () => {
+    const transport = new RejectingTransport();
+    const client = makeClient(transport);
+    client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
+    await client.sync();
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
+    await client.sync();
+    const [first, second] = transport.pushedIds;
+    precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
+    expect(second).toEqual([2]);
+  });
 
   knownDefect(
     {

@@ -340,7 +340,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-06 | 10 | `it.todo` tests named behaviour nothing checked | Fixed |
 | F-07 | 4 | Incremental pull returns other sites' changes | Open (known defect) |
 | F-08 | 4 | Write access is checked against the `siteId` the client sends | Open (known defect) |
-| F-09 | 2 | Client reuses a mutation id after a rejection | Open (known defect) |
+| F-09 | 2 | Client reuses a mutation id after a rejection | Fixed |
 | F-10 | 8 | Pending mutations are lost on reload | Open (known defect) |
 | F-11 | 8 | Two tabs sharing a `clientId` lose each other's mutations | Open (known defect) |
 | F-12 | 3 | Mutator names from `Object.prototype` crash the push | Fixed |
@@ -469,8 +469,17 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   mutation gets the rejected id.
 - **Why it is dangerous.** The server treats the new mutation as a duplicate and drops it.
 - **Reproduce.** `client.spec.ts`, "never reuses a mutation id after the server rejects a
-  mutation" (known defect).
-- **Fix.** Not fixed yet; owned by the protocol change. **Commits.** `1a3c31e` (test).
+  mutation".
+- **Fix.** Ids come from a counter that only grows: each `mutate` takes the next one, and an answer
+  of the server can only move the counter past its last applied id, never back. The server now
+  advances its last mutation id for a rejected mutation too (F-23), so both sides agree on which
+  ids are used. Within one page load the counter is exact; across reloads it restarts after the
+  stored last applied id, which is safe only once the queue itself survives a reload (F-10).
+- **Alternatives.** Keeping the formula and relying on the server advancing its id on rejection:
+  any answer that removes a mutation from the queue before the id catches up (a lost response, a
+  future server) would reuse an id again. Random ids per mutation: the server could no longer tell
+  a gap from a duplicate, and ordering would need another field.
+- **Commits.** `1a3c31e` (test).
 
 ### F-10: pending mutations are lost on reload (category 8)
 

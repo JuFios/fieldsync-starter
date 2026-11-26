@@ -102,6 +102,11 @@ export class SyncClient {
   private base = new Map<string, Row>();
   private cursor = 0;
   private lastMutationId = 0;
+  /**
+   * The id the next mutation gets. Ids only grow, whatever the server answers: deriving them from
+   * the last applied id and the queue length reused an id once a mutation left the queue (F-09).
+   */
+  private nextMutationId = 1;
   private pending: Queued[] = [];
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
@@ -120,6 +125,7 @@ export class SyncClient {
     if (saved) {
       this.cursor = saved.cursor;
       this.lastMutationId = saved.lastMutationId;
+      this.nextMutationId = saved.lastMutationId + 1;
       this.base = new Map(Object.entries(saved.base));
     }
   }
@@ -152,7 +158,7 @@ export class SyncClient {
    */
   mutate(name: MutatorName, args: Record<string, unknown>): void {
     const mutation: Mutation = {
-      id: this.lastMutationId + this.pending.length + 1,
+      id: this.nextMutationId,
       name,
       args: wireArgs(args),
     };
@@ -160,6 +166,7 @@ export class SyncClient {
     if (this.envelopeBytes() + bytes > MAX_PUSH_BODY_BYTES) {
       throw new TypeError(`A mutation may take at most ${MAX_PUSH_BODY_BYTES} bytes of JSON in a push`);
     }
+    this.nextMutationId += 1;
     this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString(), bytes });
     this.emit();
     void this.sync();
@@ -241,8 +248,14 @@ export class SyncClient {
       }
     }
     this.pending = this.pending.filter((q) => !handled.has(q.mutation.id));
-    this.lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+    this.acknowledge(resp.lastMutationId);
     this.emit();
+  }
+
+  /** The server applied (or rejected) every mutation up to `lastMutationId`. */
+  private acknowledge(lastMutationId: number): void {
+    this.lastMutationId = Math.max(this.lastMutationId, lastMutationId);
+    this.nextMutationId = Math.max(this.nextMutationId, this.lastMutationId + 1);
   }
 
   private async pull(): Promise<void> {
@@ -254,7 +267,7 @@ export class SyncClient {
         else this.base.delete(key);
       }
       this.cursor = resp.nextCursor;
-      this.lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+      this.acknowledge(resp.lastMutationId);
       this.pending = this.pending.filter((q) => q.mutation.id > this.lastMutationId);
       this.persist();
       this.emit();
