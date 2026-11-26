@@ -41,6 +41,38 @@ module.exports = {
       rules: { 'no-console': 'error' },
     },
     {
+      // Mutators run on the client and on the server and must compute the same rows from the same
+      // arguments and state: ids come from the arguments and time from MutatorTx.now(), never from
+      // ambient randomness or clocks. The test suite also runs every mutator with these stubbed out.
+      files: ['packages/sync-core/src/mutators.ts'],
+      rules: {
+        'no-restricted-globals': [
+          'error',
+          ...['Date', 'crypto', 'performance', 'globalThis', 'global', 'window', 'self'].map((name) => ({
+            name,
+            message: 'Mutators must be deterministic: take ids from the arguments and time from tx.now().',
+          })),
+          ...['setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'fetch'].map((name) => ({
+            name,
+            message: 'Mutators must be synchronous and side-effect free.',
+          })),
+        ],
+        'no-restricted-properties': [
+          'error',
+          { object: 'Math', property: 'random', message: 'Mutators must be deterministic: no Math.random().' },
+        ],
+        'no-restricted-imports': [
+          'error',
+          {
+            paths: ['crypto', 'node:crypto', 'perf_hooks', 'node:perf_hooks', 'timers', 'node:timers'].map((name) => ({
+              name,
+              message: 'Mutators must not depend on randomness, clocks or timers.',
+            })),
+          },
+        ],
+      },
+    },
+    {
       files: ['**/test/**/*.ts', 'e2e/**/*.ts'],
       rules: {
         // Jest's asymmetric matchers (expect.any, expect.stringContaining, ...) are typed as `any`.
