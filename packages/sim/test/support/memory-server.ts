@@ -25,7 +25,9 @@ export type Defect =
   /** Pulled tickets carry the status "constructor", which no mutator accepts as a state. */
   | 'corrupt-status'
   /** Rejects every edit of a ticket with INTERNAL instead of applying it. */
-  | 'internal-rejection';
+  | 'internal-rejection'
+  /** An edit that leaves the description out empties it (like the original `ticket.update`). */
+  | 'blank-unsent-description';
 
 interface Entity {
   entity: EntityName;
@@ -119,7 +121,11 @@ export class MemoryServer implements SimServer {
         if (this.defects.has('internal-rejection') && m.name === 'ticket.update') {
           throw new MutationRejected('INTERNAL', 'The server could not apply this mutation');
         }
-        this.apply(user, m);
+        const blanks =
+          this.defects.has('blank-unsent-description') &&
+          m.name === 'ticket.update' &&
+          m.args.description === undefined;
+        this.apply(user, blanks ? { ...m, args: { ...m.args, description: '' } } : m);
         results.push({ id: m.id, status: 'applied' });
       } catch (err) {
         if (!(err instanceof MutationRejected)) throw err;

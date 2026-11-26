@@ -803,8 +803,9 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   description, sync in some order, and the second sync writes back the first one's field as it was
   before. An edit of one field alone was refused (`title` was required) or emptied the description.
 - **Why it is dangerous.** A confirmed edit is lost silently, on every client and the server. The
-  simulation could not see it: every client loses the same edit, so they all still converge.
-- **Reproduce.** `merge.spec.ts`.
+  convergence check cannot see it: every client loses the same edit, so they all still converge.
+- **Reproduce.** `merge.spec.ts`. In the simulation, the property "no lost edits" reports it as
+  `lost-edit` (`detection.spec.ts` puts the original behaviour back).
 - **Fix.** An edit names only the fields the user changed, with `base`: the value each had on the
   user's screen (`ticketEdit()` in `sync-core` builds it; the ticket page and the simulation use it).
   Edits of different fields merge. An edit of a field someone else changed since is rejected with
@@ -920,6 +921,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | `packages/sync-core/test/client.spec.ts` two `it.todo` | Real tests, tracked as known defects F-10, F-11 | F-06 |
 | `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Passes an `id`; the fake transaction implements `insert` and `now` | Protocol change of F-19: `ticket.create` requires a client-chosen id and writes through `MutatorTx.insert`; timestamps come from `MutatorTx.now` (F-20) |
 | `packages/sync-core/test/client.spec.ts` "shows a locally created ticket…", "numbers local mutations sequentially" | Every `ticket.create` passes an `id` | Protocol change of F-19 |
+| `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Reads the created row with optional chaining (`created?.status`) | `sync-core` compiles with `noUncheckedIndexedAccess`: an array element may be `undefined`, so the type checker rejects the unguarded access |
 | `packages/sync-core/test/client.spec.ts` (all) | Clients are disposed in `afterEach`, not at the end of the test body: a failing assertion skipped `dispose()`, the client's retry timer stayed alive and Jest never exited | A failing test must fail, not hang |
 | `apps/server/test/access.spec.ts` | Tests renamed to what they check; the fake answers per query; admin and missing-`siteId` cases added | F-04 |
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
@@ -1017,6 +1019,15 @@ random) on an emptied database. Then:
   user's own sites) separately as `divergence`, so a tolerated leak never hides a wrong row either. The server's rows are read straight from the
   `entities` table and the accessible sites come from the run's fixtures: neither goes through the
   server's pull path or access checks, so the system is never its own oracle.
+- **No lost edits** (category 9). Every title and description of a live ticket holds the value of
+  the last applied mutation that wrote that field: an edit of one field never undoes another
+  client's edit of the other. The expected value comes from the push requests and answers the
+  network carried, not from the server: the arguments of each mutation answered `applied`, in the
+  order of the answers (the server handles one request at a time), with the documented rules of what
+  `ticket.create` and `ticket.update` write. A ticket written by a mutation whose first answer was
+  lost (it shows up only as `duplicate`) has no known place in that order and is not checked.
+  Convergence alone cannot see such a loss: the client and the server run the same mutators, so
+  both lose the edit the same way.
 - **Determinism.** A seed run twice gives the same traces, byte for byte (compared by SHA-256), and
   replaying one run from its seed and path gives the same trace again. The trace holds only semantic facts:
   steps, requests and answers (status, body digest, the class and code of server-side exceptions),
@@ -1026,7 +1037,9 @@ Each violation has a **signature**:
 
 | Signature | Meaning | Known defect |
 |---|---|---|
-| `rejected-mutation-500` | a queue never drained because the server answered 500 to a mutation it rejected | F-23 (protocol change) |
+| `rejected-mutation-500` | a queue never drained because the server answered 500 to a mutation it rejected | — (F-23, fixed) |
+| `unexpected-rejection` | the server rejected a mutation with a code none of the profile's actions can cause | — |
+| `lost-edit` | a ticket field does not hold the last applied write of that field | — |
 | `foreign-site-rows` | a client holds rows of a site its user cannot access | F-07 (access-control change) |
 | `stuck-request` | a client waits forever on a request that never completes | F-13 (offline-client change) |
 | `livelock` | a queue never drained for another reason | — |
@@ -1108,7 +1121,8 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 
 - The engine runs against an in-memory reference server in its own tests (`packages/sim/test`),
   with defects that can be switched on: a row that pull never returns, rejections answered with 500,
-  other sites' rows in incremental pulls, a push that always fails, corrupted rows. Each must be
+  other sites' rows in incremental pulls, a push that always fails, corrupted rows, INTERNAL
+  rejections, an edit that empties the description it leaves out. Each must be
   reported with its signature, a search must stop at the first such run, and the correct server must
   converge on every run of every profile (in `full`, it may only get stuck on hung requests). The
   profile minimums are checked there as averages over 60 runs.
@@ -1118,7 +1132,9 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
   trace.
 - Against the real server, putting a determinism defect back into `ticket.create` must fail the
   simulation: an id made up by the mutator (F-19) fails a baseline run, and a wall-clock timestamp
-  (F-20) makes one seed give two different traces (`detection.spec.ts`).
+  (F-20) makes one seed give two different traces, and a `ticket.update` that empties the
+  description an edit leaves out, as the original one did (F-27), is reported as `lost-edit`
+  (`detection.spec.ts`).
 
 ### Results
 

@@ -37,6 +37,8 @@ export const SIGNATURES = [
   'divergence',
   /** The client code threw where it must not (for example while computing its view). */
   'client-error',
+  /** A ticket field does not hold the value of the last applied mutation that wrote it. */
+  'lost-edit',
 ] as const;
 export type Signature = (typeof SIGNATURES)[number];
 

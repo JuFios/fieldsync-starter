@@ -103,6 +103,7 @@ describe('simulation engine (against the in-memory reference server)', () => {
       ['a server that never accepts a push', 'baseline', 'push-unavailable', 'livelock'],
       ['a request that never answers', 'full', undefined, 'stuck-request'],
       ['client code that throws', 'rejections', 'corrupt-status', 'client-error'],
+      ['an edit of the title that empties the description', 'baseline', 'blank-unsent-description', 'lost-edit'],
       ['a rejection the actions of the profile cannot cause', 'baseline', 'internal-rejection', 'unexpected-rejection'],
       [
         'an INTERNAL rejection even where rejections are expected',
