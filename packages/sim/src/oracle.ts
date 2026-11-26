@@ -1,16 +1,14 @@
 import type { Row } from '@fieldsync/sync-core';
+import stringify from 'safe-stable-stringify';
 import type { StoredRow } from './types';
 
-/** JSON with object keys sorted, so equal rows compare equal whatever their key order (jsonb reorders keys). */
+/**
+ * JSON with object keys sorted (safe-stable-stringify), so equal rows compare equal whatever their
+ * key order (jsonb reorders keys). As in JSON, an `undefined` property is left out and an
+ * `undefined` array element is `null`; `undefined` itself is `null`.
+ */
 export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, v]) => v !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
+  return stringify(value) ?? 'null';
 }
 
 export interface Divergence {

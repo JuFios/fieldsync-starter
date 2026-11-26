@@ -73,4 +73,9 @@ describe('canonicalJson', () => {
       '{"a":{"d":[1,{"y":2,"z":1}]},"b":1}',
     );
   });
+
+  it('writes undefined as JSON does: null in an array and at the top level', () => {
+    expect(canonicalJson([undefined, 1])).toBe('[null,1]');
+    expect(canonicalJson(undefined)).toBe('null');
+  });
 });

@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@fieldsync/sync-core": "*",
-    "@sinonjs/fake-timers": "^15.5.0"
+    "@sinonjs/fake-timers": "^15.5.0",
+    "safe-stable-stringify": "^3.0.1"
   },
   "devDependencies": {
     "@fieldsync/test-kit": "*"
