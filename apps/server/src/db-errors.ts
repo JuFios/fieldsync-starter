@@ -22,6 +22,7 @@ const TRANSIENT_MESSAGES = new Set([
   'Connection terminated unexpectedly',
   'Connection terminated due to connection timeout',
   'Client has encountered a connection error and is not queryable',
+  'Client was closed and is not queryable',
 ]);
 
 /** Seconds a client should wait before retrying after a transient failure (the Retry-After header). */

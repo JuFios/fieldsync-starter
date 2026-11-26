@@ -31,6 +31,7 @@ describe('isTransient', () => {
   it.each([
     [Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' })],
     [new Error('Connection terminated unexpectedly')],
+    [new Error('Client was closed and is not queryable')],
     [new Error('Rollback to savepoint failed', { cause: pgError('08006') })],
   ])('treats a lost connection as transient: %s', (err) => {
     expect(isTransient(err)).toBe(true);
