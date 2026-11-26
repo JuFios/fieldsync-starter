@@ -3,6 +3,7 @@
 .github
 **/node_modules
 **/dist
+**/dist-sim
 **/.next
 **/coverage
 **/*.tsbuildinfo
