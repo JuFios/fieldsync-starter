@@ -1,4 +1,4 @@
-import { BadRequestException, HttpStatus, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpStatus, UnauthorizedException } from '@nestjs/common';
 import { ProblemException, problemOf } from '../src/problem';
 
 describe('problemOf', () => {
@@ -35,6 +35,11 @@ describe('problemOf', () => {
       code: 'UNAUTHORIZED',
       detail: 'Missing bearer token',
     });
+  });
+
+  it('gives a conflict that is not a gap in mutation ids a code of its own', () => {
+    // MUTATION_OUT_OF_ORDER tells the client to reload its state; only the push may say so.
+    expect(problemOf(new ConflictException('Taken')).problem).toMatchObject({ status: 409, code: 'CONFLICT' });
   });
 
   it.each([

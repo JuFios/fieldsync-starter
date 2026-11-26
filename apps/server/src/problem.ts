@@ -5,16 +5,19 @@ import { HttpAdapterHost } from '@nestjs/core';
 export const PROBLEM_JSON = 'application/problem+json';
 
 /** The codes of error answers, so a client can act on them without parsing `detail`. */
-export type ProblemCode =
-  | 'BAD_REQUEST'
-  | 'UNAUTHORIZED'
-  | 'FORBIDDEN'
-  | 'NOT_FOUND'
-  | 'MUTATION_OUT_OF_ORDER'
-  | 'PAYLOAD_TOO_LARGE'
-  | 'TOO_MANY_REQUESTS'
-  | 'TRANSIENT'
-  | 'INTERNAL';
+export const PROBLEM_CODES = [
+  'BAD_REQUEST',
+  'UNAUTHORIZED',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'CONFLICT',
+  'MUTATION_OUT_OF_ORDER',
+  'PAYLOAD_TOO_LARGE',
+  'TOO_MANY_REQUESTS',
+  'TRANSIENT',
+  'INTERNAL',
+] as const;
+export type ProblemCode = (typeof PROBLEM_CODES)[number];
 
 /**
  * An error answer in the format of RFC 9457: `type` is `about:blank` (no semantics beyond the status
@@ -51,7 +54,8 @@ const CODE_BY_STATUS: Partial<Record<number, ProblemCode>> = {
   401: 'UNAUTHORIZED',
   403: 'FORBIDDEN',
   404: 'NOT_FOUND',
-  409: 'MUTATION_OUT_OF_ORDER',
+  // A gap in mutation ids is a ProblemException with its own code; any other conflict is generic.
+  409: 'CONFLICT',
   413: 'PAYLOAD_TOO_LARGE',
   429: 'TOO_MANY_REQUESTS',
   503: 'TRANSIENT',

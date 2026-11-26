@@ -15,6 +15,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { MAX_PUSH_MUTATIONS, REJECTION_CODES } from '@fieldsync/sync-core';
+import { PROBLEM_CODES } from './problem';
 import { IntegerIn } from './validation';
 
 /** Most changes one pull returns. */
@@ -184,19 +185,7 @@ export class ProblemDto {
   @ApiProperty({ example: 'Mutation 3 does not follow the last applied one; expected 2' })
   detail!: string;
 
-  @ApiProperty({
-    enum: [
-      'BAD_REQUEST',
-      'UNAUTHORIZED',
-      'FORBIDDEN',
-      'NOT_FOUND',
-      'MUTATION_OUT_OF_ORDER',
-      'PAYLOAD_TOO_LARGE',
-      'TOO_MANY_REQUESTS',
-      'TRANSIENT',
-      'INTERNAL',
-    ],
-  })
+  @ApiProperty({ enum: PROBLEM_CODES })
   code!: string;
 
   @ApiPropertyOptional({ type: 'object', additionalProperties: true, example: { expected: 2 } })
