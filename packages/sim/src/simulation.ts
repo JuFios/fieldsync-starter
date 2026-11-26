@@ -141,6 +141,13 @@ function guard<T>(run: () => T): T {
   }
 }
 
+/** The violations a client's divergence from the server's rows shows. */
+export function convergenceViolations(client: string, divergence: Divergence): Violation[] {
+  return [
+    { signature: divergence.foreign.length > 0 ? 'foreign-site-rows' : 'divergence', client, detail: divergence },
+  ];
+}
+
 /**
  * The real system of the model-based test: the profile's clients (the production `SyncClient` with
  * `HttpTransport`, `MemoryStorage` and a view of the virtual clock), the simulated network between
@@ -347,12 +354,7 @@ export class SimSystem {
     for (const sim of this.clients) {
       const view = guard(() => sim.client.view());
       const divergence = compareWithServer(rows, accessibleSites(sim.user, this.fixtures), view);
-      if (!divergence) continue;
-      violations.push({
-        signature: divergence.foreign.length > 0 ? 'foreign-site-rows' : 'divergence',
-        client: sim.name,
-        detail: divergence,
-      });
+      if (divergence) violations.push(...convergenceViolations(sim.name, divergence));
     }
     return violations;
   }
