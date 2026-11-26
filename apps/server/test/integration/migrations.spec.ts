@@ -405,6 +405,24 @@ describeWithDb('database migrations', () => {
       });
     });
 
+    it('store client ids as uuid and drop clients whose id is not one', async () => {
+      const db = await starterDatabase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO users VALUES ('00000000-0000-4000-8000-000000000002', 'Tom', 'technician', 'tech-a-token');
+          INSERT INTO clients VALUES
+            ('0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', '00000000-0000-4000-8000-000000000002', 7),
+            ('client-1', '00000000-0000-4000-8000-000000000002', 3);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const rows = await ds.query<Array<{ client_id: string; type: string }>>(
+        `SELECT client_id, pg_typeof(client_id)::text AS type FROM clients`,
+      );
+      expect(rows).toEqual([{ client_id: '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', type: 'uuid' }]);
+    });
+
     it('revert to the first schema', async () => {
       const db = await emptyDatabase();
       const ds = await dataSource(db, MIGRATIONS);
