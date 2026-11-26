@@ -1,6 +1,6 @@
 import { ConfigModule } from '@nestjs/config';
 import type { DynamicModule } from '@nestjs/common';
-import { validate } from './config';
+import { EnvironmentVariables, validate } from './config';
 
 /** Environment for an application built in-process (tests), instead of process.env and `.env`. */
 export type EnvOverride = Record<string, string | undefined>;
@@ -18,7 +18,8 @@ export type EnvOverride = Record<string, string | undefined>;
  */
 export async function configModule(env?: EnvOverride): Promise<DynamicModule> {
   const isolated = env !== undefined;
-  const before = new Set(Object.keys(process.env));
+  // The settings ConfigModule may copy into process.env, and which of them are unset now.
+  const copied = Object.keys(new EnvironmentVariables()).filter((name) => !(name in process.env));
   const module = ConfigModule.forRoot({
     isGlobal: true,
     cache: true,
@@ -31,7 +32,7 @@ export async function configModule(env?: EnvOverride): Promise<DynamicModule> {
     return await module;
   } finally {
     if (isolated) {
-      for (const name of Object.keys(process.env)) if (!before.has(name)) delete process.env[name];
+      for (const name of copied) delete process.env[name];
     }
   }
 }
