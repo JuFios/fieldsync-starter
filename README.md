@@ -1051,7 +1051,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 - **Alternatives.** Storing the next id by itself: the same effect, but a second storage format
   next to the state; the queue that survives a reload (F-10) needs this state stored anyway. Random
   ids: the server could no longer tell a gap from a duplicate (see F-09).
-- **Commits.** `479a024` (test).
+- **Commits.** `479a024` (test), `5a998ac` (fix).
 
 ## Changes to starter tests
 
