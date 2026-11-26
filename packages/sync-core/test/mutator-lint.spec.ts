@@ -1,11 +1,11 @@
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { ESLint, type Linter } from 'eslint';
 
 /**
  * The lint rules that keep mutators deterministic are configuration, so nothing would notice if
  * they were dropped. This test lints the real mutators file with forbidden snippets appended (one
- * ESLint run, typed linting is slow) and expects each snippet to be reported by the right rule.
+ * ESLint run: typed linting is slow) and expects each snippet to be reported by the right rule.
  */
 
 const ROOT = resolve(__dirname, '../../..');
@@ -22,31 +22,21 @@ const FORBIDDEN: Array<[label: string, code: string, rule: string]> = [
   ['an import of node:crypto', "import { randomUUID as uuidv4 } from 'node:crypto';", 'no-restricted-imports'],
 ];
 
-interface LintResult {
-  messages: Array<{ ruleId: string | null; message: string; line: number }>;
-}
-
-/** Lints `text` as the mutators file, through the ESLint CLI and the repository config. */
-function lint(text: string): LintResult['messages'] {
-  const run = spawnSync(
-    process.execPath,
-    [resolve(ROOT, 'node_modules/eslint/bin/eslint.js'), '--format', 'json', '--stdin', '--stdin-filename', FILE],
-    { cwd: ROOT, input: text, encoding: 'utf8' },
-  );
-  if (run.error) throw run.error;
-  // Exit code 1 means "problems found"; anything else is a failure of ESLint itself.
-  if (run.status !== 0 && run.status !== 1) throw new Error(`eslint failed (${run.status}): ${run.stderr}`);
-  const [result] = JSON.parse(run.stdout) as LintResult[];
+/** Lints `text` as the mutators file with the repository's ESLint configuration (ESLint's Node.js API). */
+async function lint(text: string): Promise<Linter.LintMessage[]> {
+  const eslint = new ESLint({ cwd: ROOT });
+  const [result] = await eslint.lintText(text, { filePath: FILE });
+  if (!result) throw new Error('ESLint returned no result for the mutators file');
   return result.messages;
 }
 
 describe('mutator lint rules', () => {
   const source = readFileSync(FILE, 'utf8').replace(/\n*$/, '\n');
   const firstSnippetLine = source.split('\n').length;
-  let messages: LintResult['messages'] = [];
+  let messages: Linter.LintMessage[] = [];
 
-  beforeAll(() => {
-    messages = lint(`${source}${FORBIDDEN.map(([, code]) => code).join('\n')}\n`);
+  beforeAll(async () => {
+    messages = await lint(`${source}${FORBIDDEN.map(([, code]) => code).join('\n')}\n`);
   }, 60_000);
 
   it('accept the mutators as they are', () => {
