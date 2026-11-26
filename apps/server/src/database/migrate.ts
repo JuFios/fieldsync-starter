@@ -1,21 +1,45 @@
 import 'reflect-metadata';
-import { ConfigError, loadConfig, loadDotEnv } from '../config';
-import { createDataSource } from './data-source';
+import { Logger, Module, type DynamicModule } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { ConfigError } from '../config';
+import { configModule } from '../config.module';
 import { runMigrations } from './migrator';
+import { typeOrmOptions } from './typeorm';
 
-/** `npm run migrate`: applies pending migrations and exits. Run before starting the server. */
+/**
+ * The migration command's own module: the server's configuration (same variables, same validation)
+ * and a DataSource of one connection. Migrations run one after another on it; the lock has a
+ * connection of its own (see runMigrations).
+ */
+@Module({})
+class MigrationModule {
+  static async forRoot(): Promise<DynamicModule> {
+    return {
+      module: MigrationModule,
+      imports: [await configModule(), TypeOrmModule.forRootAsync(typeOrmOptions('fieldsync-migrate', 1))],
+    };
+  }
+}
+
+/**
+ * `npm run migrate`: applies pending migrations and exits. Run before starting the server. A Nest
+ * standalone application, so configuration and the DataSource come from the same modules as in the
+ * server.
+ */
 async function main(): Promise<void> {
-  loadDotEnv();
-  const config = loadConfig();
-  // Migrations run one after another on one connection; the lock has a connection of its own.
-  const ds = createDataSource({ url: config.databaseUrl, poolSize: 1, applicationName: 'fieldsync-migrate' });
-  await ds.initialize();
+  const app = await NestFactory.createApplicationContext(await MigrationModule.forRoot(), {
+    logger: ['error', 'warn', 'log'],
+    abortOnError: false,
+  });
   try {
-    const applied = await runMigrations(ds);
-    // eslint-disable-next-line no-console
-    console.log(applied.length ? `Applied migrations: ${applied.join(', ')}` : 'Database schema is up to date');
+    const applied = await runMigrations(app.get(DataSource));
+    new Logger('Migrations').log(
+      applied.length ? `Applied migrations: ${applied.join(', ')}` : 'Database schema is up to date',
+    );
   } finally {
-    await ds.destroy();
+    await app.close();
   }
 }
 

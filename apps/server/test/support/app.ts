@@ -1,13 +1,10 @@
 import type { INestApplication } from '@nestjs/common';
-import type { Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { createApp } from '../../src/app.factory';
-import { loadConfig } from '../../src/config';
+import { Test } from '@nestjs/testing';
+import { configureApp } from '../../src/app.factory';
+import { AppModule } from '../../src/app.module';
 
 export interface RunningApp {
   app: INestApplication;
-  /** Base URL, e.g. http://127.0.0.1:54321 */
-  url: string;
   close(): Promise<void>;
 }
 
@@ -19,21 +16,22 @@ const TEST_ENV: Record<string, string> = {
 };
 
 /**
- * Boots the real application against `databaseUrl` on an ephemeral port. Settings go through the
- * same validated loader as in production, built from TEST_ENV plus the test's overrides.
+ * Builds the real application against `databaseUrl` in-process, as the NestJS testing docs
+ * describe (`Test.createTestingModule` + `app.init()`); requests go through supertest (see Api).
+ * Settings go through the production validation, built from TEST_ENV plus the test's overrides
+ * instead of the process environment.
  */
 export async function startApp(databaseUrl: string, env: Record<string, string> = {}): Promise<RunningApp> {
-  const config = loadConfig({ ...TEST_ENV, ...env, DATABASE_URL: databaseUrl });
-  let app: INestApplication | undefined;
+  const moduleRef = await Test.createTestingModule({
+    imports: [await AppModule.forRoot({ ...TEST_ENV, ...env, DATABASE_URL: databaseUrl })],
+  }).compile();
+  // abortOnError: false makes Nest reject instead of aborting the Jest worker on a bootstrap error.
+  const app = configureApp(moduleRef.createNestApplication({ logger: false, abortOnError: false }));
   try {
-    // abortOnError: false makes Nest reject instead of aborting the Jest worker on a bootstrap error.
-    app = await createApp(config, { logger: false, abortOnError: false });
-    await app.listen(0, '127.0.0.1');
+    await app.init();
   } catch (err) {
-    await app?.close();
+    await app.close();
     throw err;
   }
-  const { port } = (app.getHttpServer() as Server).address() as AddressInfo;
-  const running = app;
-  return { app: running, url: `http://127.0.0.1:${port}`, close: () => running.close() };
+  return { app, close: () => app.close() };
 }

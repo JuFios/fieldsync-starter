@@ -69,6 +69,10 @@ npm run dev -w @fieldsync/web
 The server refuses to start while migrations are pending; run `npm run migrate` after pulling
 changes that add migrations.
 
+With `API_DOCS_ENABLED=true` the server describes its API at <http://localhost:3001/docs>
+(Swagger UI) and `/docs-json` (OpenAPI). Every route except `/health` needs
+`Authorization: Bearer <token>`.
+
 ### Checks and tests
 
 | Command | What it runs | Needs |
@@ -76,13 +80,14 @@ changes that add migrations.
 | `npm run lint` | ESLint with type information for all packages, the server, e2e and (via `next lint`) the web app; warnings fail | |
 | `npm run format:check` | Prettier check (`npm run format` applies it); Markdown is formatted by hand | |
 | `npm run typecheck` | `tsc --noEmit` for sync-core, test-kit, sim, server, web and e2e | |
-| `npm run test:unit` | Unit tests of test-kit, sync-core, the simulation engine and the server | |
+| `npm run test:unit` | Unit tests of test-kit, sync-core, the simulation engine and the server (every service method, with its collaborators replaced in the Nest testing module) | |
 | `npm run test:integration` | Server tests on a real Postgres | `DATABASE_URL` |
 | `npm run test:sim` | The simulation corpus against the real server on Postgres (see [Simulation](#simulation)) | `DATABASE_URL` |
 | `npm run sim -- --help` | Local simulation search over any number of scenarios, with shrinking (see [Simulation](#simulation)) | `DATABASE_URL` |
 | `npm test` | Unit, integration and simulation tests; database suites are skipped (with a notice) without `DATABASE_URL` | |
 | `npm run test:e2e` | Playwright, Chromium, against the production builds | `npm run build`, `DATABASE_URL`, `npx playwright install chromium` once |
-| `scripts/docker-smoke.sh` | Builds the images, checks them and starts the compose stack | Docker |
+| `scripts/docker-smoke.sh` | Builds the images, checks them (non-root, no `.env` files, resource limits) and starts the compose stack | Docker |
+| `scripts/scan-images.sh IMAGE...` | Known vulnerabilities of the images (Trivy, report only; CI puts it in the job summary) | Docker |
 | `scripts/audit-starter-tests.sh` | Shows the rewritten starter tests were vacuous (see [Changes to starter tests](#changes-to-starter-tests)) | `DATABASE_URL`, built packages |
 
 `DATABASE_URL` names a maintenance database, e.g.
@@ -93,7 +98,9 @@ changes that add migrations.
   (`CREATE DATABASE … TEMPLATE`, about 30 ms) and drops it afterwards, so files cannot see each
   other's data and each one behaves the same alone or in any worker. Fixtures write straight to
   the database, independently of the server code under test. The server under test is the real
-  application on an ephemeral port. With `REQUIRE_DB=1` (set in CI) a missing `DATABASE_URL` fails
+  application module, built with `Test.createTestingModule` and `app.init()` and called through
+  supertest, as the NestJS testing documentation describes; its settings go through the
+  production validation but come from the test, not from the process environment. With `REQUIRE_DB=1` (set in CI) a missing `DATABASE_URL` fails
   the run instead of skipping the suites.
 - **E2e tests** recreate and migrate a dedicated database (`E2E_DATABASE`, default
   `fieldsync_e2e`; the name must end with `_e2e`, so no other database can be dropped by mistake)
@@ -110,8 +117,8 @@ changes that add migrations.
 
 ## Configuration
 
-The server reads its settings once at startup and validates all of them; any invalid value stops
-it with a list of every problem, for example:
+The server reads its settings once at startup (`@nestjs/config`) and validates all of them before
+any other module is built; any invalid value stops it with a list of every problem, for example:
 
 ```
 Invalid configuration:
@@ -119,8 +126,11 @@ Invalid configuration:
   - GC_INTERVAL_MS must be an integer from 1000 to 2147483647 (got "1h")
 ```
 
-Values come from the environment, then from `apps/server/.env` (read from the working directory
-when present; the environment wins). `DATABASE_URL` is a secret: it is never logged or echoed in
+Values come from the environment, then from `.env` in the working directory (`apps/server/.env`
+for `npm start -w @fieldsync/server`) when present; the environment wins. Blank values count as
+unset. `npm run migrate` reads the same variables with the same rules. Only the variables in the
+table are taken from `.env`; anything else there (for example libpq's `PG*` defaults) does not
+reach the process, so connection settings belong in `DATABASE_URL`. `DATABASE_URL` is a secret: it is never logged or echoed in
 errors.
 
 | Server variable | Default | Valid values | Meaning |
@@ -131,6 +141,12 @@ errors.
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
+| `API_DOCS_ENABLED` | `false` | `true`, `false` | Serve the OpenAPI description at `/docs-json` and Swagger UI at `/docs`, without a token. Off by default so the API surface is not published by accident |
+
+In Docker compose every service has a memory and CPU limit (Postgres 2 CPUs and 1 GiB, the Node
+services 1 CPU and 512 MiB), and the Node services set `--max-old-space-size=384` so V8 collects
+garbage before the container reaches its limit. Change them in `docker-compose.yml` for larger
+data sets.
 
 Docker compose reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `BIND_ADDRESS`,
 `POSTGRES_PORT`, `SERVER_PORT`, `WEB_PORT`, `SEED_DEMO` and `NEXT_PUBLIC_API_URL` (all with
@@ -197,10 +213,15 @@ handful of trivial reads.
 - The initial migration is the original schema, idempotent, so it adopts a database created by the
   original server without changing its schema or data (tested on a populated database).
 
-**Why not `@nestjs/typeorm`.** Without entities it only provides dependency injection of the
-`DataSource`. By default it retries a failed connection 9 times, 3 s apart, on any error
-(including a wrong password), which delays a fail-fast start. The migration command and the tests
-need the `DataSource` outside Nest anyway, so one factory (`createDataSource`) serves all three.
+**Wiring.** The server gets its `DataSource` from `@nestjs/typeorm` (`TypeOrmModule.forRootAsync`
+with options from the validated configuration), which initializes it on startup and closes it on
+shutdown; `Db` wraps the injected `DataSource`. The module retries a failed connection 9 times,
+3 s apart, on any error by default (a wrong password included); `toRetry: () => false` turns that
+off, so a server that cannot reach its database fails at once with the driver's error and the
+process manager restarts it (tested: a wrong password fails in well under 2 s). The migration
+command is a Nest standalone application with the same configuration and data source modules.
+One options factory (`dataSourceOptions`) serves the server, the migration command and the tests
+that need a `DataSource` outside Nest.
 
 **Safety of the switch.** The characterization tests of the HTTP API and the access tests were
 written against the `pg` implementation and pass unchanged after the switch
@@ -212,12 +233,30 @@ anything that serializes whole error objects (structured logging) must drop them
 pinned to an exact version because `Db.tx` relies on how it releases broken connections, which is
 covered by tests.
 
+### Request pipeline
+
+Authentication is a global guard (`APP_GUARD`): every route requires a bearer token unless it is
+marked `@Public()` (only `/health`), so a new route cannot be left open by omission. A global
+`ValidationPipe` (`APP_PIPE`, `whitelist`, `transform`) validates DTO-typed parameters (the sync
+endpoints do not declare DTOs yet, and their input passes through unchanged); both are
+registered in the module, as the NestJS documentation recommends, so in-process test applications
+get them too. Which sites a user may read or write is decided per row from the database, inside the
+services, not by a route guard.
+
 ### Server configuration
 
-A small typed loader of our own (`apps/server/src/config.ts`) instead of `@nestjs/config`: the
-server has six settings, they must be validated as a whole before Nest starts (so `main` can print
-a readable report and exit, and the migration command can use the same rules), and `.env` loading
-is Node's own parser (`util.parseEnv`). The loader is plain TypeScript and fully unit-tested.
+`@nestjs/config` (`ConfigModule.forRoot`, global, cached) with a `validate` function built on
+`class-validator` and `class-transformer`, as in the module's documentation. Services read typed
+values through `ConfigService<EnvironmentVariables, true>` with `infer: true`.
+
+The validation keeps the rules of the original loader, which the documentation's example would
+loosen: integers are converted only from decimal strings (`enableImplicitConversion` would accept
+`1e4` and `0x10` and turn an empty string into 0), blank values count as unset, every problem is
+reported at once with the variable's name, and the database URL never appears in a message.
+`ConfigModule.forRoot` validates while it builds the module, so an invalid setting stops the server
+before Nest starts any other module, and `main` prints only the report. Applications built
+in-process (tests, the simulation) pass their settings explicitly and ignore the process
+environment and `.env`, so several of them can run in one process with different settings.
 
 ### Deterministic simulation (3.3.2)
 
@@ -504,8 +543,10 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   instead of collecting every millisecond"; unit tests in `apps/server/test/config.spec.ts`.
 - **Fix.** A validated, typed configuration loaded once at startup; invalid values stop the server
   with a readable report (see [Configuration](#configuration)).
-- **Alternatives.** `@nestjs/config` with a schema library: an extra dependency for six settings,
-  and validation would run inside Nest's bootstrap rather than before it.
+- **Alternatives.** Joi as `validationSchema` (the other approach the `@nestjs/config`
+  documentation shows; another dependency next to `class-validator`, which the request DTOs use
+  anyway), or a hand-written loader (what the fix first was; replaced by `@nestjs/config` to follow
+  the framework's documented approach, see [Server configuration](#server-configuration)).
 - **Commits.** `6312140` (test), `84c1a44` (fix).
 
 ### F-17: Docker images (other)
@@ -931,7 +972,9 @@ work.
   release, each with its own change and the full test suite as the safety net.
 - `typeorm` is flagged (moderate) through its `glob` dependency's command-line tool, which is never
   run: migrations are listed explicitly, not globbed.
-- Docker base images use the `node:20.19-alpine` tag, not a digest.
+- Docker base images use the `node:20.19-alpine` tag, not a digest. CI reports the images' known
+  vulnerabilities (Trivy, HIGH and CRITICAL) in the job summary without failing the build; most of
+  them come from the kept runtime versions and from the npm copy in the Node base image.
 - The web app must be served from a secure context (HTTPS, or `localhost`): like the original
   code, it creates client, ticket and part ids with `crypto.randomUUID`, which browsers expose only
   there.

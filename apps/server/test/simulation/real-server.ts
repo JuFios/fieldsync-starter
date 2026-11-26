@@ -9,7 +9,6 @@ import request from 'supertest';
 import { configureApp } from '../../src/app.factory';
 import { AppModule } from '../../src/app.module';
 import { Clock } from '../../src/clock';
-import { loadConfig } from '../../src/config';
 
 /** The application's own tables, in an order TRUNCATE accepts (it truncates them all at once anyway). */
 const TABLES = ['clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
@@ -79,15 +78,15 @@ export class RealServer implements SimServer {
   private readonly agent = new Agent({ keepAlive: true, maxSockets: 1 });
 
   static async start(databaseUrl: string): Promise<RealServer> {
-    const config = loadConfig({
+    const env = {
       DATABASE_URL: databaseUrl,
       SEED_DEMO: 'false',
       // The simulation drives no GC; keep the timer from firing during a long local search.
       GC_INTERVAL_MS: String(2_147_483_647),
       DB_POOL_MAX: '4',
-    });
+    };
     const clock = new SimulatedClock();
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(config)] })
+    const moduleRef = await Test.createTestingModule({ imports: [await AppModule.forRoot(env)] })
       .overrideProvider(Clock)
       .useValue(clock)
       .compile();

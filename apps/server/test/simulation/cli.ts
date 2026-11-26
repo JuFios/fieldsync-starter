@@ -1,4 +1,5 @@
 /* eslint-disable no-console -- a command-line entry point: results go to stdout, progress to stderr */
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { CommanderError } from '@commander-js/extra-typings';
@@ -18,14 +19,13 @@ async function version(): Promise<string> {
  * after the options are valid, so `--help`, `--version` and option errors start fast.
  */
 async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSummary[]> {
-  const [{ checkProfile, formatFailure, PROFILES }, { loadDotEnv }, { createSimulationDatabase }, { RealServer }] =
-    await Promise.all([
-      import('@fieldsync/sim'),
-      import('../../src/config'),
-      import('./sim-database'),
-      import('./real-server'),
-    ]);
-  loadDotEnv();
+  const [{ checkProfile, formatFailure, PROFILES }, { createSimulationDatabase }, { RealServer }] = await Promise.all([
+    import('@fieldsync/sim'),
+    import('./sim-database'),
+    import('./real-server'),
+  ]);
+  // Like the server: variables from .env in the working directory, where the environment wins.
+  if (existsSync('.env')) process.loadEnvFile();
   if (!process.env.DATABASE_URL) {
     throw new UsageProblem(
       'DATABASE_URL is not set. Start Postgres (docker compose up -d postgres) and set it, see the README.',

@@ -1,7 +1,7 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import type { DataSource, QueryRunner } from 'typeorm';
-import { AppConfig } from './config';
-import { createDataSource } from './database/data-source';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { DataSource, type QueryRunner } from 'typeorm';
+import type { EnvironmentVariables } from './config';
 import { pendingMigrations } from './database/migrator';
 import { seedDemo } from './seed';
 
@@ -31,21 +31,20 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * The server's SQL access over the DataSource that `TypeOrmModule` creates, initializes and closes
+ * on shutdown. On startup it refuses an out-of-date schema and seeds the demo data if configured.
+ */
 @Injectable()
-export class Db implements Sql, OnModuleInit, OnModuleDestroy {
+export class Db implements Sql, OnModuleInit {
   private readonly logger = new Logger(Db.name);
-  readonly dataSource: DataSource;
 
-  constructor(private readonly config: AppConfig) {
-    this.dataSource = createDataSource({
-      url: config.databaseUrl,
-      poolSize: config.dbPoolMax,
-      applicationName: 'fieldsync-server',
-    });
-  }
+  constructor(
+    readonly dataSource: DataSource,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
+  ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.dataSource.initialize();
     const pending = await pendingMigrations(this.dataSource);
     if (pending.length > 0) {
       throw new Error(
@@ -53,11 +52,7 @@ export class Db implements Sql, OnModuleInit, OnModuleDestroy {
           `Run "npm run migrate" before starting the server.`,
       );
     }
-    if (this.config.seedDemo) await seedDemo(this);
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    if (this.dataSource.isInitialized) await this.dataSource.destroy();
+    if (this.config.get('SEED_DEMO', { infer: true })) await seedDemo(this);
   }
 
   async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<SqlResult<T>> {
