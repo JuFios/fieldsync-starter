@@ -1,7 +1,7 @@
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
-import type { Transport } from './transport';
+import { TransportError, type Transport } from './transport';
 import {
   MAX_PUSH_BODY_BYTES,
   MAX_PUSH_MUTATIONS,
@@ -13,6 +13,14 @@ import {
 } from './types';
 
 export type SyncStatus = 'idle' | 'syncing' | 'offline';
+
+/** Why the last sync failed: the server's problem code, or NETWORK when no answer arrived. */
+export interface SyncError {
+  /** 0 when no answer arrived. */
+  status: number;
+  code: string;
+  details?: Readonly<Record<string, unknown>>;
+}
 
 /** A mutation the server refused, with its reason; the client keeps it for the user to see. */
 export interface RejectedMutation extends Rejection {
@@ -121,6 +129,7 @@ export class SyncClient {
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
   private rejected: RejectedMutation[] = [];
+  private lastError?: SyncError;
   private changeCount = 0;
   private retryTimer?: TimerHandle;
   private inFlight?: Promise<void>;
@@ -150,6 +159,15 @@ export class SyncClient {
 
   get rejections(): readonly RejectedMutation[] {
     return this.rejected;
+  }
+
+  /**
+   * Why the last sync failed, until one succeeds. A `MUTATION_OUT_OF_ORDER` (409) means the server
+   * misses mutations this client no longer has (its queue was lost): retrying cannot help, the
+   * client's state has to be reloaded.
+   */
+  get syncError(): SyncError | undefined {
+    return this.lastError;
   }
 
   /** Increases on every state change; usable as a cheap snapshot id for UI bindings. */
@@ -216,8 +234,13 @@ export class SyncClient {
     try {
       await this.push();
       await this.pull();
+      this.lastError = undefined;
       this.setStatus('idle');
-    } catch {
+    } catch (err) {
+      this.lastError =
+        err instanceof TransportError
+          ? { status: err.status, code: err.code, ...(err.details ? { details: err.details } : {}) }
+          : { status: 0, code: 'NETWORK' };
       this.setStatus('offline');
       this.scheduleRetry();
     }
