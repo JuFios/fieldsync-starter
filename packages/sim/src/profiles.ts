@@ -93,6 +93,8 @@ export interface Profile {
   responseFaults: Readonly<Record<ResponseFault, number>>;
   /** Link state a `link` step switches to. */
   linkStates: Readonly<Record<LinkState, number>>;
+  /** Users sometimes type text the server must reject (empty, too long, unstorable characters). */
+  invalidText: boolean;
   /** Longest time a `tick` step lets pass, in ms (the client retries after 5 s). */
   maxTickMs: number;
   /** Known-defect signatures this profile may produce (see {@link KNOWN_SIGNATURES}). */
@@ -162,9 +164,10 @@ const baseline: Profile = {
   requestFaults: ALL_REQUEST_FAULTS,
   responseFaults: ALL_RESPONSE_FAULTS,
   linkStates: ALL_LINK_STATES,
+  invalidText: false,
   maxTickMs: 8_000,
   allowed: [],
-  minimumPerSeed: { ...NETWORK_MINIMUM, contendedRows: 1.5, 'action:edit-ticket': 6 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, 'action:edit-ticket': 6 },
 };
 
 /** Baseline plus every action that can be rejected: status races, deletes against edits, adjustments near zero. */
@@ -181,8 +184,9 @@ const rejections: Profile = {
     'increase-part': 1,
     'adjust-part': 3,
   },
+  invalidText: true,
   allowed: ['rejected-mutation-500'],
-  minimumPerSeed: { ...NETWORK_MINIMUM, contendedRows: 1.5, serverRejections: 1, 'action:change-status': 3 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, serverRejections: 1, 'action:change-status': 3 },
 };
 
 /** Two sites, technicians of one site each, a technician of both and an admin; no rejectable actions. */
@@ -205,7 +209,7 @@ const multiSite: Profile = {
   ],
   allowed: ['foreign-site-rows'],
   // Users of different sites see fewer of each other's tickets, so fewer rows have several writers.
-  minimumPerSeed: { ...NETWORK_MINIMUM, contendedRows: 1, 'action:edit-ticket': 6 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, 'action:edit-ticket': 6 },
 };
 
 /** Everything at once, hung requests included. */
@@ -214,9 +218,10 @@ const full: Profile = {
   name: 'full',
   description: 'two sites, every network fault including hung requests, every action',
   actionWeights: rejections.actionWeights,
+  invalidText: true,
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 0.3 },
   allowed: ['rejected-mutation-500', 'foreign-site-rows', 'stuck-request'],
-  minimumPerSeed: { ...NETWORK_MINIMUM, serverRejections: 1, 'action:change-status': 3 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
 };
 
 export const PROFILES = { baseline, rejections, 'multi-site': multiSite, full } satisfies Record<string, Profile>;

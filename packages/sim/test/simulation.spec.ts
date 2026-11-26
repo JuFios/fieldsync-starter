@@ -67,7 +67,12 @@ describe('simulation engine (against the in-memory reference server)', () => {
       'keeps the %s profile above its minimum statistics',
       async (name) => {
         const profile = PROFILES[name];
-        const results = await runAll(profile);
+        // Averages over a larger sample: per-seed values vary a lot (a seed may have no conflict at all).
+        const results = await runAll(
+          profile,
+          [],
+          Array.from({ length: 60 }, (_, i) => i + 1),
+        );
         const average = (key: string) => results.reduce((sum, r) => sum + (r.stats[key] ?? 0), 0) / results.length;
         const below = Object.entries(profile.minimumPerSeed)
           .filter(([key, min]) => average(key) < min)

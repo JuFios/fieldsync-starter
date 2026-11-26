@@ -43,8 +43,41 @@ export interface ActorView {
   parts: readonly Row[];
 }
 
-function title(random: Random): string {
-  return `${random.pick(['Pump', 'Valve', 'Belt', 'Motor', 'Sensor', 'Panel'])} ${random.hex(3)}`;
+const WRENCH = '\u{1F527}';
+
+/**
+ * Text a user may type, mostly plain but also non-ASCII, emoji (surrogate pairs) and lengths at the
+ * limits: a title of exactly `max` UTF-16 units ending in an emoji, a description longer than its
+ * limit with an emoji across the cut. With `invalid`, sometimes text the server must reject: empty,
+ * one unit too long, a NUL character or an unpaired surrogate.
+ */
+function text(random: Random, field: 'title' | 'description' | 'name', invalid: boolean): string {
+  const max = field === 'title' ? 200 : field === 'name' ? 100 : 5000;
+  const words = field === 'name' ? ['Seal', 'Bearing', 'Filter', 'Fuse'] : ['Pump', 'Valve', 'Belt', 'Motor', 'Sensor'];
+  const variant = random.weighted({ plain: 80, unicode: 12, limit: 5, invalid: invalid ? 3 : 0 });
+  switch (variant) {
+    case 'plain':
+      return `${random.pick(words)} ${random.hex(3)}`;
+    case 'unicode':
+      return `${random.pick(['Насос', 'Ventil ü', '泵', 'Ćwiek', 'e\u0301'])} ${WRENCH} ${random.hex(2)}`;
+    case 'limit':
+      // Description: longer than the limit, the emoji's halves on both sides of the cut. Otherwise:
+      // exactly the limit, the emoji in the last two units.
+      return field === 'description' ? `${'x'.repeat(max - 1)}${WRENCH}tail` : `${'x'.repeat(max - 2)}${WRENCH}`;
+    case 'invalid':
+      return random.pick(['', 'x'.repeat(max + 1), 'pump\u0000room', 'pump \ud83d']);
+  }
+}
+
+/**
+ * A row to act on. Users of one site mostly work on the same few open jobs, so most picks come from
+ * a small "hot" set (the rows with the lowest ids, the same set on every client that has them);
+ * that is what makes clients write the same rows concurrently.
+ */
+function pickRow(rows: readonly Row[], random: Random): Row | undefined {
+  if (rows.length === 0) return undefined;
+  const byId = [...rows].sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
+  return random.chance(0.75) ? random.pick(byId.slice(0, 2)) : random.pick(byId);
 }
 
 /**
@@ -52,16 +85,18 @@ function title(random: Random): string {
  * the client shows. Users act only on rows of sites they can access. When there is nothing to act
  * on (no ticket to edit yet), the user creates a ticket instead.
  */
-export function generateAction(kind: ActionKind, view: ActorView, random: Random): Action {
-  const ticket = view.tickets.length > 0 ? random.pick(view.tickets) : undefined;
-  const part = view.parts.length > 0 ? random.pick(view.parts) : undefined;
+export function generateAction(kind: ActionKind, view: ActorView, random: Random, invalidText = false): Action {
+  const title = () => text(random, 'title', invalidText);
+  const description = () => (random.chance(0.3) ? text(random, 'description', invalidText) : '');
+  const ticket = pickRow(view.tickets, random);
+  const part = pickRow(view.parts, random);
   const create = (): Action => ({
     name: 'ticket.create',
     args: {
       id: random.uuid(),
       siteId: random.pick(view.sites),
-      title: title(random),
-      description: random.chance(0.3) ? `Notes ${random.hex(4)}` : '',
+      title: title(),
+      description: description(),
     },
   });
   switch (kind) {
@@ -74,8 +109,8 @@ export function generateAction(kind: ActionKind, view: ActorView, random: Random
         args: {
           id: ticket.id,
           siteId: ticket.siteId,
-          title: title(random),
-          description: random.chance(0.5) ? `Notes ${random.hex(4)}` : ticket.description,
+          title: title(),
+          description: random.chance(0.5) ? description() : ticket.description,
         },
       };
     case 'change-status': {
@@ -97,7 +132,7 @@ export function generateAction(kind: ActionKind, view: ActorView, random: Random
           id: random.uuid(),
           ticketId: ticket.id,
           siteId: ticket.siteId,
-          name: random.pick(['Seal', 'Bearing', 'Filter', 'Fuse']),
+          name: text(random, 'name', invalidText),
           quantity: random.int(1, 3),
         },
       };

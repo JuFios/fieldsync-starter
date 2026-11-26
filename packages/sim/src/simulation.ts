@@ -142,7 +142,7 @@ export async function runScenario(options: RunOptions): Promise<RunResult> {
   const script: Step[] = [];
   const pushPaths = new Map<number, boolean>();
   const lastPushErrors = new Map<string, string[]>();
-  const writers = new Map<string, Set<string>>();
+  const lastWriter = new Map<string, string>();
 
   const onNetwork = (event: NetworkEvent) => {
     trace.push(describeEvent(event));
@@ -255,7 +255,12 @@ export async function runScenario(options: RunOptions): Promise<RunResult> {
         guard(() => sim.client.mutate(step.action.name, step.action.args));
         stats.add(`action:${step.intent}`);
         const target = targetOf(step.action);
-        if (target) writers.set(target, (writers.get(target) ?? new Set()).add(step.client));
+        if (target) {
+          // A write to a row another client wrote last: the situation merge semantics exist for.
+          const previous = lastWriter.get(target);
+          if (previous !== undefined && previous !== step.client) stats.add('crossClientWrites');
+          lastWriter.set(target, step.client);
+        }
         break;
       }
       case 'sync':
@@ -294,7 +299,8 @@ export async function runScenario(options: RunOptions): Promise<RunResult> {
       case 'act': {
         const sim = stepRandom.pick(clients);
         const intent = actionRandom.weighted(profile.actionWeights);
-        return { kind, client: sim.name, intent, action: generateAction(intent, actorView(sim), actionRandom) };
+        const action = generateAction(intent, actorView(sim), actionRandom, profile.invalidText);
+        return { kind, client: sim.name, intent, action };
       }
       case 'sync':
         return { kind, client: stepRandom.pick(clients).name };
@@ -429,7 +435,6 @@ export async function runScenario(options: RunOptions): Promise<RunResult> {
       `final ${sim.name} status=${sim.client.status} pending=${sim.client.pendingCount} rows=${view.length} digest:${digest(view.join('\n'))}`,
     );
   }
-  for (const [target, names] of writers) if (names.size > 1 && target) stats.add('contendedRows');
   stats.add('steps', script.length);
   return {
     seed,
