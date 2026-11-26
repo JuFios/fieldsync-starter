@@ -1,3 +1,4 @@
+import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
 import type { Transport } from './transport';
@@ -20,6 +21,8 @@ export interface SyncClientOptions {
   clientId: string;
   transport: Transport;
   storage: SyncStorage;
+  /** Time and timers; defaults to the system clock. */
+  clock?: SyncClock;
 }
 
 class MapTx implements MutatorTx {
@@ -78,6 +81,7 @@ export class SyncClient {
   readonly clientId: string;
   private readonly transport: Transport;
   private readonly storage: SyncStorage;
+  private readonly clock: SyncClock;
   private base = new Map<string, Row>();
   private cursor = 0;
   private lastMutationId = 0;
@@ -86,7 +90,7 @@ export class SyncClient {
   private currentStatus: SyncStatus = 'idle';
   private rejected: Rejection[] = [];
   private changeCount = 0;
-  private retryTimer?: ReturnType<typeof setTimeout>;
+  private retryTimer?: TimerHandle;
   private inFlight?: Promise<void>;
   private disposed = false;
 
@@ -94,6 +98,7 @@ export class SyncClient {
     this.clientId = opts.clientId;
     this.transport = opts.transport;
     this.storage = opts.storage;
+    this.clock = opts.clock ?? systemClock;
     const saved = this.storage.load();
     if (saved) {
       this.cursor = saved.cursor;
@@ -134,7 +139,7 @@ export class SyncClient {
       name,
       args: wireArgs(args),
     };
-    this.pending.push({ mutation, queuedAt: new Date().toISOString() });
+    this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString() });
     this.emit();
     void this.sync();
   }
@@ -164,7 +169,7 @@ export class SyncClient {
 
   dispose(): void {
     this.disposed = true;
-    if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
     this.listeners.clear();
   }
 
@@ -229,8 +234,8 @@ export class SyncClient {
 
   private scheduleRetry(): void {
     if (this.disposed) return;
-    if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => void this.sync(), 5000);
+    if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
+    this.retryTimer = this.clock.setTimeout(() => void this.sync(), 5000);
   }
 
   private emit(): void {

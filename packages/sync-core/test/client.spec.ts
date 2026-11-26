@@ -1,5 +1,6 @@
 import { knownDefect, precondition } from '@fieldsync/test-kit';
-import { MemoryStorage, SyncClient, type SyncClientOptions, type Transport } from '../src';
+import { MemoryStorage, SyncClient, type SyncClientOptions, type TimerHandle, type Transport } from '../src';
+import type { SyncClock } from '../src';
 import type { PullResponse, PushRequest, PushResponse } from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
@@ -86,6 +87,41 @@ class FakeServer {
   }
 }
 
+/** A clock that moves only when the test advances it. */
+class ManualClock implements SyncClock {
+  private time = Date.parse('2030-01-01T00:00:00.000Z');
+  private readonly timers = new Map<TimerHandle, { at: number; callback: () => void }>();
+
+  now(): number {
+    return this.time;
+  }
+
+  setTimeout(callback: () => void, ms: number): TimerHandle {
+    const handle = {} as TimerHandle;
+    this.timers.set(handle, { at: this.time + ms, callback });
+    return handle;
+  }
+
+  clearTimeout(handle: TimerHandle): void {
+    this.timers.delete(handle);
+  }
+
+  get pendingTimers(): number {
+    return this.timers.size;
+  }
+
+  /** Moves time forward and runs the timers that fall due, in order. */
+  async advance(ms: number): Promise<void> {
+    this.time += ms;
+    for (const [handle, timer] of [...this.timers].sort((a, b) => a[1].at - b[1].at)) {
+      if (timer.at > this.time) break;
+      this.timers.delete(handle);
+      timer.callback();
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+}
+
 /**
  * Every client a test creates, disposed after each test: a client that is not disposed keeps a
  * retry timer alive, so a failing assertion would otherwise leave Jest hanging instead of failing.
@@ -155,6 +191,25 @@ describe('SyncClient', () => {
     await client.sync();
     expect(client.status).toBe('idle');
     expect(server.applied.map((m) => m.title)).toEqual(['Next']);
+  });
+
+  it('retries and stamps optimistic rows on the clock it is given', async () => {
+    const clock = new ManualClock();
+    const transport = new OfflineTransport();
+    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
+    await client.sync();
+    expect(client.rows('ticket')[0].createdAt).toBe('2030-01-01T00:00:00.000Z');
+    expect(transport.pushedIds).toHaveLength(1);
+    expect(clock.pendingTimers).toBe(1);
+
+    await clock.advance(4_999);
+    expect(transport.pushedIds).toHaveLength(1);
+    await clock.advance(1);
+    expect(transport.pushedIds).toHaveLength(2);
+
+    client.dispose();
+    expect(clock.pendingTimers).toBe(0);
   });
 
   it('numbers local mutations sequentially', async () => {
