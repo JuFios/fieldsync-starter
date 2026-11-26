@@ -110,6 +110,14 @@ describe('SyncClient', () => {
     expect(client.pendingCount).toBe(1);
   });
 
+  it('keeps an optimistic ticket under the id the caller chose', () => {
+    const client = makeClient();
+    const id = '44444444-4444-4444-8444-444444444444';
+    client.mutate('ticket.create', { id, siteId: SITE, title: 'Leaking valve', description: '' });
+    expect(client.rows('ticket').map((t) => t.id)).toEqual([id]);
+    expect(client.rows('ticket').map((t) => t.id)).toEqual([id]);
+  });
+
   it('numbers local mutations sequentially', async () => {
     const transport = new OfflineTransport();
     const client = makeClient(transport);

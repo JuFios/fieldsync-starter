@@ -16,6 +16,12 @@ class FakeTx implements MutatorTx {
     this.rows.set(`${entity}/${id}`, row);
   }
 
+  insert(entity: EntityName, id: string, row: Row) {
+    const key = `${entity}/${id}`;
+    if (this.rows.has(key)) throw new MutationRejected('ID_CONFLICT', `${entity} ${id} already exists`);
+    this.rows.set(key, row);
+  }
+
   del(entity: EntityName, id: string) {
     this.rows.delete(`${entity}/${id}`);
   }
@@ -47,6 +53,31 @@ describe('ticket mutators', () => {
     const [created] = [...tx.rows.values()];
     expect(created.status).toBe('open');
     expect(created.siteId).toBe(SITE);
+  });
+
+  it('creates the ticket under the id the client chose', () => {
+    const tx = new FakeTx();
+    MUTATORS['ticket.create'].apply(tx, { id: TICKET, siteId: SITE, title: 'Broken pump', description: '' });
+    expect([...tx.rows.keys()]).toEqual([`ticket/${TICKET}`]);
+    expect(tx.get('ticket', TICKET)?.id).toBe(TICKET);
+  });
+
+  it('writes the same ticket every time the same create is applied', () => {
+    const args = { id: TICKET, siteId: SITE, title: 'Broken pump', description: '' };
+    const first = new FakeTx();
+    const second = new FakeTx();
+    MUTATORS['ticket.create'].apply(first, args);
+    MUTATORS['ticket.create'].apply(second, args);
+    expect([...second.rows]).toEqual([...first.rows]);
+  });
+
+  it('rejects a create with an id that is already taken', () => {
+    const tx = new FakeTx([['ticket', TICKET, ticket('done')]]);
+    const err = rejectionOf(() =>
+      MUTATORS['ticket.create'].apply(tx, { id: TICKET, siteId: SITE, title: 'Again', description: '' }),
+    );
+    expect(err.code).toBe('ID_CONFLICT');
+    expect(tx.get('ticket', TICKET)?.status).toBe('done');
   });
 
   it('rejects an update for a ticket that does not exist', () => {
