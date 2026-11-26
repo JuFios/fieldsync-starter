@@ -28,7 +28,14 @@ interface Write {
 class BufferedTx implements MutatorTx {
   readonly writes: Write[] = [];
 
-  constructor(private readonly loaded: Map<string, Loaded>) {}
+  constructor(
+    private readonly loaded: Map<string, Loaded>,
+    private readonly time: string,
+  ) {}
+
+  now(): string {
+    return this.time;
+  }
 
   get(entity: EntityName, id: string): Row | undefined {
     return this.loaded.get(`${entity}/${id}`)?.row;
@@ -68,8 +75,11 @@ function assertUuids(args: Record<string, unknown>): void {
   }
 }
 
-/** Applies one mutation inside the caller's transaction; returns the site ids it touched. */
-export async function applyMutation(c: Sql, user: AuthUser, m: Mutation): Promise<string[]> {
+/**
+ * Applies one mutation inside the caller's transaction; returns the site ids it touched. `at` is the
+ * server time of the mutation: the mutator's `tx.now()` and the `created_at` of its log entries.
+ */
+export async function applyMutation(c: Sql, user: AuthUser, m: Mutation, at: Date): Promise<string[]> {
   const def = MUTATORS[m.name];
   if (!def) throw new MutationRejected('UNKNOWN_MUTATOR', `Unknown mutator ${String(m.name)}`);
   assertUuids(m.args);
@@ -88,7 +98,7 @@ export async function applyMutation(c: Sql, user: AuthUser, m: Mutation): Promis
     });
   }
 
-  const tx = new BufferedTx(loaded);
+  const tx = new BufferedTx(loaded, at.toISOString());
   def.apply(tx, m.args);
 
   const touched = new Set<string>();
@@ -98,8 +108,9 @@ export async function applyMutation(c: Sql, user: AuthUser, m: Mutation): Promis
     touched.add(siteId);
     const op = w.op === 'del' ? 'del' : 'put';
     const { rows } = await c.query<{ version: string }>(
-      `INSERT INTO change_log (site_id, entity, entity_id, op, data) VALUES ($1, $2, $3, $4, $5) RETURNING version`,
-      [siteId, w.entity, w.id, op, op === 'put' ? JSON.stringify(w.row) : null],
+      `INSERT INTO change_log (site_id, entity, entity_id, op, data, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING version`,
+      [siteId, w.entity, w.id, op, op === 'put' ? JSON.stringify(w.row) : null, at],
     );
     const version = rows[0].version;
     if (w.op === 'insert') {

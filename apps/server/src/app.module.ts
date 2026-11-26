@@ -1,5 +1,6 @@
 import { DynamicModule, Module } from '@nestjs/common';
 import { AuthGuard } from './auth';
+import { Clock, SystemClock } from './clock';
 import { AppConfig } from './config';
 import { Db } from './db';
 import { GcService } from './gc.service';
@@ -11,7 +12,15 @@ import { SyncController } from './sync.controller';
 
 @Module({
   controllers: [SyncController, HealthController],
-  providers: [Db, AuthGuard, PushService, PullService, StreamService, GcService],
+  providers: [
+    Db,
+    AuthGuard,
+    { provide: Clock, useClass: SystemClock },
+    PushService,
+    PullService,
+    StreamService,
+    GcService,
+  ],
 })
 export class AppModule {
   static forRoot(config: AppConfig): DynamicModule {

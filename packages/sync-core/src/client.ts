@@ -10,6 +10,12 @@ export interface Rejection {
   error: string;
 }
 
+/** A mutation waiting for the server, with the time it was queued (its optimistic timestamp). */
+interface Queued {
+  mutation: Mutation;
+  queuedAt: string;
+}
+
 export interface SyncClientOptions {
   clientId: string;
   transport: Transport;
@@ -17,7 +23,14 @@ export interface SyncClientOptions {
 }
 
 class MapTx implements MutatorTx {
-  constructor(private readonly state: Map<string, Row>) {}
+  constructor(
+    private readonly state: Map<string, Row>,
+    private readonly time: string,
+  ) {}
+
+  now(): string {
+    return this.time;
+  }
 
   get(entity: EntityName, id: string): Row | undefined {
     return this.state.get(`${entity}/${id}`);
@@ -38,9 +51,9 @@ class MapTx implements MutatorTx {
   }
 }
 
-function applyLocally(state: Map<string, Row>, m: Mutation): void {
+function applyLocally(state: Map<string, Row>, m: Mutation, time: string): void {
   try {
-    MUTATORS[m.name].apply(new MapTx(state), m.args);
+    MUTATORS[m.name].apply(new MapTx(state, time), m.args);
   } catch (err) {
     if (!(err instanceof MutationRejected)) throw err;
   }
@@ -53,7 +66,7 @@ export class SyncClient {
   private base = new Map<string, Row>();
   private cursor = 0;
   private lastMutationId = 0;
-  private pending: Mutation[] = [];
+  private pending: Queued[] = [];
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
   private rejected: Rejection[] = [];
@@ -102,7 +115,7 @@ export class SyncClient {
       name,
       args,
     };
-    this.pending.push(mutation);
+    this.pending.push({ mutation, queuedAt: new Date().toISOString() });
     this.emit();
     void this.sync();
   }
@@ -110,7 +123,7 @@ export class SyncClient {
   /** Server state with all unacknowledged local mutations applied on top. */
   view(): Map<string, Row> {
     const state = new Map(this.base);
-    for (const m of this.pending) applyLocally(state, m);
+    for (const q of this.pending) applyLocally(state, q.mutation, q.queuedAt);
     return state;
   }
 
@@ -150,7 +163,7 @@ export class SyncClient {
 
   private async push(): Promise<void> {
     if (this.pending.length === 0) return;
-    const batch = this.pending.slice(0, 100);
+    const batch = this.pending.slice(0, 100).map((q) => q.mutation);
     const resp = await this.transport.push({ clientId: this.clientId, mutations: batch });
     const handled = new Set(resp.results.map((r) => r.id));
     for (const r of resp.results) {
@@ -159,7 +172,7 @@ export class SyncClient {
         if (mutation) this.rejected.push({ mutation, error: r.error ?? 'rejected' });
       }
     }
-    this.pending = this.pending.filter((m) => !handled.has(m.id));
+    this.pending = this.pending.filter((q) => !handled.has(q.mutation.id));
     this.lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
     this.emit();
   }
@@ -174,7 +187,7 @@ export class SyncClient {
       }
       this.cursor = resp.nextCursor;
       this.lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
-      this.pending = this.pending.filter((m) => m.id > this.lastMutationId);
+      this.pending = this.pending.filter((q) => q.mutation.id > this.lastMutationId);
       this.persist();
       this.emit();
       if (!resp.hasMore) break;

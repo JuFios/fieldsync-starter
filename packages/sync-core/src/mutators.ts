@@ -17,6 +17,13 @@ export interface Key {
 
 /** State access given to a mutator. Reads are served from rows loaded up front. */
 export interface MutatorTx {
+  /**
+   * The time of this mutation (ISO 8601). Mutators take every timestamp from here and never read a
+   * clock themselves: on the client it is the time the mutation was queued, fixed for every
+   * recomputation of the optimistic view; on the server it is the server's clock when the mutation
+   * is applied, which is what the stored row keeps.
+   */
+  now(): string;
   get(entity: EntityName, id: string): Row | undefined;
   /** Writes a row that already exists (or replaces one read in this mutation). */
   put(entity: EntityName, id: string, row: Row): void;
@@ -61,8 +68,6 @@ function uuid(value: unknown, field: string): string {
   return value;
 }
 
-const now = () => new Date().toISOString();
-
 interface CreateArgs {
   /** Chosen by the client before the mutation is queued, so every environment uses the same id. */
   id: string;
@@ -104,7 +109,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
     reads: () => [],
     apply(tx, a) {
       const id = uuid(a.id, 'id');
-      const ts = now();
+      const ts = tx.now();
       tx.insert('ticket', id, {
         id,
         siteId: a.siteId,
@@ -127,7 +132,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
         ...ticket,
         title: text(a.title, 200, 'title'),
         description: typeof a.description === 'string' ? a.description.slice(0, 5000) : '',
-        updatedAt: now(),
+        updatedAt: tx.now(),
       });
     },
   }),
@@ -143,7 +148,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
       if (!ALLOWED_TRANSITIONS[a.from]?.includes(a.to)) {
         throw new MutationRejected('INVALID_TRANSITION', `${a.from} -> ${a.to} is not allowed`);
       }
-      tx.put('ticket', a.id, { ...ticket, status: a.to, updatedAt: now() });
+      tx.put('ticket', a.id, { ...ticket, status: a.to, updatedAt: tx.now() });
     },
   }),
 

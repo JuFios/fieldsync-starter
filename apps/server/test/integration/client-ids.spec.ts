@@ -102,7 +102,7 @@ describeWithDb('client-generated ids', () => {
   it('rejects a create whose id is taken with ID_CONFLICT', async () => {
     const { north, id, techNorth } = await southTicketAndNorthTech();
     const user = { id: techNorth.id, role: techNorth.role };
-    const attempt = ctx.server.app.get(Db).tx((c) => applyMutation(c, user, create(id, north, 'Hijacked')));
+    const attempt = ctx.server.app.get(Db).tx((c) => applyMutation(c, user, create(id, north, 'Hijacked'), new Date()));
     await expect(attempt).rejects.toEqual(expect.any(MutationRejected));
     await expect(attempt).rejects.toMatchObject({ code: 'ID_CONFLICT' });
   });

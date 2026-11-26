@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Clock } from './clock';
 import { AppConfig } from './config';
 import { Db } from './db';
 
@@ -10,6 +11,7 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly db: Db,
     private readonly config: AppConfig,
+    private readonly clock: Clock,
   ) {}
 
   onModuleInit(): void {
@@ -24,9 +26,9 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
   }
 
   async collect(): Promise<number> {
-    const res = await this.db.query(`DELETE FROM change_log WHERE created_at < now() - make_interval(secs => $1)`, [
-      this.config.changelogRetentionSeconds,
-    ]);
+    // The cutoff comes from the same clock that stamps created_at, see Clock.
+    const cutoff = new Date(this.clock.now().getTime() - this.config.changelogRetentionSeconds * 1000);
+    const res = await this.db.query(`DELETE FROM change_log WHERE created_at < $1`, [cutoff]);
     return res.rowCount;
   }
 }
