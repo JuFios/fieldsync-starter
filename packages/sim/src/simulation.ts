@@ -375,7 +375,15 @@ export class SimSystem {
       }
       const drained = this.clients.filter((c) => !stuck.includes(c));
       await this.catchUp(drained);
-      checked = drained.filter((c) => !this.busy().includes(c));
+      const behind = this.busy().filter((c) => drained.includes(c));
+      if (behind.length > 0) {
+        violations.push({
+          signature: 'livelock',
+          clients: behind.map((c) => c.name),
+          detail: `did not finish catching up within ${this.profile.healSteps} steps`,
+        });
+      }
+      checked = drained.filter((c) => !behind.includes(c));
     }
     const rows = await this.server.liveRows();
     for (const sim of checked) {
