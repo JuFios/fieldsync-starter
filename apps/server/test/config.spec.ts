@@ -28,6 +28,7 @@ describe('validate', () => {
       SEED_DEMO: false,
       CHANGELOG_RETENTION_SECONDS: 604_800,
       GC_INTERVAL_MS: 3_600_000,
+      API_DOCS_ENABLED: false,
     });
   });
 
@@ -40,6 +41,7 @@ describe('validate', () => {
         SEED_DEMO: 'true',
         CHANGELOG_RETENTION_SECONDS: '60',
         GC_INTERVAL_MS: '1000',
+        API_DOCS_ENABLED: 'true',
       }),
     ).toMatchObject({
       PORT: 8080,
@@ -48,6 +50,7 @@ describe('validate', () => {
       SEED_DEMO: true,
       CHANGELOG_RETENTION_SECONDS: 60,
       GC_INTERVAL_MS: 1000,
+      API_DOCS_ENABLED: true,
     });
   });
 
@@ -80,7 +83,7 @@ describe('validate', () => {
     expect(problems[0]).toMatch(new RegExp(`^${name} must be an integer from \\d+ to \\d+ \\(got "${value}"\\)$`));
   });
 
-  it.each(['SEED_DEMO'])('rejects anything but "true" or "false" for %s', (name) => {
+  it.each(['SEED_DEMO', 'API_DOCS_ENABLED'])('rejects anything but "true" or "false" for %s', (name) => {
     expect(problemsOf({ [name]: 'yes' })).toEqual([`${name} must be "true" or "false" (got "yes")`]);
   });
 

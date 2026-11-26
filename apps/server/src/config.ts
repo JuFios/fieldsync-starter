@@ -104,6 +104,12 @@ export class EnvironmentVariables {
   @Expose()
   @IntegerIn(1_000, MAX_TIMER_MS)
   GC_INTERVAL_MS = 3_600_000;
+
+  /** Serve the OpenAPI description and Swagger UI at /docs. */
+  @Expose()
+  @ToBoolean()
+  @IsBoolean({ message: withValue('must be "true" or "false"') })
+  API_DOCS_ENABLED = false;
 }
 
 /** Typed access to the validated settings: `config.get('PORT', { infer: true })` is a number. */

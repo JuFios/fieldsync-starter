@@ -66,4 +66,37 @@ describeWithDb('server startup', () => {
     // @nestjs/typeorm retries 9 times, 3 s apart, unless told not to.
     expect(Date.now() - started).toBeLessThan(2_000);
   });
+
+  describe('API documentation', () => {
+    it('is not served by default', async () => {
+      const server = await startApp((await database()).url);
+      try {
+        expect((await new Api(server.app).get('/docs-json')).status).toBe(404);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it('describes every route and the bearer scheme when API_DOCS_ENABLED is true, without a token', async () => {
+      const server = await startApp((await database()).url, { API_DOCS_ENABLED: 'true' });
+      try {
+        const res = await new Api(server.app).get<{
+          paths: Record<string, unknown>;
+          components: { securitySchemes: Record<string, { scheme: string }> };
+        }>('/docs-json');
+        expect(res.status).toBe(200);
+        expect(Object.keys(res.body.paths).sort()).toEqual([
+          '/health',
+          '/me',
+          '/sync/pull',
+          '/sync/push',
+          '/sync/stream',
+        ]);
+        expect(res.body.components.securitySchemes.bearer.scheme).toBe('bearer');
+        expect((await new Api(server.app).get('/docs')).status).toBe(200);
+      } finally {
+        await server.close();
+      }
+    });
+  });
 });
