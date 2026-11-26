@@ -4,6 +4,7 @@
 #   - no .env files from the build context end up in the images;
 #   - the web bundle calls the API on the port the server is published on;
 #   - ports are published on 127.0.0.1 only (the defaults carry well-known credentials);
+#   - every service has memory and CPU limits, and Node's heap limit is below the memory limit;
 #   - `docker compose up` brings the stack up in order: postgres -> migrate -> server -> web,
 #     the server and web report healthy, and the API answers.
 # Runs in its own compose project with its own volumes and host ports, and removes them on exit.
@@ -74,6 +75,19 @@ for service in server web; do
   container=$(docker compose ps --all --quiet "$service")
   health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
   [ "$health" = "healthy" ] || fail "$service health is '$health', expected 'healthy'"
+done
+
+# Every service runs with a memory and CPU limit, and Node's heap stays below the memory limit.
+for service in postgres migrate server web; do
+  container=$(docker compose ps --all --quiet "$service")
+  limits=$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' "$container")
+  set -- $limits
+  [ "$1" -gt 0 ] && [ "$2" -gt 0 ] || fail "$service runs without a memory and CPU limit ($limits)"
+done
+for service in migrate server web; do
+  container=$(docker compose ps --all --quiet "$service")
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | grep -q '^NODE_OPTIONS=.*--max-old-space-size=' ||
+    fail "$service sets no Node heap limit below its memory limit"
 done
 
 for published in "postgres 5432" "server 3001" "web 3000"; do
