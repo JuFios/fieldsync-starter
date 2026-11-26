@@ -23,7 +23,9 @@ export type Defect =
   /** Every push answers 503 without doing anything. */
   | 'push-unavailable'
   /** Pulled tickets carry the status "constructor", which no mutator accepts as a state. */
-  | 'corrupt-status';
+  | 'corrupt-status'
+  /** Rejects every edit of a ticket with INTERNAL instead of applying it. */
+  | 'internal-rejection';
 
 interface Entity {
   entity: EntityName;
@@ -114,6 +116,9 @@ export class MemoryServer implements SimServer {
       }
       if (m.id !== last + 1) return json(400, { message: `Out-of-order mutation ${m.id}` });
       try {
+        if (this.defects.has('internal-rejection') && m.name === 'ticket.update') {
+          throw new MutationRejected('INTERNAL', 'The server could not apply this mutation');
+        }
         this.apply(user, m);
         results.push({ id: m.id, status: 'applied' });
       } catch (err) {

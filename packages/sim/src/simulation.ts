@@ -27,7 +27,8 @@ export type Step =
 export type Violation =
   | { signature: 'divergence' | 'foreign-site-rows'; client: string; detail: Divergence }
   | { signature: 'rejected-mutation-500' | 'stuck-request' | 'livelock'; clients: string[]; detail: string }
-  | { signature: 'client-error'; detail: string };
+  | { signature: 'client-error'; detail: string }
+  | { signature: 'unexpected-rejection'; clients: string[]; detail: string };
 
 export interface RunResult {
   profile: string;
@@ -90,14 +91,15 @@ function describeEvent(event: NetworkEvent): string {
   }
 }
 
-/** How many mutations a successful push answer reports as rejected. */
-function rejectedResults(status: number, body: string): number {
-  if (status < 200 || status >= 300) return 0;
+/** The rejection codes of the mutations a successful push answer reports as rejected. */
+function rejectedCodes(status: number, body: string): string[] {
+  if (status < 200 || status >= 300) return [];
   try {
-    const parsed = JSON.parse(body) as { results?: Array<{ status?: unknown }> };
-    return Array.isArray(parsed.results) ? parsed.results.filter((r) => r.status === 'rejected').length : 0;
+    const parsed = JSON.parse(body) as { results?: Array<{ status?: unknown; code?: unknown }> };
+    if (!Array.isArray(parsed.results)) return [];
+    return parsed.results.filter((r) => r.status === 'rejected').map((r) => String(r.code));
   } catch {
-    return 0;
+    return [];
   }
 }
 
@@ -183,6 +185,8 @@ export class SimSystem {
   private readonly clock = new SimClock(START);
   private readonly pushPaths = new Map<number, boolean>();
   private readonly lastPushErrors = new Map<string, string[]>();
+  /** Every rejection with a code the profile does not expect. */
+  private readonly unexpectedRejections: Array<{ client: string; code: string }> = [];
   private readonly lastWriter = new Map<string, string>();
   private ids = 0;
   private steps = 0;
@@ -385,6 +389,13 @@ export class SimSystem {
       }
       checked = drained.filter((c) => !behind.includes(c));
     }
+    if (this.unexpectedRejections.length > 0) {
+      violations.push({
+        signature: 'unexpected-rejection',
+        clients: [...new Set(this.unexpectedRejections.map((r) => r.client))],
+        detail: this.unexpectedRejections.map((r) => `${r.client}: ${r.code}`).join(', '),
+      });
+    }
     const rows = await this.server.liveRows();
     for (const sim of checked) {
       const view = guard(() => sim.client.view());
@@ -508,7 +519,15 @@ export class SimSystem {
         // A rejection either fails the request (a recorded MutationRejected) or is reported per mutation.
         this.stats.add('serverRejections', errors.filter((e) => e.startsWith('MutationRejected')).length);
         if (this.pushPaths.get(event.exchange)) {
-          for (const r of event.responses) this.stats.add('serverRejections', rejectedResults(r.status, r.body));
+          for (const r of event.responses) {
+            const codes = rejectedCodes(r.status, r.body);
+            this.stats.add('serverRejections', codes.length);
+            for (const code of codes) {
+              if (!(this.profile.rejectionCodes as readonly string[]).includes(code)) {
+                this.unexpectedRejections.push({ client: event.client, code });
+              }
+            }
+          }
           if (event.kind === 'delivered') this.lastPushErrors.set(event.client, errors);
         }
         break;

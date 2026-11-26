@@ -1,3 +1,4 @@
+import type { RejectionCode } from '@fieldsync/sync-core';
 import type { LinkState, RequestFault, ResponseFault } from './network';
 import type { Role } from './types';
 
@@ -24,6 +25,8 @@ export type StepKind = (typeof STEP_KINDS)[number];
 export const SIGNATURES = [
   /** A client's queue never drained because the server answered 500 to a mutation it rejected. */
   'rejected-mutation-500',
+  /** The server rejected a mutation with a code none of the profile's actions can cause. */
+  'unexpected-rejection',
   /** A client waits forever on a request that never completes. */
   'stuck-request',
   /** A client never drained its queue for another reason. */
@@ -101,6 +104,11 @@ export interface Profile {
   /** Known-defect signatures this profile may produce (see {@link KNOWN_SIGNATURES}). */
   allowed: readonly Signature[];
   /**
+   * Rejection codes the profile's actions can legitimately cause. Any other code, `INTERNAL` above
+   * all, means the client and the server disagree about a mutation the user was allowed to make.
+   */
+  rejectionCodes: readonly RejectionCode[];
+  /**
    * Lower bounds on the average per seed of run statistics (see `RunStats`), so a profile cannot
    * quietly stop exercising what it is meant to. Lowering one needs a reason in the README.
    */
@@ -168,8 +176,29 @@ const baseline: Profile = {
   invalidText: false,
   maxTickMs: 8_000,
   allowed: [],
+  // Creates, edits and parts of existing tickets: the server must apply every one.
+  rejectionCodes: [],
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, 'action:edit-ticket': 6 },
 };
+
+/**
+ * What the rejectable actions cause: status races (`STATUS_CONFLICT`), statuses an outdated screen
+ * offers (`INVALID_TRANSITION`), edits and parts of deleted tickets (`NOT_FOUND`), adjustments near
+ * zero (`NEGATIVE_QUANTITY`) and text the server must refuse (`BAD_ARGS`).
+ */
+const REJECTABLE: readonly RejectionCode[] = [
+  'STATUS_CONFLICT',
+  'INVALID_TRANSITION',
+  'NOT_FOUND',
+  'NEGATIVE_QUANTITY',
+  'BAD_ARGS',
+];
+
+/**
+ * While incremental pulls leak other sites' tickets (F-07), a client can edit one of them and the
+ * server refuses it with FORBIDDEN; the access-control change removes this code with the defect.
+ */
+const FOREIGN_TICKET_EDITS: readonly RejectionCode[] = ['FORBIDDEN'];
 
 /** Baseline plus every action that can be rejected: status races, deletes against edits, adjustments near zero. */
 const rejections: Profile = {
@@ -187,6 +216,7 @@ const rejections: Profile = {
   },
   invalidText: true,
   allowed: ['rejected-mutation-500'],
+  rejectionCodes: REJECTABLE,
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, serverRejections: 1, 'action:change-status': 3 },
 };
 
@@ -209,6 +239,7 @@ const multiSite: Profile = {
     { user: 3, skewMs: 1_000 },
   ],
   allowed: ['foreign-site-rows'],
+  rejectionCodes: FOREIGN_TICKET_EDITS,
   // Users of different sites see fewer of each other's tickets, so fewer rows have several writers.
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, 'action:edit-ticket': 6 },
 };
@@ -222,6 +253,7 @@ const full: Profile = {
   invalidText: true,
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
   allowed: ['rejected-mutation-500', 'foreign-site-rows', 'stuck-request'],
+  rejectionCodes: [...REJECTABLE, ...FOREIGN_TICKET_EDITS],
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
 };
 
