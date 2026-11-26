@@ -66,6 +66,34 @@ jobs:
       - run: npm ci
       - name: Integration tests
         run: npm run test:integration
+      # The fixed seed corpus of the deterministic simulation against the real server (budget: 60 s;
+      # the step timeout is only a safety net, see the Simulation section of the README).
+      - name: Simulation corpus
+        run: npm run test:sim
+        timeout-minutes: 5
+
+  # The simulation command is a developer tool run on every platform; without Postgres it can still
+  # be checked for its help, version, option errors and exit codes (scripts/sim-cli-smoke.sh).
+  sim-cli:
+    name: Simulation CLI smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Help, version, option errors and exit codes
+        run: scripts/sim-cli-smoke.sh
 
   e2e:
     name: End-to-end tests (Chromium)

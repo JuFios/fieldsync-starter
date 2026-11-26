@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { MutationResult, PushRequest, PushResponse } from '@fieldsync/sync-core';
 import type { AuthUser } from './auth';
+import { Clock } from './clock';
 import { Db } from './db';
 import { applyMutation } from './server-tx';
 import { StreamService } from './stream.service';
@@ -10,6 +11,7 @@ export class PushService {
   constructor(
     private readonly db: Db,
     private readonly streams: StreamService,
+    private readonly clock: Clock,
   ) {}
 
   async push(user: AuthUser, req: PushRequest): Promise<PushResponse> {
@@ -24,7 +26,7 @@ export class PushService {
         throw new BadRequestException(`Out-of-order mutation ${m.id}, expected ${last + 1}`);
       }
       const touched = await this.db.tx(async (c) => {
-        const sites = await applyMutation(c, user, m);
+        const sites = await applyMutation(c, user, m, this.clock.now());
         await c.query(
           `INSERT INTO clients (client_id, user_id, last_mutation_id) VALUES ($1, $2, $3)
            ON CONFLICT (client_id) DO UPDATE SET last_mutation_id = $3`,

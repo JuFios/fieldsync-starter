@@ -17,8 +17,21 @@ export interface Key {
 
 /** State access given to a mutator. Reads are served from rows loaded up front. */
 export interface MutatorTx {
+  /**
+   * The time of this mutation (ISO 8601). Mutators take every timestamp from here and never read a
+   * clock themselves: on the client it is the time the mutation was queued, fixed for every
+   * recomputation of the optimistic view; on the server it is the server's clock when the mutation
+   * is applied, which is what the stored row keeps.
+   */
+  now(): string;
   get(entity: EntityName, id: string): Row | undefined;
+  /** Writes a row that already exists (or replaces one read in this mutation). */
   put(entity: EntityName, id: string, row: Row): void;
+  /**
+   * Creates a row under an id the client chose. Rejects with `ID_CONFLICT` when the id is taken,
+   * including by a deleted row: a client-chosen id must never name, overwrite or revive another row.
+   */
+  insert(entity: EntityName, id: string, row: Row): void;
   del(entity: EntityName, id: string): void;
 }
 
@@ -39,16 +52,53 @@ export const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   cancelled: [],
 };
 
-function text(value: unknown, max: number, field: string): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > max) {
-    throw new MutationRejected('BAD_ARGS', `${field} must be a non-empty string up to ${max} chars`);
+/**
+ * Rejects strings Postgres cannot store, so the client rejects them exactly like the server would:
+ * NUL is not allowed in text or jsonb, and neither is an unpaired UTF-16 surrogate (a string that is
+ * not well-formed, see `String.prototype.isWellFormed`).
+ */
+function storable(value: string, field: string): string {
+  if (value.includes('\u0000') || !value.isWellFormed()) {
+    throw new MutationRejected('BAD_ARGS', `${field} contains characters that cannot be stored`);
   }
   return value;
 }
 
-const now = () => new Date().toISOString();
+function text(value: unknown, max: number, field: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > max) {
+    throw new MutationRejected('BAD_ARGS', `${field} must be a non-empty string up to ${max} chars`);
+  }
+  return storable(value, field);
+}
+
+/** Optional text: anything but a string becomes empty; longer text is cut to `max` UTF-16 units. */
+function optionalText(value: unknown, max: number, field: string): string {
+  if (typeof value !== 'string') return '';
+  const kept = storable(value, field);
+  if (kept.length <= max) return kept;
+  // Never cut between the two halves of a surrogate pair: the half left over could not be stored.
+  // `kept` is well-formed, so a cut can only break the pair that straddles it.
+  const cut = kept.slice(0, max);
+  return cut.isWellFormed() ? cut : kept.slice(0, max - 1);
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function uuid(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !UUID.test(value)) {
+    throw new MutationRejected('BAD_ARGS', `${field} must be a UUID`);
+  }
+  return value;
+}
+
+/** Checks the id arguments a mutator relies on, as the server does before running it. */
+function uuids<A>(args: A, ...fields: Array<keyof A & string>): void {
+  for (const field of fields) uuid(args[field], field);
+}
 
 interface CreateArgs {
+  /** Chosen by the client before the mutation is queued, so every environment uses the same id. */
+  id: string;
   siteId: string;
   title: string;
   description: string;
@@ -86,13 +136,14 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.create': def<CreateArgs>({
     reads: () => [],
     apply(tx, a) {
-      const id = globalThis.crypto.randomUUID();
-      const ts = now();
-      tx.put('ticket', id, {
+      const id = uuid(a.id, 'id');
+      const siteId = uuid(a.siteId, 'siteId');
+      const ts = tx.now();
+      tx.insert('ticket', id, {
         id,
-        siteId: a.siteId,
+        siteId,
         title: text(a.title, 200, 'title'),
-        description: typeof a.description === 'string' ? a.description.slice(0, 5000) : '',
+        description: optionalText(a.description, 5000, 'description'),
         status: 'open',
         assigneeId: null,
         createdAt: ts,
@@ -104,13 +155,14 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.update': def<UpdateArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       const ticket = tx.get('ticket', a.id);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
       tx.put('ticket', a.id, {
         ...ticket,
         title: text(a.title, 200, 'title'),
-        description: typeof a.description === 'string' ? a.description.slice(0, 5000) : '',
-        updatedAt: now(),
+        description: optionalText(a.description, 5000, 'description'),
+        updatedAt: tx.now(),
       });
     },
   }),
@@ -118,6 +170,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.setStatus': def<StatusArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       const ticket = tx.get('ticket', a.id);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
       if (ticket.status !== a.from) {
@@ -126,31 +179,29 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
       if (!ALLOWED_TRANSITIONS[a.from]?.includes(a.to)) {
         throw new MutationRejected('INVALID_TRANSITION', `${a.from} -> ${a.to} is not allowed`);
       }
-      tx.put('ticket', a.id, { ...ticket, status: a.to, updatedAt: now() });
+      tx.put('ticket', a.id, { ...ticket, status: a.to, updatedAt: tx.now() });
     },
   }),
 
   'ticket.delete': def<DeleteArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       if (!tx.get('ticket', a.id)) return;
       tx.del('ticket', a.id);
     },
   }),
 
   'part.add': def<PartAddArgs>({
-    reads: (a) => [
-      { entity: 'ticket', id: a.ticketId },
-      { entity: 'part', id: a.id },
-    ],
+    reads: (a) => [{ entity: 'ticket', id: a.ticketId }],
     apply(tx, a) {
+      uuids(a, 'id', 'ticketId', 'siteId');
       const ticket = tx.get('ticket', a.ticketId);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
-      if (tx.get('part', a.id)) return;
       if (!Number.isInteger(a.quantity) || a.quantity < 1 || a.quantity > 1000) {
         throw new MutationRejected('BAD_ARGS', 'quantity must be an integer from 1 to 1000');
       }
-      tx.put('part', a.id, {
+      tx.insert('part', a.id, {
         id: a.id,
         ticketId: a.ticketId,
         siteId: ticket.siteId,
@@ -163,6 +214,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'part.adjust': def<PartAdjustArgs>({
     reads: (a) => [{ entity: 'part', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       const part = tx.get('part', a.id);
       if (!part) throw new MutationRejected('NOT_FOUND', 'Part no longer exists');
       if (!Number.isInteger(a.delta) || Math.abs(a.delta) > 1000) {

@@ -13,7 +13,7 @@ describeWithDb('pull returns only accessible sites', () => {
       '/sync/push',
       {
         clientId: randomUUID(),
-        mutations: [{ id: 1, name: 'ticket.create', args: { siteId, title, description: '' } }],
+        mutations: [{ id: 1, name: 'ticket.create', args: { id: randomUUID(), siteId, title, description: '' } }],
       },
       user.token,
     );

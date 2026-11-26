@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // Tests and typechecking use the workspace packages from source, as Jest does (moduleNameMapper).
+  // Indexed access is checked strictly here: the engine indexes many arrays by computed positions.
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": true,
+    "paths": {
+      "@fieldsync/sync-core": ["../sync-core/src"],
+      "@fieldsync/test-kit": ["../test-kit/src"]
+    }
+  },
+  "include": ["src", "test"]
+}

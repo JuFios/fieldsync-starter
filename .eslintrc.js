@@ -10,7 +10,7 @@ module.exports = {
   plugins: ['@typescript-eslint'],
   extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended'],
   env: { node: true, jest: true, browser: true },
-  ignorePatterns: ['dist', '.next', 'node_modules', 'test-results', 'playwright-report'],
+  ignorePatterns: ['dist', 'dist-sim', '.next', 'node_modules', 'test-results', 'playwright-report'],
   rules: {
     eqeqeq: 'error',
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
@@ -18,15 +18,9 @@ module.exports = {
   overrides: [
     {
       files: ['**/*.ts', '**/*.tsx', 'e2e/**/*.mjs'],
-      parserOptions: {
-        project: [
-          './packages/*/tsconfig.json',
-          './apps/server/tsconfig.json',
-          './apps/web/tsconfig.json',
-          './e2e/tsconfig.json',
-        ],
-        tsconfigRootDir: __dirname,
-      },
+      // Each file is typed by its nearest tsconfig.json (typescript-eslint's project service), so
+      // lint sees the same compiler options as tsc for that workspace.
+      parserOptions: { projectService: true, tsconfigRootDir: __dirname },
       extends: ['plugin:@typescript-eslint/recommended-type-checked'],
       rules: {
         // Type-only imports are erased; Nest's dependency injection metadata is taken into account.
@@ -39,6 +33,38 @@ module.exports = {
       // Application code logs through its logger; entry points opt out line by line.
       files: ['packages/*/src/**/*.ts', 'apps/server/src/**/*.ts', 'apps/web/app/**/*.{ts,tsx}'],
       rules: { 'no-console': 'error' },
+    },
+    {
+      // Mutators run on the client and on the server and must compute the same rows from the same
+      // arguments and state: ids come from the arguments and time from MutatorTx.now(), never from
+      // ambient randomness or clocks. The test suite also runs every mutator with these stubbed out.
+      files: ['packages/sync-core/src/mutators.ts'],
+      rules: {
+        'no-restricted-globals': [
+          'error',
+          ...['Date', 'crypto', 'performance', 'globalThis', 'global', 'window', 'self'].map((name) => ({
+            name,
+            message: 'Mutators must be deterministic: take ids from the arguments and time from tx.now().',
+          })),
+          ...['setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask', 'fetch'].map((name) => ({
+            name,
+            message: 'Mutators must be synchronous and side-effect free.',
+          })),
+        ],
+        'no-restricted-properties': [
+          'error',
+          { object: 'Math', property: 'random', message: 'Mutators must be deterministic: no Math.random().' },
+        ],
+        'no-restricted-imports': [
+          'error',
+          {
+            paths: ['crypto', 'node:crypto', 'perf_hooks', 'node:perf_hooks', 'timers', 'node:timers'].map((name) => ({
+              name,
+              message: 'Mutators must not depend on randomness, clocks or timers.',
+            })),
+          },
+        ],
+      },
     },
     {
       files: ['**/test/**/*.ts', 'e2e/**/*.ts'],

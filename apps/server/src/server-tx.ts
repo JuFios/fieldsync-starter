@@ -18,7 +18,8 @@ interface Loaded {
 }
 
 interface Write {
-  op: 'put' | 'del';
+  /** `insert` creates a row under a client-chosen id and must not replace any existing row. */
+  op: 'put' | 'insert' | 'del';
   entity: EntityName;
   id: string;
   row?: Row;
@@ -27,7 +28,14 @@ interface Write {
 class BufferedTx implements MutatorTx {
   readonly writes: Write[] = [];
 
-  constructor(private readonly loaded: Map<string, Loaded>) {}
+  constructor(
+    private readonly loaded: Map<string, Loaded>,
+    private readonly time: string,
+  ) {}
+
+  now(): string {
+    return this.time;
+  }
 
   get(entity: EntityName, id: string): Row | undefined {
     return this.loaded.get(`${entity}/${id}`)?.row;
@@ -36,6 +44,15 @@ class BufferedTx implements MutatorTx {
   put(entity: EntityName, id: string, row: Row): void {
     this.loaded.set(`${entity}/${id}`, { row, siteId: row.siteId as string });
     this.writes.push({ op: 'put', entity, id, row });
+  }
+
+  insert(entity: EntityName, id: string, row: Row): void {
+    if (this.loaded.get(`${entity}/${id}`)?.row) {
+      throw new MutationRejected('ID_CONFLICT', `${entity} ${id} already exists`);
+    }
+    // Rows that were not read (or are deleted) are checked by the INSERT itself, see applyMutation.
+    this.loaded.set(`${entity}/${id}`, { row, siteId: row.siteId as string });
+    this.writes.push({ op: 'insert', entity, id, row });
   }
 
   del(entity: EntityName, id: string): void {
@@ -58,8 +75,11 @@ function assertUuids(args: Record<string, unknown>): void {
   }
 }
 
-/** Applies one mutation inside the caller's transaction; returns the site ids it touched. */
-export async function applyMutation(c: Sql, user: AuthUser, m: Mutation): Promise<string[]> {
+/**
+ * Applies one mutation inside the caller's transaction; returns the site ids it touched. `at` is the
+ * server time of the mutation: the mutator's `tx.now()` and the `created_at` of its log entries.
+ */
+export async function applyMutation(c: Sql, user: AuthUser, m: Mutation, at: Date): Promise<string[]> {
   const def = MUTATORS[m.name];
   if (!def) throw new MutationRejected('UNKNOWN_MUTATOR', `Unknown mutator ${String(m.name)}`);
   assertUuids(m.args);
@@ -78,20 +98,34 @@ export async function applyMutation(c: Sql, user: AuthUser, m: Mutation): Promis
     });
   }
 
-  const tx = new BufferedTx(loaded);
+  const tx = new BufferedTx(loaded, at.toISOString());
   def.apply(tx, m.args);
 
   const touched = new Set<string>();
   for (const w of tx.writes) {
-    const siteId = w.op === 'put' ? (w.row?.siteId as string) : tx.siteOf(w.entity, w.id);
+    const siteId = w.op === 'del' ? tx.siteOf(w.entity, w.id) : (w.row?.siteId as string);
     if (!siteId) continue;
     touched.add(siteId);
+    const op = w.op === 'del' ? 'del' : 'put';
     const { rows } = await c.query<{ version: string }>(
-      `INSERT INTO change_log (site_id, entity, entity_id, op, data) VALUES ($1, $2, $3, $4, $5) RETURNING version`,
-      [siteId, w.entity, w.id, w.op, w.op === 'put' ? JSON.stringify(w.row) : null],
+      `INSERT INTO change_log (site_id, entity, entity_id, op, data, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING version`,
+      [siteId, w.entity, w.id, op, op === 'put' ? JSON.stringify(w.row) : null, at],
     );
     const version = rows[0].version;
-    if (w.op === 'put') {
+    if (w.op === 'insert') {
+      // DO NOTHING instead of catching a unique violation: the transaction stays usable, and an
+      // insert that races a concurrent one with the same id waits for it and then sees the conflict.
+      // A deleted row (tombstone) conflicts as well, so a client-chosen id can never revive or move it.
+      const inserted = await c.query(
+        `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ($1, $2, $3, $4, false, $5)
+         ON CONFLICT (entity, id) DO NOTHING RETURNING id`,
+        [w.entity, w.id, siteId, JSON.stringify(w.row), version],
+      );
+      if (inserted.rowCount === 0) {
+        throw new MutationRejected('ID_CONFLICT', `${w.entity} ${w.id} already exists`);
+      }
+    } else if (w.op === 'put') {
       await c.query(
         `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ($1, $2, $3, $4, false, $5)
          ON CONFLICT (entity, id) DO UPDATE

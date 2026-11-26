@@ -16,7 +16,9 @@ describeWithDb('write access is checked against the stored data', () => {
     const south = await ctx.fixtures.site('South');
     const admin = await ctx.fixtures.admin();
     const title = `South ${randomUUID()}`;
-    await push(admin, [{ id: 1, name: 'ticket.create', args: { siteId: south, title, description: '' } }]);
+    await push(admin, [
+      { id: 1, name: 'ticket.create', args: { id: randomUUID(), siteId: south, title, description: '' } },
+    ]);
     const pulled = await ctx.api.get<PullResponse>('/sync/pull?cursor=0&limit=500', admin.token);
     const ticket = pulled.body.changes.find((c) => c.data?.title === title);
     if (!ticket) throw new Error('fixture ticket was not created');
@@ -36,7 +38,9 @@ describeWithDb('write access is checked against the stored data', () => {
     const south = await ctx.fixtures.site('South');
     const techNorth = await ctx.fixtures.technician(north);
     const title = `Forbidden ${randomUUID()}`;
-    await push(techNorth, [{ id: 1, name: 'ticket.create', args: { siteId: south, title, description: '' } }]);
+    await push(techNorth, [
+      { id: 1, name: 'ticket.create', args: { id: randomUUID(), siteId: south, title, description: '' } },
+    ]);
     const { rowCount } = await ctx.db.query(`SELECT 1 FROM entities WHERE data->>'title' = $1`, [title]);
     expect(rowCount).toBe(0);
   });

@@ -6,7 +6,8 @@
   "compilerOptions": {
     "paths": {
       "@fieldsync/sync-core": ["../../packages/sync-core/src"],
-      "@fieldsync/test-kit": ["../../packages/test-kit/src"]
+      "@fieldsync/test-kit": ["../../packages/test-kit/src"],
+      "@fieldsync/sim": ["../../packages/sim/src"]
     }
   },
   "include": ["src", "test"]

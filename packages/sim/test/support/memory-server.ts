@@ -1,0 +1,211 @@
+import {
+  MUTATORS,
+  MutationRejected,
+  type EntityName,
+  type Mutation,
+  type MutationResult,
+  type MutatorTx,
+  type Row,
+} from '@fieldsync/sync-core';
+import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow, SimUser } from '../../src/types';
+
+/**
+ * Defects the reference server can be told to have, so the engine's tests can show that the oracle
+ * and the liveness check catch them.
+ */
+export type Defect =
+  /** Answers 500 to a push whose mutation the mutator rejects (like the original server). */
+  | 'rejection-500'
+  /** Incremental pulls ignore the user's sites (like the original server). */
+  | 'foreign-rows'
+  /** Pull silently leaves out every change of the first row ever written. */
+  | 'drop-first-row'
+  /** Every push answers 503 without doing anything. */
+  | 'push-unavailable'
+  /** Pulled tickets carry the status "constructor", which no mutator accepts as a state. */
+  | 'corrupt-status';
+
+interface Entity {
+  entity: EntityName;
+  id: string;
+  siteId: string;
+  data: Row | null;
+  deleted: boolean;
+}
+
+interface LogEntry {
+  version: number;
+  siteId: string;
+  entity: EntityName;
+  id: string;
+  op: 'put' | 'del';
+  data: Row | null;
+}
+
+const json = (status: number, body: unknown, serverErrors: ServerError[] = []): SimResponse => ({
+  status,
+  contentType: 'application/json; charset=utf-8',
+  body: JSON.stringify(body),
+  serverErrors,
+});
+
+/**
+ * An in-memory implementation of the sync protocol, written independently of the real server and
+ * following the intended semantics: per-client mutation ids with duplicate detection, rejections
+ * reported per mutation (advancing the client's last mutation id), site-filtered pulls by version.
+ */
+export class MemoryServer implements SimServer {
+  readonly requests: SimRequest[] = [];
+  private users = new Map<string, SimUser>();
+  private fixtures: Fixtures = { sites: [], users: [] };
+  private entities = new Map<string, Entity>();
+  private log: LogEntry[] = [];
+  private lastMutation = new Map<string, number>();
+  private now: () => number = () => 0;
+
+  constructor(private readonly defects: ReadonlySet<Defect> = new Set()) {}
+
+  reset(fixtures: Fixtures, now: () => number): Promise<void> {
+    this.fixtures = fixtures;
+    this.users = new Map(fixtures.users.map((u) => [u.token, u]));
+    this.entities = new Map();
+    this.log = [];
+    this.lastMutation = new Map();
+    this.requests.length = 0;
+    this.now = now;
+    return Promise.resolve();
+  }
+
+  liveRows(): Promise<StoredRow[]> {
+    return Promise.resolve(
+      [...this.entities.values()]
+        .filter((e) => !e.deleted && e.data)
+        .map((e) => ({ entity: e.entity, id: e.id, siteId: e.siteId, data: e.data as Row })),
+    );
+  }
+
+  send(request: SimRequest): Promise<SimResponse> {
+    this.requests.push(request);
+    const user = this.users.get((request.headers.authorization ?? '').replace(/^Bearer /, ''));
+    if (!user) return Promise.resolve(json(401, { message: 'Unauthorized' }));
+    const url = new URL(request.path, 'http://memory');
+    if (request.method === 'POST' && url.pathname === '/sync/push') {
+      return Promise.resolve(
+        this.push(user, JSON.parse(request.body ?? '{}') as { clientId: string; mutations: Mutation[] }),
+      );
+    }
+    if (request.method === 'GET' && url.pathname === '/sync/pull')
+      return Promise.resolve(this.pull(user, url.searchParams));
+    return Promise.resolve(json(404, { message: 'Not found' }));
+  }
+
+  private sites(user: SimUser): Set<string> {
+    return new Set(user.role === 'admin' ? this.fixtures.sites.map((s) => s.id) : user.sites);
+  }
+
+  private push(user: SimUser, body: { clientId: string; mutations: Mutation[] }): SimResponse {
+    if (this.defects.has('push-unavailable')) return json(503, { message: 'Unavailable' });
+    const results: MutationResult[] = [];
+    for (const m of body.mutations) {
+      const last = this.lastMutation.get(body.clientId) ?? 0;
+      if (m.id <= last) {
+        results.push({ id: m.id, status: 'duplicate' });
+        continue;
+      }
+      if (m.id !== last + 1) return json(400, { message: `Out-of-order mutation ${m.id}` });
+      try {
+        this.apply(user, m);
+        results.push({ id: m.id, status: 'applied' });
+      } catch (err) {
+        if (!(err instanceof MutationRejected)) throw err;
+        if (this.defects.has('rejection-500')) {
+          return json(500, { message: 'Internal server error' }, [{ name: 'MutationRejected', code: err.code }]);
+        }
+        results.push({ id: m.id, status: 'rejected', error: `${err.code}: ${err.message}` });
+      }
+      this.lastMutation.set(body.clientId, m.id);
+    }
+    return json(201, { results, lastMutationId: this.lastMutation.get(body.clientId) ?? 0 });
+  }
+
+  /** Applies one mutation atomically: its writes are buffered and committed only if it succeeds. */
+  private apply(user: SimUser, m: Mutation): void {
+    const def = Object.hasOwn(MUTATORS, m.name) ? MUTATORS[m.name] : undefined;
+    if (!def) throw new MutationRejected('UNKNOWN_MUTATOR');
+    const sites = this.sites(user);
+    const target = (entity: EntityName, id: string) => this.entities.get(`${entity}/${id}`);
+    // Write access by the stored row's site, and by the target site for new rows.
+    const allowed = (siteId: unknown) => typeof siteId === 'string' && sites.has(siteId);
+    const writes: Array<{ op: 'put' | 'insert' | 'del'; entity: EntityName; id: string; row?: Row }> = [];
+    const buffer = new Map<string, Row | undefined>();
+    const visible = (entity: EntityName, id: string): Row | undefined => {
+      const key = `${entity}/${id}`;
+      if (buffer.has(key)) return buffer.get(key);
+      const stored = target(entity, id);
+      return stored && !stored.deleted && allowed(stored.siteId) ? (stored.data ?? undefined) : undefined;
+    };
+    const time = new Date(this.now()).toISOString();
+    const tx: MutatorTx = {
+      now: () => time,
+      get: visible,
+      put: (entity, id, row) => {
+        if (!allowed(row.siteId)) throw new MutationRejected('FORBIDDEN');
+        buffer.set(`${entity}/${id}`, row);
+        writes.push({ op: 'put', entity, id, row });
+      },
+      insert: (entity, id, row) => {
+        if (target(entity, id) || buffer.get(`${entity}/${id}`)) throw new MutationRejected('ID_CONFLICT');
+        if (!allowed(row.siteId)) throw new MutationRejected('FORBIDDEN');
+        buffer.set(`${entity}/${id}`, row);
+        writes.push({ op: 'insert', entity, id, row });
+      },
+      del: (entity, id) => {
+        buffer.set(`${entity}/${id}`, undefined);
+        writes.push({ op: 'del', entity, id });
+      },
+    };
+    if (!allowed(m.args.siteId)) throw new MutationRejected('FORBIDDEN');
+    def.apply(tx, m.args);
+    for (const w of writes) {
+      const key = `${w.entity}/${w.id}`;
+      const siteId = w.row ? (w.row.siteId as string) : (target(w.entity, w.id)?.siteId ?? '');
+      const version = this.log.length + 1;
+      const op = w.op === 'del' ? 'del' : 'put';
+      const data = w.row ? (JSON.parse(JSON.stringify(w.row)) as Row) : null;
+      this.log.push({ version, siteId, entity: w.entity, id: w.id, op, data });
+      this.entities.set(key, { entity: w.entity, id: w.id, siteId, data, deleted: op === 'del' });
+    }
+  }
+
+  private pull(user: SimUser, params: URLSearchParams): SimResponse {
+    const cursor = Number(params.get('cursor') ?? 0);
+    const limit = Math.min(Math.max(Number(params.get('limit') ?? 500), 1), 500);
+    const clientId = params.get('clientId');
+    const sites = this.sites(user);
+    const ignoreSites = this.defects.has('foreign-rows') && cursor > 0;
+    const page = this.log
+      .filter((e) => e.version > cursor)
+      .filter(
+        (e) => !(this.defects.has('drop-first-row') && e.entity === this.log[0]?.entity && e.id === this.log[0]?.id),
+      )
+      .filter((e) => ignoreSites || sites.has(e.siteId))
+      .slice(0, limit);
+    const head = this.log.length;
+    return json(200, {
+      changes: page.map((e) => ({
+        version: e.version,
+        entity: e.entity,
+        id: e.id,
+        siteId: e.siteId,
+        op: e.op,
+        data:
+          this.defects.has('corrupt-status') && e.entity === 'ticket' && e.data
+            ? { ...e.data, status: 'constructor' }
+            : e.data,
+      })),
+      nextCursor: page.length === limit ? (page.at(-1)?.version ?? cursor) : Math.max(cursor, head),
+      hasMore: page.length === limit,
+      lastMutationId: clientId ? (this.lastMutation.get(clientId) ?? 0) : 0,
+    });
+  }
+}

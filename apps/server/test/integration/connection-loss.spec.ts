@@ -26,7 +26,10 @@ describeWithDb('losing database connections', () => {
     const title = `Locked ${randomUUID()}`;
     await ctx.api.post(
       '/sync/push',
-      { clientId, mutations: [{ id: 1, name: 'ticket.create', args: { siteId: site, title, description: '' } }] },
+      {
+        clientId,
+        mutations: [{ id: 1, name: 'ticket.create', args: { id: randomUUID(), siteId: site, title, description: '' } }],
+      },
       tech.token,
     );
     const pulled = await ctx.api.get<PullResponse>('/sync/pull?cursor=0', tech.token);
