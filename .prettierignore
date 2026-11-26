@@ -1,6 +1,7 @@
 # Generated or vendored
 node_modules
 dist
+dist-sim
 .next
 coverage
 package-lock.json

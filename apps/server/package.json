@@ -10,7 +10,8 @@
     "test": "jest",
     "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration",
-    "test:sim": "jest --selectProjects simulation"
+    "test:sim": "jest --selectProjects simulation",
+    "sim": "tsc -p tsconfig.sim.json && node dist-sim/test/simulation/cli.js"
   },
   "dependencies": {
     "@fieldsync/sync-core": "*",

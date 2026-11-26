@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  // Compiles the simulation command (npm run sim). Workspace packages resolve through node_modules
+  // to their builds, as at run time, instead of to their sources.
+  "compilerOptions": { "outDir": "dist-sim", "rootDir": ".", "paths": {} },
+  "include": ["test/simulation/cli.ts"]
+}

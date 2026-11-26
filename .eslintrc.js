@@ -10,7 +10,7 @@ module.exports = {
   plugins: ['@typescript-eslint'],
   extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended'],
   env: { node: true, jest: true, browser: true },
-  ignorePatterns: ['dist', '.next', 'node_modules', 'test-results', 'playwright-report'],
+  ignorePatterns: ['dist', 'dist-sim', '.next', 'node_modules', 'test-results', 'playwright-report'],
   rules: {
     eqeqeq: 'error',
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
