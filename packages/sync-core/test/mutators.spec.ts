@@ -48,7 +48,7 @@ function rejectionOf(run: () => void): MutationRejected {
 describe('ticket mutators', () => {
   it('creates a ticket in the open status', () => {
     const tx = new FakeTx();
-    MUTATORS['ticket.create'].apply(tx, { siteId: SITE, title: 'Broken pump', description: '' });
+    MUTATORS['ticket.create'].apply(tx, { id: TICKET, siteId: SITE, title: 'Broken pump', description: '' });
     expect(tx.rows.size).toBe(1);
     const [created] = [...tx.rows.values()];
     expect(created.status).toBe('open');

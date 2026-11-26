@@ -18,7 +18,13 @@ export interface Key {
 /** State access given to a mutator. Reads are served from rows loaded up front. */
 export interface MutatorTx {
   get(entity: EntityName, id: string): Row | undefined;
+  /** Writes a row that already exists (or replaces one read in this mutation). */
   put(entity: EntityName, id: string, row: Row): void;
+  /**
+   * Creates a row under an id the client chose. Rejects with `ID_CONFLICT` when the id is taken,
+   * including by a deleted row: a client-chosen id must never name, overwrite or revive another row.
+   */
+  insert(entity: EntityName, id: string, row: Row): void;
   del(entity: EntityName, id: string): void;
 }
 
@@ -46,9 +52,20 @@ function text(value: unknown, max: number, field: string): string {
   return value;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function uuid(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !UUID.test(value)) {
+    throw new MutationRejected('BAD_ARGS', `${field} must be a UUID`);
+  }
+  return value;
+}
+
 const now = () => new Date().toISOString();
 
 interface CreateArgs {
+  /** Chosen by the client before the mutation is queued, so every environment uses the same id. */
+  id: string;
   siteId: string;
   title: string;
   description: string;
@@ -86,9 +103,9 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.create': def<CreateArgs>({
     reads: () => [],
     apply(tx, a) {
-      const id = globalThis.crypto.randomUUID();
+      const id = uuid(a.id, 'id');
       const ts = now();
-      tx.put('ticket', id, {
+      tx.insert('ticket', id, {
         id,
         siteId: a.siteId,
         title: text(a.title, 200, 'title'),

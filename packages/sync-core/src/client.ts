@@ -27,6 +27,12 @@ class MapTx implements MutatorTx {
     this.state.set(`${entity}/${id}`, row);
   }
 
+  insert(entity: EntityName, id: string, row: Row): void {
+    const key = `${entity}/${id}`;
+    if (this.state.has(key)) throw new MutationRejected('ID_CONFLICT', `${entity} ${id} already exists`);
+    this.state.set(key, row);
+  }
+
   del(entity: EntityName, id: string): void {
     this.state.delete(`${entity}/${id}`);
   }

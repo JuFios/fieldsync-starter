@@ -25,7 +25,7 @@ describeWithDb('sync API (characterization)', () => {
   const create = (id: number, siteId: string, title: string): Mutation => ({
     id,
     name: 'ticket.create',
-    args: { siteId, title, description: '' },
+    args: { id: randomUUID(), siteId, title, description: '' },
   });
 
   /** All changes visible to `user` from the start of the log, in one page. */

@@ -4,6 +4,13 @@ import type { PullResponse, PushRequest, PushResponse } from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 
+let nextTicket = 0;
+/** A fresh ticket id for each create, as the caller of `mutate` generates it. */
+function ticketId(): string {
+  nextTicket += 1;
+  return `00000000-0000-4000-8000-${String(nextTicket).padStart(12, '0')}`;
+}
+
 /** A transport with no network: every request fails. Records the mutation ids of each push attempt. */
 class OfflineTransport implements Transport {
   readonly pushedIds: number[][] = [];
@@ -103,7 +110,7 @@ afterEach(() => {
 describe('SyncClient', () => {
   it('shows a locally created ticket before the server confirms it', () => {
     const client = makeClient();
-    client.mutate('ticket.create', { siteId: SITE, title: 'Leaking valve', description: '' });
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Leaking valve', description: '' });
     const tickets = client.rows('ticket');
     expect(tickets).toHaveLength(1);
     expect(tickets[0]).toMatchObject({ siteId: SITE, title: 'Leaking valve', status: 'open' });
@@ -121,9 +128,9 @@ describe('SyncClient', () => {
   it('numbers local mutations sequentially', async () => {
     const transport = new OfflineTransport();
     const client = makeClient(transport);
-    client.mutate('ticket.create', { siteId: SITE, title: 'A', description: '' });
-    client.mutate('ticket.create', { siteId: SITE, title: 'B', description: '' });
-    client.mutate('ticket.create', { siteId: SITE, title: 'C', description: '' });
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'B', description: '' });
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'C', description: '' });
     await client.sync(); // the attempt started by the first mutation
     await client.sync(); // a fresh attempt sends the whole queue
     expect(transport.pushedIds.at(-1)).toEqual([1, 2, 3]);
@@ -143,7 +150,7 @@ describe('SyncClient', () => {
       const client = makeClient(transport);
       client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
       await client.sync();
-      client.mutate('ticket.create', { siteId: SITE, title: 'next', description: '' });
+      client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
       await client.sync();
       const [first, second] = transport.pushedIds;
       precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
@@ -162,7 +169,7 @@ describe('SyncClient', () => {
       jest.useFakeTimers();
       const transport = new HangingTransport();
       const client = makeClient(transport);
-      client.mutate('ticket.create', { siteId: SITE, title: 'Stuck', description: '' });
+      client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
       precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
       await jest.advanceTimersByTimeAsync(5 * 60_000);
       expect(client.status).not.toBe('syncing');
@@ -176,7 +183,7 @@ describe('SyncClient', () => {
     async () => {
       const storage = new MemoryStorage();
       const before = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
-      before.mutate('ticket.create', { siteId: SITE, title: 'Written offline', description: '' });
+      before.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Written offline', description: '' });
       await before.sync();
       before.dispose(); // the page goes away
 
@@ -194,9 +201,9 @@ describe('SyncClient', () => {
       const storage = new MemoryStorage();
       const tabA = newClient({ clientId: 'c1', transport: server.transport(), storage });
       const tabB = newClient({ clientId: 'c1', transport: server.transport(), storage });
-      tabA.mutate('ticket.create', { siteId: SITE, title: 'From tab A', description: '' });
+      tabA.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab A', description: '' });
       await tabA.sync();
-      tabB.mutate('ticket.create', { siteId: SITE, title: 'From tab B', description: '' });
+      tabB.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab B', description: '' });
       await tabB.sync();
       expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
     },
