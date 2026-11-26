@@ -340,9 +340,13 @@ export class SimSystem {
     return false;
   }
 
-  /** Liveness when not quiescent, otherwise convergence of every client with the server's tables. */
+  /**
+   * Liveness, then convergence with the server's tables. When some clients never drained, the others
+   * are still checked: a client stuck on a tolerated known defect must not hide a lost row elsewhere.
+   */
   async verdict(quiescent: boolean): Promise<Violation[]> {
     const violations: Violation[] = [];
+    let checked = this.clients;
     if (!quiescent) {
       const stuck = this.busy();
       const bySignature = new Map<Signature, string[]>();
@@ -369,15 +373,44 @@ export class SimSystem {
           detail: detail || `the heal budget of ${this.profile.healSteps} steps ran out`,
         });
       }
-      return violations;
+      const drained = this.clients.filter((c) => !stuck.includes(c));
+      await this.catchUp(drained);
+      checked = drained.filter((c) => !this.busy().includes(c));
     }
     const rows = await this.server.liveRows();
-    for (const sim of this.clients) {
+    for (const sim of checked) {
       const view = guard(() => sim.client.view());
       const divergence = compareWithServer(rows, accessibleSites(sim.user, this.fixtures), view);
       if (divergence) violations.push(...convergenceViolations(sim.name, divergence));
     }
     return violations;
+  }
+
+  /**
+   * Brings clients that drained up to date when others did not, so that their convergence can be
+   * checked: each syncs once more and only their own exchanges are delivered and answered, so the
+   * stuck clients' requests never reach the server and its rows stay as they are.
+   */
+  private async catchUp(drained: readonly SimClient[]): Promise<void> {
+    if (drained.length === 0) return;
+    const names = new Set(drained.map((c) => c.name));
+    this.trace.push(`catch up ${[...names].join(',')}`);
+    for (const sim of drained) void sim.client.sync();
+    await this.settle();
+    for (let step = 0; step < this.profile.healSteps; step += 1) {
+      const queued = this.network.queuedClients().find((n) => names.has(n));
+      if (queued !== undefined) {
+        this.trace.push(`catch up deliver ${queued}`);
+        await this.network.deliver(queued, 'none');
+        await this.settle();
+        continue;
+      }
+      const answered = this.network.answeredClients().find((n) => names.has(n));
+      if (answered === undefined) return;
+      this.trace.push(`catch up respond ${answered}`);
+      this.network.respond(answered, 'none');
+      await this.settle();
+    }
   }
 
   /** Stops every client and writes its final state to the trace. */
