@@ -15,7 +15,7 @@ const base = {
 module.exports = {
   reporters: ['default', ['@fieldsync/test-kit/dist/reporter', { label: 'server' }]],
   projects: [
-    { ...base, displayName: 'unit', testRegex: 'test/[^/]+\\.spec\\.ts$' },
+    { ...base, displayName: 'unit', testRegex: 'test/(services/)?[^/]+\\.spec\\.ts$' },
     {
       ...base,
       displayName: 'simulation',
