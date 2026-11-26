@@ -109,6 +109,24 @@ describe('simulation engine (against the in-memory reference server)', () => {
       expect(await signaturesIn(profile, defect ? [defect] : [])).toContain(signature);
     });
 
+    it('still checks the clients that drained when another client is stuck on a known defect', async () => {
+      // A client stuck on a tolerated defect (here 500 for rejections) must not switch off the
+      // convergence check of the others: a row that never reaches them is still a divergence.
+      const profile = { ...PROFILES.rejections, allowed: ['rejected-mutation-500', 'divergence'] as Signature[] };
+      const report = await checkProfile({
+        profile,
+        server: new MemoryServer(new Set<Defect>(['rejection-500', 'drop-first-row'])),
+        seed: SEED,
+        runs: 15,
+        shrinkTimeMs: 0,
+      });
+      const both = report.results.filter((r) => {
+        const signatures = new Set(r.violations.map((v) => v.signature));
+        return signatures.has('rejected-mutation-500') && signatures.has('divergence');
+      });
+      expect(both.length).toBeGreaterThan(0);
+    });
+
     it('stops at the first run with a violation the profile does not allow', async () => {
       const report = await search('baseline', { defects: ['drop-first-row'], runs: 50 });
       expect(report.failure?.unexpected.map((v) => v.signature)).toContain('divergence');
