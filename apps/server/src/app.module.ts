@@ -1,4 +1,5 @@
-import { Module, type DynamicModule } from '@nestjs/common';
+import { Module, ValidationPipe, type DynamicModule } from '@nestjs/common';
+import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthGuard } from './auth';
@@ -17,12 +18,16 @@ import { SyncController } from './sync.controller';
   controllers: [SyncController, HealthController],
   providers: [
     Db,
-    AuthGuard,
     { provide: Clock, useClass: SystemClock },
     PushService,
     PullService,
     StreamService,
     GcService,
+    // Every route requires a token unless it is marked @Public() (NestJS authentication docs).
+    { provide: APP_GUARD, useClass: AuthGuard },
+    // Global validation, registered in the module so in-process test applications get it too. It
+    // checks DTO-typed parameters; `whitelist` strips properties a DTO does not declare.
+    { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true, transform: true }) },
   ],
 })
 export class AppModule {

@@ -1,8 +1,8 @@
-import { BadRequestException, Body, Controller, Get, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
 import type { PushRequest } from '@fieldsync/sync-core';
 import type { Response } from 'express';
 import { accessibleSites } from './access';
-import { AuthGuard, type AuthedRequest } from './auth';
+import type { AuthedRequest } from './auth';
 import { Db } from './db';
 import { PullService } from './pull.service';
 import { PushService } from './push.service';
@@ -32,7 +32,6 @@ function assertPushRequest(body: unknown): asserts body is PushRequest {
 }
 
 @Controller()
-@UseGuards(AuthGuard)
 export class SyncController {
   constructor(
     private readonly db: Db,
