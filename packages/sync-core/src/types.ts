@@ -12,13 +12,49 @@ export interface Mutation {
   args: Record<string, unknown>;
 }
 
-export type MutationStatus = 'applied' | 'duplicate' | 'rejected';
+/**
+ * Why the server refused a mutation. Every code but `INTERNAL` describes the mutation or the data it
+ * met; `INTERNAL` means the server could not run it (a defect, not a retryable condition), and says
+ * nothing more. A rejected mutation is final: the client drops it from its queue and shows it.
+ */
+export const REJECTION_CODES = [
+  'BAD_ARGS',
+  'NOT_FOUND',
+  'FORBIDDEN',
+  'ID_CONFLICT',
+  'STATUS_CONFLICT',
+  'INVALID_TRANSITION',
+  'NEGATIVE_QUANTITY',
+  'UNKNOWN_MUTATOR',
+  'INTERNAL',
+] as const;
+export type RejectionCode = (typeof REJECTION_CODES)[number];
 
-export interface MutationResult {
-  id: number;
-  status: MutationStatus;
-  error?: string;
+/** The facts a rejection carries for the codes that have them, so the user can act on it. */
+export interface RejectionDetails {
+  /** The ticket's status changed since the mutation was queued. */
+  STATUS_CONFLICT: { current: TicketStatus; allowed: readonly TicketStatus[] };
+  /** The state machine has no such step; `allowed` lists the steps from `from`. */
+  INVALID_TRANSITION: { from: TicketStatus; to: string; allowed: readonly TicketStatus[] };
+  /** The adjustment would take the stored quantity below zero. */
+  NEGATIVE_QUANTITY: { quantity: number; delta: number };
 }
+
+export interface Rejection {
+  code: RejectionCode;
+  /** For people; not for parsing. */
+  message: string;
+  /** Present for the codes in {@link RejectionDetails}. */
+  details?: RejectionDetails[keyof RejectionDetails];
+}
+
+export type MutationResult =
+  | { id: number; status: 'applied' }
+  /** The server had this mutation id already, so it applied nothing now. */
+  | { id: number; status: 'duplicate' }
+  | ({ id: number; status: 'rejected' } & Rejection);
+
+export type MutationStatus = MutationResult['status'];
 
 /**
  * The most bytes (UTF-8 JSON) one push body may have. The client splits its queue into bodies of at

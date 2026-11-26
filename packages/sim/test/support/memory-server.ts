@@ -121,7 +121,7 @@ export class MemoryServer implements SimServer {
         if (this.defects.has('rejection-500')) {
           return json(500, { message: 'Internal server error' }, [{ name: 'MutationRejected', code: err.code }]);
         }
-        results.push({ id: m.id, status: 'rejected', error: `${err.code}: ${err.message}` });
+        results.push({ id: m.id, status: 'rejected', code: err.code, message: err.message, details: err.details });
       }
       this.lastMutation.set(body.clientId, m.id);
     }

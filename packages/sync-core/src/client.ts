@@ -8,14 +8,15 @@ import {
   type EntityName,
   type Mutation,
   type MutatorName,
+  type Rejection,
   type Row,
 } from './types';
 
 export type SyncStatus = 'idle' | 'syncing' | 'offline';
 
-export interface Rejection {
+/** A mutation the server refused, with its reason; the client keeps it for the user to see. */
+export interface RejectedMutation extends Rejection {
   mutation: Mutation;
-  error: string;
 }
 
 /** A mutation waiting for the server, with the time it was queued (its optimistic timestamp). */
@@ -104,7 +105,7 @@ export class SyncClient {
   private pending: Queued[] = [];
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
-  private rejected: Rejection[] = [];
+  private rejected: RejectedMutation[] = [];
   private changeCount = 0;
   private retryTimer?: TimerHandle;
   private inFlight?: Promise<void>;
@@ -131,7 +132,7 @@ export class SyncClient {
     return this.pending.length;
   }
 
-  get rejections(): readonly Rejection[] {
+  get rejections(): readonly RejectedMutation[] {
     return this.rejected;
   }
 
@@ -236,7 +237,7 @@ export class SyncClient {
     for (const r of resp.results) {
       if (r.status === 'rejected') {
         const mutation = batch.find((m) => m.id === r.id);
-        if (mutation) this.rejected.push({ mutation, error: r.error ?? 'rejected' });
+        if (mutation) this.rejected.push({ mutation, code: r.code, message: r.message, details: r.details });
       }
     }
     this.pending = this.pending.filter((q) => !handled.has(q.mutation.id));

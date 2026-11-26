@@ -94,7 +94,7 @@ export default function TicketPage() {
           <ul>
             {client.rejections.map((r) => (
               <li key={r.mutation.id}>
-                {r.mutation.name}: {r.error}
+                {r.mutation.name}: {r.code} — {r.message}
               </li>
             ))}
           </ul>

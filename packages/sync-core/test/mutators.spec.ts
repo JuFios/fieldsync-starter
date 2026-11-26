@@ -1,5 +1,5 @@
-import { MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
-import type { EntityName, Row } from '../src/types';
+import { ALLOWED_TRANSITIONS, MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
+import type { EntityName, Row, TicketStatus } from '../src/types';
 
 /** The time a FakeTx reports; mutators must take every timestamp from it. */
 const TX_TIME = '2030-01-02T03:04:05.678Z';
@@ -126,6 +126,55 @@ describe('ticket mutators', () => {
   });
 });
 
+describe('ticket status machine', () => {
+  const STATUSES: TicketStatus[] = ['open', 'in_progress', 'done', 'cancelled'];
+  /** The whole table, written out, so a change to the state machine has to change this test. */
+  const EXPECTED: Record<TicketStatus, TicketStatus[]> = {
+    open: ['in_progress', 'cancelled'],
+    in_progress: ['done', 'open', 'cancelled'],
+    done: ['open'],
+    cancelled: [],
+  };
+
+  it('allows exactly the documented transitions', () => {
+    expect(ALLOWED_TRANSITIONS).toEqual(EXPECTED);
+  });
+
+  const pairs = STATUSES.flatMap((from) => STATUSES.map((to) => [from, to] as const));
+
+  it.each(pairs)('%s -> %s is applied exactly when the table allows it', (from, to) => {
+    const tx = new FakeTx([['ticket', TICKET, ticket(from)]]);
+    const run = () => MUTATORS['ticket.setStatus'].apply(tx, { id: TICKET, siteId: SITE, from, to });
+    if (EXPECTED[from].includes(to)) {
+      run();
+      expect(tx.get('ticket', TICKET)).toMatchObject({ status: to, updatedAt: TX_TIME });
+    } else {
+      const err = rejectionOf(run);
+      expect({ code: err.code, details: err.details }).toEqual({
+        code: 'INVALID_TRANSITION',
+        details: { from, to, allowed: EXPECTED[from] },
+      });
+      expect(tx.get('ticket', TICKET)?.status).toBe(from);
+    }
+  });
+
+  it.each(STATUSES)(
+    'rejects a change made from an outdated status with the current one and what it allows (now %s)',
+    (current) => {
+      const from = STATUSES.find((s) => s !== current) as TicketStatus;
+      const tx = new FakeTx([['ticket', TICKET, ticket(current)]]);
+      const err = rejectionOf(() =>
+        MUTATORS['ticket.setStatus'].apply(tx, { id: TICKET, siteId: SITE, from, to: 'open' }),
+      );
+      expect({ code: err.code, details: err.details }).toEqual({
+        code: 'STATUS_CONFLICT',
+        details: { current, allowed: EXPECTED[current] },
+      });
+      expect(tx.get('ticket', TICKET)?.status).toBe(current);
+    },
+  );
+});
+
 describe('part mutators', () => {
   it('rejects a part whose id is already taken instead of reporting it as added', () => {
     const existing = { id: PART, ticketId: TICKET, siteId: SITE, name: 'Seal', quantity: 1 };
@@ -143,7 +192,10 @@ describe('part mutators', () => {
   it('does not let a quantity go below zero', () => {
     const tx = new FakeTx([['part', PART, { id: PART, quantity: 1 }]]);
     const err = rejectionOf(() => MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: -2 }));
-    expect(err.code).toBe('NEGATIVE_QUANTITY');
+    expect({ code: err.code, details: err.details }).toEqual({
+      code: 'NEGATIVE_QUANTITY',
+      details: { quantity: 1, delta: -2 },
+    });
     expect(tx.get('part', PART)?.quantity).toBe(1);
   });
 

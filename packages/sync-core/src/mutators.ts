@@ -1,13 +1,24 @@
-import type { EntityName, MutatorName, Row, TicketStatus } from './types';
+import type { EntityName, MutatorName, RejectionCode, RejectionDetails, Row, TicketStatus } from './types';
 
+/** A mutator refuses the mutation; the server records it, the client shows it. */
 export class MutationRejected extends Error {
   constructor(
-    readonly code: string,
+    readonly code: RejectionCode,
     message?: string,
+    readonly details?: RejectionDetails[keyof RejectionDetails],
   ) {
     super(message ?? code);
     this.name = 'MutationRejected';
   }
+}
+
+/** A rejection whose code carries details, typed by the code. */
+export function rejectWith<C extends keyof RejectionDetails>(
+  code: C,
+  message: string,
+  details: RejectionDetails[C],
+): MutationRejected {
+  return new MutationRejected(code, message, details);
 }
 
 export interface Key {
@@ -45,7 +56,7 @@ function def<A>(d: { reads(a: A): Key[]; apply(tx: MutatorTx, a: A): void }): Mu
   return d as unknown as MutatorDef;
 }
 
-export const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
+export const ALLOWED_TRANSITIONS: Readonly<Record<TicketStatus, readonly TicketStatus[]>> = {
   open: ['in_progress', 'cancelled'],
   in_progress: ['done', 'open', 'cancelled'],
   done: ['open'],
@@ -174,10 +185,18 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
       const ticket = tx.get('ticket', a.id);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
       if (ticket.status !== a.from) {
-        throw new MutationRejected('STATUS_CONFLICT', `Status is now "${String(ticket.status)}"`);
+        const current = ticket.status as TicketStatus;
+        throw rejectWith('STATUS_CONFLICT', `Status is now "${current}"`, {
+          current,
+          allowed: ALLOWED_TRANSITIONS[current],
+        });
       }
-      if (!ALLOWED_TRANSITIONS[a.from]?.includes(a.to)) {
-        throw new MutationRejected('INVALID_TRANSITION', `${a.from} -> ${a.to} is not allowed`);
+      if (!ALLOWED_TRANSITIONS[a.from].includes(a.to)) {
+        throw rejectWith('INVALID_TRANSITION', `${a.from} -> ${String(a.to)} is not allowed`, {
+          from: a.from,
+          to: String(a.to),
+          allowed: ALLOWED_TRANSITIONS[a.from],
+        });
       }
       tx.put('ticket', a.id, { ...ticket, status: a.to, updatedAt: tx.now() });
     },
@@ -220,8 +239,11 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
       if (!Number.isInteger(a.delta) || Math.abs(a.delta) > 1000) {
         throw new MutationRejected('BAD_ARGS', 'delta must be an integer between -1000 and 1000');
       }
-      const quantity = (part.quantity as number) + a.delta;
-      if (quantity < 0) throw new MutationRejected('NEGATIVE_QUANTITY', 'Quantity cannot go below zero');
+      const stored = part.quantity as number;
+      const quantity = stored + a.delta;
+      if (quantity < 0) {
+        throw rejectWith('NEGATIVE_QUANTITY', 'Quantity cannot go below zero', { quantity: stored, delta: a.delta });
+      }
       tx.put('part', a.id, { ...part, quantity });
     },
   }),

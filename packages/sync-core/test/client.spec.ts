@@ -33,7 +33,12 @@ class RejectingTransport implements Transport {
   push(req: PushRequest): Promise<PushResponse> {
     this.pushedIds.push(req.mutations.map((m) => m.id));
     return Promise.resolve({
-      results: req.mutations.map((m) => ({ id: m.id, status: 'rejected' as const, error: 'NOT_FOUND' })),
+      results: req.mutations.map((m) => ({
+        id: m.id,
+        status: 'rejected' as const,
+        code: 'NOT_FOUND' as const,
+        message: 'Ticket no longer exists',
+      })),
       lastMutationId: 0,
     });
   }
@@ -227,6 +232,36 @@ describe('SyncClient', () => {
         .map((t) => t.title)
         .sort(),
     ).toEqual(['A', 'B', 'C']);
+  });
+
+  it('keeps the code, message and details of a rejection and drops the mutation from the queue', async () => {
+    const details = { current: 'done' as const, allowed: ['open' as const] };
+    const transport: Transport = {
+      push: (req) =>
+        Promise.resolve({
+          results: req.mutations.map((m) => ({
+            id: m.id,
+            status: 'rejected' as const,
+            code: 'STATUS_CONFLICT' as const,
+            message: 'Status is now "done"',
+            details,
+          })),
+          lastMutationId: 1,
+        }),
+      pull: () => Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: 1 }),
+    };
+    const client = makeClient(transport);
+    client.mutate('ticket.setStatus', { id: SITE, siteId: SITE, from: 'open', to: 'in_progress' });
+    await client.sync();
+    expect(client.rejections).toEqual([
+      {
+        mutation: expect.objectContaining({ id: 1, name: 'ticket.setStatus' }),
+        code: 'STATUS_CONFLICT',
+        message: 'Status is now "done"',
+        details,
+      },
+    ]);
+    expect(client.pendingCount).toBe(0);
   });
 
   knownDefect(
