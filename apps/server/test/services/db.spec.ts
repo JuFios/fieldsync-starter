@@ -139,6 +139,18 @@ describe('Db', () => {
       expect(runner.release).toHaveBeenCalled();
     });
 
+    it('starts the transaction with the given isolation and read-only mode', async () => {
+      await db.tx(() => Promise.resolve(), { isolation: 'REPEATABLE READ', readOnly: true });
+      expect(runner.startTransaction).toHaveBeenCalledWith('REPEATABLE READ');
+      expect(runner.calls).toEqual(['connect', 'begin', 'query SET TRANSACTION READ ONLY', 'commit', 'release']);
+    });
+
+    it('starts a read-write transaction with the default isolation when nothing is asked for', async () => {
+      await db.tx(() => Promise.resolve());
+      expect(runner.startTransaction).toHaveBeenCalledWith(undefined);
+      expect(runner.calls).toEqual(['connect', 'begin', 'commit', 'release']);
+    });
+
     describe('savepoint', () => {
       it('releases the savepoint when its callback resolves, inside the transaction', async () => {
         const result = await db.tx((sql) => sql.savepoint(async () => (await sql.query('UPDATE t')).rowCount));

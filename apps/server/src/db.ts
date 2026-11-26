@@ -20,6 +20,14 @@ export interface Sql {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<SqlResult<T>>;
 }
 
+/** How {@link Db.tx} starts its transaction; the default is READ COMMITTED, read-write. */
+export interface TxOptions {
+  /** REPEATABLE READ: every statement sees the snapshot of the first one (PostgreSQL 13.2.2). */
+  isolation?: 'REPEATABLE READ';
+  /** The transaction may not write (SET TRANSACTION READ ONLY). */
+  readOnly?: boolean;
+}
+
 /** The handle {@link Db.tx} passes to its callback: statements in the transaction, and savepoints. */
 export interface TxSql extends Sql {
   /**
@@ -105,11 +113,12 @@ export class Db implements Sql, OnModuleInit {
    * is gone), that failure is logged and the original error still reaches the caller. Connections
    * that broke are not returned to the pool (TypeORM and pg-pool discard them).
    */
-  async tx<T>(fn: (sql: TxSql) => Promise<T>): Promise<T> {
+  async tx<T>(fn: (sql: TxSql) => Promise<T>, options: TxOptions = {}): Promise<T> {
     const runner = this.dataSource.createQueryRunner();
     try {
       await runner.connect();
-      await runner.startTransaction();
+      await runner.startTransaction(options.isolation);
+      if (options.readOnly) await runner.query('SET TRANSACTION READ ONLY');
       try {
         const result = await fn({
           query: (sql, params) => run(runner, sql, params),
