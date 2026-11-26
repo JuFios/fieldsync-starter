@@ -151,6 +151,8 @@ jobs:
       # limited). A failed scan shows as a warning on the step; the report is in the job summary.
       - name: Vulnerability report (Trivy)
         continue-on-error: true
+        # A hung database download must end the step, not the whole job (job timeout: 20 min).
+        timeout-minutes: 8
         run: |
           {
             echo '## Image vulnerabilities (HIGH, CRITICAL)'
