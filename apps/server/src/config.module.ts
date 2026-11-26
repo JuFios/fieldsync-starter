@@ -11,10 +11,15 @@ export type EnvOverride = Record<string, string | undefined>;
  * With `env` it reads only that object, so tests can build several applications with different
  * settings in one process. `forRoot` validates while it builds the module; awaiting it here makes a
  * configuration error reject the caller before Nest starts.
+ *
+ * `forRoot` also copies the validated settings into process.env where a variable is unset. With
+ * `env` those copies are removed again: the given settings belong to one application, not to the
+ * process (they would otherwise leak into later configurations and child processes).
  */
-export function configModule(env?: EnvOverride): Promise<DynamicModule> {
+export async function configModule(env?: EnvOverride): Promise<DynamicModule> {
   const isolated = env !== undefined;
-  return ConfigModule.forRoot({
+  const before = new Set(Object.keys(process.env));
+  const module = ConfigModule.forRoot({
     isGlobal: true,
     cache: true,
     ignoreEnvFile: isolated,
@@ -22,4 +27,11 @@ export function configModule(env?: EnvOverride): Promise<DynamicModule> {
     skipProcessEnv: isolated,
     validate: (loaded) => validate(isolated ? env : loaded),
   });
+  try {
+    return await module;
+  } finally {
+    if (isolated) {
+      for (const name of Object.keys(process.env)) if (!before.has(name)) delete process.env[name];
+    }
+  }
 }

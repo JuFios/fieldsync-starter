@@ -186,4 +186,16 @@ describe('configModule', () => {
       else process.env.GC_INTERVAL_MS = saved;
     }
   });
+
+  it('leaves the process environment untouched when the settings are given', async () => {
+    const saved = { ...process.env };
+    try {
+      for (const name of Object.keys(validate({ DATABASE_URL: SECRET_URL }))) delete process.env[name];
+      const before = { ...process.env };
+      await configFrom({ DATABASE_URL: SECRET_URL, GC_INTERVAL_MS: '5000', SEED_DEMO: 'true' });
+      expect(process.env).toEqual(before);
+    } finally {
+      process.env = saved;
+    }
+  });
 });
