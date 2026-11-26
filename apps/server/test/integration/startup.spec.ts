@@ -1,5 +1,7 @@
 import { startApp, type RunningApp } from '../support/app';
 import { createTestDatabase, type TestDatabase } from '../support/database';
+import { SchedulerRegistry } from '@nestjs/schedule';
+import { GC_INTERVAL_NAME, GcService } from '../../src/gc.service';
 import { Api } from '../support/http';
 import { describeWithDb } from '../support/integration';
 
@@ -98,5 +100,21 @@ describeWithDb('server startup', () => {
         await server.close();
       }
     });
+  });
+
+  it('runs the GC on its interval while the server runs and stops it when the server closes', async () => {
+    const server = await startApp((await database()).url, { GC_INTERVAL_MS: '1000' });
+    const scheduler = server.app.get(SchedulerRegistry);
+    const collect = jest.spyOn(server.app.get(GcService), 'collect');
+    try {
+      expect(scheduler.getIntervals()).toEqual([GC_INTERVAL_NAME]);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(collect).toHaveBeenCalledTimes(1);
+    } finally {
+      await server.close();
+    }
+    expect(scheduler.getIntervals()).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(collect).toHaveBeenCalledTimes(1);
   });
 });
