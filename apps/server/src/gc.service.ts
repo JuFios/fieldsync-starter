@@ -1,33 +1,40 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { SchedulerRegistry } from '@nestjs/schedule';
 import { Clock } from './clock';
-import { AppConfig } from './config';
+import type { EnvironmentVariables } from './config';
 import { Db } from './db';
 
+/** Name of the change-log GC interval in the SchedulerRegistry. */
+export const GC_INTERVAL_NAME = 'changelog-gc';
+
 @Injectable()
-export class GcService implements OnModuleInit, OnModuleDestroy {
+export class GcService implements OnModuleInit {
   private readonly logger = new Logger(GcService.name);
-  private timer?: NodeJS.Timeout;
 
   constructor(
     private readonly db: Db,
-    private readonly config: AppConfig,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
     private readonly clock: Clock,
+    private readonly scheduler: SchedulerRegistry,
   ) {}
 
+  /**
+   * Registers the GC as a dynamic interval (its period comes from the configuration, which the
+   * static `@Interval()` decorator cannot read). The schedule module clears it on shutdown.
+   */
   onModuleInit(): void {
-    this.timer = setInterval(
+    const timer = setInterval(
       () => void this.collect().catch((e: Error) => this.logger.error(e.message)),
-      this.config.gcIntervalMs,
+      this.config.get('GC_INTERVAL_MS', { infer: true }),
     );
-  }
-
-  onModuleDestroy(): void {
-    if (this.timer) clearInterval(this.timer);
+    this.scheduler.addInterval(GC_INTERVAL_NAME, timer);
   }
 
   async collect(): Promise<number> {
     // The cutoff comes from the same clock that stamps created_at, see Clock.
-    const cutoff = new Date(this.clock.now().getTime() - this.config.changelogRetentionSeconds * 1000);
+    const retentionMs = this.config.get('CHANGELOG_RETENTION_SECONDS', { infer: true }) * 1000;
+    const cutoff = new Date(this.clock.now().getTime() - retentionMs);
     const res = await this.db.query(`DELETE FROM change_log WHERE created_at < $1`, [cutoff]);
     return res.rowCount;
   }

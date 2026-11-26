@@ -31,7 +31,7 @@ export function useIntegration(env: Record<string, string> = {}): IntegrationCon
     ctx.db = new Pool({ connectionString: ctx.database.url, max: 4, application_name: TEST_APPLICATION_NAME });
     ctx.db.on('error', () => undefined);
     ctx.fixtures = new Fixtures(ctx.db);
-    ctx.api = new Api(ctx.server.url);
+    ctx.api = new Api(ctx.server.app);
   });
   afterAll(async () => {
     await ctx.db?.end();

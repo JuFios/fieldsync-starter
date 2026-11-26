@@ -1,13 +1,17 @@
+import 'reflect-metadata';
+import { ConfigService } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConfigError, loadConfig, loadDotEnv } from '../src/config';
+import { ConfigError, validate, type EnvironmentVariables } from '../src/config';
+import { configModule } from '../src/config.module';
 
 const SECRET_URL = 'postgres://fieldsync:s3cret-password@db.internal:5432/fieldsync';
 
 function problemsOf(env: Record<string, string>): readonly string[] {
   try {
-    loadConfig({ DATABASE_URL: SECRET_URL, ...env });
+    validate({ DATABASE_URL: SECRET_URL, ...env });
   } catch (err) {
     expect(err).toBeInstanceOf(ConfigError);
     return (err as ConfigError).problems;
@@ -15,21 +19,21 @@ function problemsOf(env: Record<string, string>): readonly string[] {
   throw new Error('expected loadConfig to reject the environment');
 }
 
-describe('loadConfig', () => {
+describe('validate', () => {
   it('applies defaults when only DATABASE_URL is set', () => {
-    expect(loadConfig({ DATABASE_URL: SECRET_URL })).toEqual({
-      port: 3001,
-      databaseUrl: SECRET_URL,
-      dbPoolMax: 20,
-      seedDemo: false,
-      changelogRetentionSeconds: 604_800,
-      gcIntervalMs: 3_600_000,
+    expect({ ...validate({ DATABASE_URL: SECRET_URL }) }).toEqual({
+      PORT: 3001,
+      DATABASE_URL: SECRET_URL,
+      DB_POOL_MAX: 20,
+      SEED_DEMO: false,
+      CHANGELOG_RETENTION_SECONDS: 604_800,
+      GC_INTERVAL_MS: 3_600_000,
     });
   });
 
   it('reads every setting', () => {
     expect(
-      loadConfig({
+      validate({
         PORT: '8080',
         DATABASE_URL: 'postgresql://u:p@localhost/db',
         DB_POOL_MAX: '5',
@@ -37,22 +41,25 @@ describe('loadConfig', () => {
         CHANGELOG_RETENTION_SECONDS: '60',
         GC_INTERVAL_MS: '1000',
       }),
-    ).toEqual({
-      port: 8080,
-      databaseUrl: 'postgresql://u:p@localhost/db',
-      dbPoolMax: 5,
-      seedDemo: true,
-      changelogRetentionSeconds: 60,
-      gcIntervalMs: 1000,
+    ).toMatchObject({
+      PORT: 8080,
+      DATABASE_URL: 'postgresql://u:p@localhost/db',
+      DB_POOL_MAX: 5,
+      SEED_DEMO: true,
+      CHANGELOG_RETENTION_SECONDS: 60,
+      GC_INTERVAL_MS: 1000,
     });
   });
 
   it('treats empty values as unset', () => {
-    expect(loadConfig({ DATABASE_URL: SECRET_URL, PORT: '', SEED_DEMO: '  ' }).port).toBe(3001);
+    expect(validate({ DATABASE_URL: SECRET_URL, PORT: '', SEED_DEMO: '  ' })).toMatchObject({
+      PORT: 3001,
+      SEED_DEMO: false,
+    });
   });
 
   it('returns a frozen object', () => {
-    expect(Object.isFrozen(loadConfig({ DATABASE_URL: SECRET_URL }))).toBe(true);
+    expect(Object.isFrozen(validate({ DATABASE_URL: SECRET_URL }))).toBe(true);
   });
 
   it.each([
@@ -73,12 +80,24 @@ describe('loadConfig', () => {
     expect(problems[0]).toMatch(new RegExp(`^${name} must be an integer from \\d+ to \\d+ \\(got "${value}"\\)$`));
   });
 
-  it('rejects anything but "true" or "false" for SEED_DEMO', () => {
-    expect(problemsOf({ SEED_DEMO: 'yes' })).toEqual(['SEED_DEMO must be "true" or "false" (got "yes")']);
+  it.each(['SEED_DEMO'])('rejects anything but "true" or "false" for %s', (name) => {
+    expect(problemsOf({ [name]: 'yes' })).toEqual([`${name} must be "true" or "false" (got "yes")`]);
+  });
+
+  it('accepts surrounding spaces, as the previous loader did', () => {
+    expect(validate({ DATABASE_URL: SECRET_URL, PORT: ' 8080 ', SEED_DEMO: ' true ' })).toMatchObject({
+      PORT: 8080,
+      SEED_DEMO: true,
+    });
+  });
+
+  it('keeps only the settings, not the rest of the environment', () => {
+    expect(Object.keys(validate({ DATABASE_URL: SECRET_URL, HOME: '/root', PATH: '/bin' }))).not.toContain('HOME');
   });
 
   it('requires DATABASE_URL', () => {
-    expect(() => loadConfig({})).toThrow('DATABASE_URL is required');
+    expect(() => validate({})).toThrow('DATABASE_URL is required');
+    expect(() => validate({ DATABASE_URL: '   ' })).toThrow('DATABASE_URL is required');
   });
 
   it.each(['mysql://u:p@h/db', 'not a url', 'http://db:5432/fieldsync', 'socket:/var/run/postgresql'])(
@@ -96,13 +115,13 @@ describe('loadConfig', () => {
     'postgres:///fieldsync?host=/tmp',
     'POSTGRES://app@db.internal/fieldsync?sslmode=require',
   ])('accepts DATABASE_URL=%s, including Unix-socket forms that pg understands', (url) => {
-    expect(loadConfig({ DATABASE_URL: url }).databaseUrl).toBe(url);
+    expect(validate({ DATABASE_URL: url }).DATABASE_URL).toBe(url);
   });
 
   it('reports every problem at once and never includes the database URL', () => {
     let error: ConfigError | undefined;
     try {
-      loadConfig({ DATABASE_URL: SECRET_URL, PORT: 'x', GC_INTERVAL_MS: 'y' });
+      validate({ DATABASE_URL: SECRET_URL, PORT: 'x', GC_INTERVAL_MS: 'y' });
     } catch (err) {
       error = err as ConfigError;
     }
@@ -116,27 +135,52 @@ describe('loadConfig', () => {
   });
 });
 
-describe('loadDotEnv', () => {
-  it('loads .env from the given directory without overriding the environment', () => {
+describe('configModule', () => {
+  async function configFrom(env?: Record<string, string>): Promise<ConfigService<EnvironmentVariables, true>> {
+    const moduleRef = await Test.createTestingModule({ imports: [await configModule(env)] }).compile();
+    return moduleRef.get(ConfigService);
+  }
+
+  it('serves the validated, typed settings through ConfigService', async () => {
+    const config = await configFrom({ DATABASE_URL: SECRET_URL, GC_INTERVAL_MS: '5000' });
+    expect(config.get('GC_INTERVAL_MS', { infer: true })).toBe(5000);
+    expect(config.get('SEED_DEMO', { infer: true })).toBe(false);
+  });
+
+  it('rejects an invalid environment before any module is built', async () => {
+    await expect(configModule({ DATABASE_URL: SECRET_URL, GC_INTERVAL_MS: '1h' })).rejects.toThrow(ConfigError);
+  });
+
+  it('reads .env from the working directory, and the process environment wins over it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'fs-env-'));
+    const cwd = process.cwd();
+    const saved = { ...process.env };
     try {
-      writeFileSync(join(dir, '.env'), '# comment\nFROM_FILE=file\nFROM_ENV=file\nQUOTED="a b"\n');
-      const env: Record<string, string | undefined> = { FROM_ENV: 'env' };
-      expect(loadDotEnv(dir, env)).toBe(join(dir, '.env'));
-      expect(env).toEqual({ FROM_FILE: 'file', FROM_ENV: 'env', QUOTED: 'a b' });
+      writeFileSync(join(dir, '.env'), `# comment\nDATABASE_URL=${SECRET_URL}\nGC_INTERVAL_MS=2000\nDB_POOL_MAX=7\n`);
+      process.chdir(dir);
+      process.env.GC_INTERVAL_MS = '3000';
+      delete process.env.DB_POOL_MAX;
+      delete process.env.DATABASE_URL;
+      const config = await configFrom();
+      expect(config.get('GC_INTERVAL_MS', { infer: true })).toBe(3000);
+      expect(config.get('DB_POOL_MAX', { infer: true })).toBe(7);
+      expect(config.get('DATABASE_URL', { infer: true })).toBe(SECRET_URL);
     } finally {
+      process.chdir(cwd);
+      process.env = saved;
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('does nothing when there is no .env file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'fs-env-'));
+  it('ignores the process environment when the settings are given', async () => {
+    const saved = process.env.GC_INTERVAL_MS;
+    process.env.GC_INTERVAL_MS = '1h';
     try {
-      const env = {};
-      expect(loadDotEnv(dir, env)).toBeUndefined();
-      expect(env).toEqual({});
+      const config = await configFrom({ DATABASE_URL: SECRET_URL });
+      expect(config.get('GC_INTERVAL_MS', { infer: true })).toBe(3_600_000);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      if (saved === undefined) delete process.env.GC_INTERVAL_MS;
+      else process.env.GC_INTERVAL_MS = saved;
     }
   });
 });

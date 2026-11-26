@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, type DataSourceOptions } from 'typeorm';
 import { SafeTypeOrmLogger } from './logger';
 import { MIGRATIONS } from './migrations';
 
@@ -15,12 +15,13 @@ export interface DataSourceSettings {
 }
 
 /**
- * The one place that configures TypeORM. No entities: queries are SQL (see the README decision
- * record); TypeORM provides the pool, transactions and migrations.
+ * The one place that configures TypeORM, for the server's `TypeOrmModule`, the migration command
+ * and the tests. No entities: queries are SQL (see the README decision record); TypeORM provides
+ * the pool, transactions and migrations.
  */
-export function createDataSource(settings: DataSourceSettings): DataSource {
+export function dataSourceOptions(settings: DataSourceSettings): DataSourceOptions {
   const logger = new Logger('Database');
-  return new DataSource({
+  return {
     type: 'postgres',
     url: settings.url,
     applicationName: settings.applicationName,
@@ -37,5 +38,10 @@ export function createDataSource(settings: DataSourceSettings): DataSource {
     migrationsTransactionMode: 'each',
     logger: new SafeTypeOrmLogger(logger),
     logging: ['error', 'warn', 'migration'],
-  });
+  };
+}
+
+/** A DataSource outside Nest (test setup, tests of the data layer itself). */
+export function createDataSource(settings: DataSourceSettings): DataSource {
+  return new DataSource(dataSourceOptions(settings));
 }

@@ -1,30 +1,32 @@
+import type { INestApplication } from '@nestjs/common';
+import type { IncomingHttpHeaders, Server } from 'node:http';
+import request from 'supertest';
+
 export interface ApiResponse<T = unknown> {
   status: number;
-  headers: Headers;
+  headers: IncomingHttpHeaders;
   body: T;
 }
 
-/** Minimal JSON client for the server under test. */
+/** Minimal JSON client for the application under test, over supertest. */
 export class Api {
-  constructor(private readonly baseUrl: string) {}
+  constructor(private readonly app: INestApplication) {}
 
   async request<T = unknown>(
     method: 'GET' | 'POST',
     path: string,
     opts: { token?: string; body?: unknown } = {},
   ): Promise<ApiResponse<T>> {
-    const headers: Record<string, string> = {};
-    if (opts.token !== undefined) headers.authorization = `Bearer ${opts.token}`;
-    if (opts.body !== undefined) headers['content-type'] = 'application/json';
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    });
-    const text = await res.text();
-    let body: unknown = text;
-    if (text && res.headers.get('content-type')?.includes('application/json')) body = JSON.parse(text);
-    return { status: res.status, headers: res.headers, body: body as T };
+    const server = request(this.app.getHttpServer() as Server);
+    let req = method === 'GET' ? server.get(path) : server.post(path);
+    if (opts.token !== undefined) req = req.set('authorization', `Bearer ${opts.token}`);
+    // Every status is an answer for the tests, not an error of the request.
+    req = req.ok(() => true);
+    // Serialized here, so every value (null, strings, arrays) is sent as JSON, as a client would.
+    if (opts.body !== undefined) req = req.set('content-type', 'application/json').send(JSON.stringify(opts.body));
+    const res = await req;
+    const json = res.headers['content-type']?.includes('application/json') && res.text;
+    return { status: res.status, headers: res.headers, body: (json ? JSON.parse(res.text) : res.text) as T };
   }
 
   get<T = unknown>(path: string, token?: string): Promise<ApiResponse<T>> {

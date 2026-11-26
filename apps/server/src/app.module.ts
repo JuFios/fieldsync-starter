@@ -1,7 +1,10 @@
-import { DynamicModule, Module } from '@nestjs/common';
+import { Module, type DynamicModule } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthGuard } from './auth';
 import { Clock, SystemClock } from './clock';
-import { AppConfig } from './config';
+import { configModule, type EnvOverride } from './config.module';
+import { typeOrmOptions } from './database/typeorm';
 import { Db } from './db';
 import { GcService } from './gc.service';
 import { HealthController } from './health.controller';
@@ -23,7 +26,19 @@ import { SyncController } from './sync.controller';
   ],
 })
 export class AppModule {
-  static forRoot(config: AppConfig): DynamicModule {
-    return { module: AppModule, providers: [{ provide: AppConfig, useValue: config }] };
+  /**
+   * The application module with its configuration and infrastructure modules. Resolves only after
+   * the configuration has been validated (see {@link configModule}); `env` replaces the process
+   * environment, for tests.
+   */
+  static async forRoot(env?: EnvOverride): Promise<DynamicModule> {
+    return {
+      module: AppModule,
+      imports: [
+        await configModule(env),
+        TypeOrmModule.forRootAsync(typeOrmOptions('fieldsync-server')),
+        ScheduleModule.forRoot(),
+      ],
+    };
   }
 }

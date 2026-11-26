@@ -1,27 +1,113 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { parseEnv } from 'node:util';
+import { ConfigService } from '@nestjs/config';
+import { Expose, plainToInstance, Transform, type TransformFnParams } from 'class-transformer';
+import {
+  IsBoolean,
+  IsDefined,
+  IsInt,
+  IsString,
+  Matches,
+  Max,
+  Min,
+  validateSync,
+  type ValidationArguments,
+} from 'class-validator';
+
+/** Largest delay setInterval accepts; larger values silently become 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** Environment values arrive as strings, possibly padded with spaces. */
+function present(value: unknown): unknown {
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+/** A blank value counts as unset, so the setting gets its default. */
+function isBlank(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() === '';
+}
+
+/** The message of a failed check, with the offending value (never used for secrets). */
+function withValue(text: string): (args: ValidationArguments) => string {
+  return (args) => `${args.property} ${text} (got "${String(args.value)}")`;
+}
 
 /**
- * Server configuration, read once from the environment at startup and validated as a whole, so a
- * bad value stops the process with one readable report instead of misbehaving later.
- *
- * The class is also the Nest injection token; instances come from {@link loadConfig}.
+ * Converts decimal integer strings only. Anything else ("1h", "1e4", "0x10", "2.5") is left as it
+ * is and fails `@IsInt`, unlike `enableImplicitConversion`, which would turn "1e4" into 10000 and
+ * "" into 0.
  */
-export abstract class AppConfig {
-  /** HTTP port of the API. */
-  abstract readonly port: number;
-  /** Postgres connection string. Secret: never logged or echoed in errors. */
-  abstract readonly databaseUrl: string;
-  /** Maximum connections in the server's database pool. */
-  abstract readonly dbPoolMax: number;
-  /** Insert the demo sites, users and well-known tokens on startup. Development only. */
-  abstract readonly seedDemo: boolean;
-  /** Change-log entries older than this are removed by the GC. */
-  abstract readonly changelogRetentionSeconds: number;
-  /** How often the change-log GC runs. */
-  abstract readonly gcIntervalMs: number;
+const ToInteger = () =>
+  Transform(({ value }: TransformFnParams) => {
+    const v = present(value);
+    return typeof v === 'string' && /^-?\d+$/.test(v) ? Number(v) : v;
+  });
+
+/** Accepts exactly "true" or "false". */
+const ToBoolean = () =>
+  Transform(({ value }: TransformFnParams) => {
+    const v = present(value);
+    return v === 'true' ? true : v === 'false' ? false : v;
+  });
+
+/** `@IsInt`, `@Min` and `@Max` with one message, so a bad value is reported once. */
+function IntegerIn(min: number, max: number): PropertyDecorator {
+  const message = withValue(`must be an integer from ${min} to ${max}`);
+  return (target, key) => {
+    ToInteger()(target, key);
+    IsInt({ message })(target, key);
+    Min(min, { message })(target, key);
+    Max(max, { message })(target, key);
+  };
 }
+
+/**
+ * The server's environment, validated as a whole when `ConfigModule` loads (see {@link validate}).
+ * Property names are the variable names, as in the `@nestjs/config` documentation, so
+ * `ConfigService.get('PORT', { infer: true })` is typed.
+ */
+export class EnvironmentVariables {
+  /** HTTP port of the API. */
+  @Expose()
+  @IntegerIn(1, 65_535)
+  PORT = 3001;
+
+  /**
+   * Postgres connection string. Secret: never logged or echoed in errors. Only the scheme is
+   * checked: the rest follows libpq rules that pg implements (Unix sockets as `?host=/dir`,
+   * defaults from PG* variables), and an unreachable database is reported when the server connects.
+   */
+  @Expose()
+  @Transform(({ value }: TransformFnParams) => present(value))
+  @IsDefined({ message: '$property is required (a postgres:// connection string)' })
+  @IsString({ message: '$property must be a postgres:// or postgresql:// connection string (value not shown)' })
+  @Matches(/^postgres(?:ql)?:\/\//i, {
+    message: '$property must be a postgres:// or postgresql:// connection string (value not shown)',
+  })
+  DATABASE_URL!: string;
+
+  /** Maximum connections in the server's database pool. */
+  @Expose()
+  @IntegerIn(1, 1_000)
+  DB_POOL_MAX = 20;
+
+  /** Insert the demo sites, users and well-known tokens on startup. Development only. */
+  @Expose()
+  @ToBoolean()
+  @IsBoolean({ message: withValue('must be "true" or "false"') })
+  SEED_DEMO = false;
+
+  /** Change-log entries older than this are removed by the GC. */
+  @Expose()
+  @IntegerIn(1, 2_147_483_647)
+  CHANGELOG_RETENTION_SECONDS = 604_800;
+
+  /** How often the change-log GC runs. At least a second: a GC that runs more often only loads the database. */
+  @Expose()
+  @IntegerIn(1_000, MAX_TIMER_MS)
+  GC_INTERVAL_MS = 3_600_000;
+}
+
+/** Typed access to the validated settings: `config.get('PORT', { infer: true })` is a number. */
+export type ServerConfig = ConfigService<EnvironmentVariables, true>;
 
 export class ConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
@@ -30,86 +116,24 @@ export class ConfigError extends Error {
   }
 }
 
-type Env = Record<string, string | undefined>;
-
-/** Largest delay setInterval accepts; larger values silently become 1 ms. */
-const MAX_TIMER_MS = 2_147_483_647;
-
-class Reader {
-  readonly problems: string[] = [];
-
-  constructor(private readonly env: Env) {}
-
-  private raw(name: string): string | undefined {
-    const value = this.env[name]?.trim();
-    return value === '' ? undefined : value;
-  }
-
-  integer(name: string, fallback: number, min: number, max: number): number {
-    const raw = this.raw(name);
-    if (raw === undefined) return fallback;
-    const value = /^-?\d+$/.test(raw) ? Number(raw) : NaN;
-    if (!Number.isSafeInteger(value) || value < min || value > max) {
-      this.problems.push(`${name} must be an integer from ${min} to ${max} (got "${raw}")`);
-      return fallback;
-    }
-    return value;
-  }
-
-  boolean(name: string, fallback: boolean): boolean {
-    const raw = this.raw(name);
-    if (raw === undefined) return fallback;
-    if (raw === 'true') return true;
-    if (raw === 'false') return false;
-    this.problems.push(`${name} must be "true" or "false" (got "${raw}")`);
-    return fallback;
-  }
-
-  /**
-   * A required Postgres connection string. Only the scheme is checked: the rest follows libpq
-   * rules that pg implements (Unix sockets as `?host=/dir`, defaults from PG* variables), and an
-   * unreachable database is reported when the server connects. The value is a secret, so problems
-   * never include it.
-   */
-  postgresUrl(name: string): string {
-    const raw = this.raw(name);
-    if (raw === undefined) {
-      this.problems.push(`${name} is required (a postgres:// connection string)`);
-      return '';
-    }
-    if (!/^postgres(?:ql)?:\/\//i.test(raw)) {
-      this.problems.push(`${name} must be a postgres:// or postgresql:// connection string (value not shown)`);
-      return '';
-    }
-    return raw;
-  }
-}
-
-/** Reads and validates the configuration; throws {@link ConfigError} listing every problem. */
-export function loadConfig(env: Env = process.env): AppConfig {
-  const r = new Reader(env);
-  const config: AppConfig = {
-    port: r.integer('PORT', 3001, 1, 65_535),
-    databaseUrl: r.postgresUrl('DATABASE_URL'),
-    dbPoolMax: r.integer('DB_POOL_MAX', 20, 1, 1_000),
-    seedDemo: r.boolean('SEED_DEMO', false),
-    changelogRetentionSeconds: r.integer('CHANGELOG_RETENTION_SECONDS', 604_800, 1, 2_147_483_647),
-    // At least a second: a GC that runs more often only loads the database (ms vs s mix-ups).
-    gcIntervalMs: r.integer('GC_INTERVAL_MS', 3_600_000, 1_000, MAX_TIMER_MS),
-  };
-  if (r.problems.length > 0) throw new ConfigError(r.problems);
-  return Object.freeze(config);
-}
-
 /**
- * Loads `.env` from `cwd` into `env` when the file exists (Node's own dotenv parser). Variables
- * that are already set win over the file, as with `node --env-file`. Returns the file used.
+ * The `validate` function of `ConfigModule.forRoot`: converts and checks every setting and throws
+ * {@link ConfigError} listing all problems at once. Variables that are not settings are dropped.
+ * Problems name the variable and never contain the database URL; the validation errors themselves,
+ * which carry the values, are not kept.
  */
-export function loadDotEnv(cwd: string = process.cwd(), env: Env = process.env): string | undefined {
-  const file = resolve(cwd, '.env');
-  if (!existsSync(file)) return undefined;
-  for (const [name, value] of Object.entries(parseEnv(readFileSync(file, 'utf8')))) {
-    if (env[name] === undefined && value !== undefined) env[name] = value;
+export function validate(env: Record<string, unknown>): EnvironmentVariables {
+  const set = Object.fromEntries(Object.entries(env).filter(([, value]) => !isBlank(value)));
+  const config = plainToInstance(EnvironmentVariables, set, {
+    excludeExtraneousValues: true,
+    exposeDefaultValues: true,
+  });
+  const errors = validateSync(config, {
+    stopAtFirstError: true,
+    validationError: { target: false, value: false },
+  });
+  if (errors.length > 0) {
+    throw new ConfigError(errors.flatMap((e) => Object.values(e.constraints ?? {})));
   }
-  return file;
+  return Object.freeze(config);
 }
