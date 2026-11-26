@@ -4,8 +4,8 @@ import { Test } from '@nestjs/testing';
 import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow } from '@fieldsync/sim';
 import type { EntityName, Row } from '@fieldsync/sync-core';
 import type { Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { Pool } from 'pg';
+import request from 'supertest';
 import { configureApp } from '../../src/app.factory';
 import { AppModule } from '../../src/app.module';
 import { Clock } from '../../src/clock';
@@ -13,6 +13,13 @@ import { loadConfig } from '../../src/config';
 
 /** The application's own tables, in an order TRUNCATE accepts (it truncates them all at once anyway). */
 const TABLES = ['clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
+
+/** The supertest method for an HTTP method of the sync client (it sends GET and POST only). */
+function methodOf(method: string): 'get' | 'post' {
+  const lower = method.toLowerCase();
+  if (lower !== 'get' && lower !== 'post') throw new Error(`the simulation does not send ${method} requests`);
+  return lower;
+}
 
 /** A Clock whose time source the simulation swaps for each run. */
 class SimulatedClock extends Clock {
@@ -48,7 +55,7 @@ class RecordingExceptionFilter extends BaseExceptionFilter {
 
 /**
  * The real server on a real database, as a {@link SimServer}: the production AppModule with only the
- * Clock replaced, the production app settings, a listener on an ephemeral port and real HTTP. Data
+ * Clock replaced and the production app settings, called over real HTTP through supertest. Data
  * is reset between runs with TRUNCATE ... RESTART IDENTITY, so versions start at 1 for every run and
  * the physical row order is the same in every run of a seed.
  */
@@ -57,7 +64,7 @@ export class RealServer implements SimServer {
 
   private constructor(
     private readonly app: INestApplication,
-    private readonly url: string,
+    private readonly http: Server,
     private readonly clock: SimulatedClock,
     /** Direct connection for fixtures and the oracle, independent of the server's data layer. */
     private readonly db: Pool,
@@ -82,15 +89,14 @@ export class RealServer implements SimServer {
     const sink = (error: ServerError) => holder.server?.errors.push(error);
     app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost).httpAdapter, sink));
     try {
-      await app.listen(0, '127.0.0.1');
+      await app.init();
     } catch (err) {
       await app.close();
       throw err;
     }
-    const { port } = (app.getHttpServer() as Server).address() as AddressInfo;
     const db = new Pool({ connectionString: databaseUrl, max: 2, application_name: 'fieldsync-sim' });
     db.on('error', () => undefined);
-    const server = new RealServer(app, `http://127.0.0.1:${port}`, clock, db);
+    const server = new RealServer(app, app.getHttpServer() as Server, clock, db);
     holder.server = server;
     return server;
   }
@@ -115,17 +121,18 @@ export class RealServer implements SimServer {
     }
   }
 
-  async send(request: SimRequest): Promise<SimResponse> {
+  async send(simRequest: SimRequest): Promise<SimResponse> {
     this.errors = [];
-    const res = await fetch(`${this.url}${request.path}`, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-    });
-    const body = await res.text();
+    const agent = request(this.http);
+    const res = await agent[methodOf(simRequest.method)](simRequest.path)
+      .set(simRequest.headers)
+      // Every status is an answer for the simulation, not an error of the request.
+      .ok(() => true)
+      .send(simRequest.body);
     const serverErrors = this.errors;
     this.errors = [];
-    return { status: res.status, contentType: res.headers.get('content-type') ?? undefined, body, serverErrors };
+    const contentType = res.headers['content-type'] as string | undefined;
+    return { status: res.status, contentType, body: res.text, serverErrors };
   }
 
   async liveRows(): Promise<StoredRow[]> {
