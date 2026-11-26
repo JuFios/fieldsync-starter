@@ -1,5 +1,9 @@
 'use client';
 
+// The shared mutators check strings with String.prototype.isWellFormed (ES2024), which browsers that
+// Next.js 14 supports by default (Safari 12+, Chrome 64+) may lack. Next.js does not polyfill it, so
+// the specific polyfill is imported here, before the sync client is created.
+import 'core-js/stable/string/is-well-formed';
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { HttpTransport, LocalStorageSyncStorage, SyncClient } from '@fieldsync/sync-core';
 

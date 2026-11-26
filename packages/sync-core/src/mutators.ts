@@ -52,15 +52,13 @@ export const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   cancelled: [],
 };
 
-/** An unpaired UTF-16 surrogate: valid in a JS string, refused by Postgres text and jsonb. */
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-
 /**
  * Rejects strings Postgres cannot store, so the client rejects them exactly like the server would:
- * NUL is not allowed in text or jsonb, and neither is an unpaired surrogate.
+ * NUL is not allowed in text or jsonb, and neither is an unpaired UTF-16 surrogate (a string that is
+ * not well-formed, see `String.prototype.isWellFormed`).
  */
 function storable(value: string, field: string): string {
-  if (value.includes('\u0000') || LONE_SURROGATE.test(value)) {
+  if (value.includes('\u0000') || !value.isWellFormed()) {
     throw new MutationRejected('BAD_ARGS', `${field} contains characters that cannot be stored`);
   }
   return value;
@@ -79,8 +77,9 @@ function optionalText(value: unknown, max: number, field: string): string {
   const kept = storable(value, field);
   if (kept.length <= max) return kept;
   // Never cut between the two halves of a surrogate pair: the half left over could not be stored.
-  const high = kept.charCodeAt(max - 1);
-  return kept.slice(0, high >= 0xd800 && high <= 0xdbff ? max - 1 : max);
+  // `kept` is well-formed, so a cut can only break the pair that straddles it.
+  const cut = kept.slice(0, max);
+  return cut.isWellFormed() ? cut : kept.slice(0, max - 1);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
