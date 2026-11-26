@@ -491,6 +491,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
 | F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
 | F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
+| F-32 | 2 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -1035,6 +1036,22 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   ids taken), and a cascade would not write the change log. Hiding parts of deleted tickets in the
   UI only: the data stays and keeps diverging from what the user expects.
 - **Commits.** `6bde1c5` (test), `5042988` (fix).
+
+### F-32: after a reload, a new mutation reuses an id the server already handled (category 2)
+
+- **What.** The client stored its last applied mutation id only after a completed pull. When a push
+  was applied but the pull after it failed (the network went down) and the page was reloaded, the
+  client started numbering again after the stale stored id. The server answered the next mutation
+  as a duplicate of the old one with that id, and the client dropped it from its queue.
+- **Why it is dangerous.** The user's change is shown as synced, but the server never applies it,
+  and nobody is told. It needs only a lost connection between a push and a pull, and a reload.
+- **Reproduce.** `packages/sync-core/test/reload.spec.ts`.
+- **Fix.** The client stores its state, the last applied id included, right after every push
+  answer, not only after a pull. Ids after a reload continue after the last id the server handled.
+- **Alternatives.** Storing the next id by itself: the same effect, but a second storage format
+  next to the state; the queue that survives a reload (F-10) needs this state stored anyway. Random
+  ids: the server could no longer tell a gap from a duplicate (see F-09).
+- **Commits.** `479a024` (test).
 
 ## Changes to starter tests
 

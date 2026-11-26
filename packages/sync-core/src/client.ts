@@ -300,6 +300,9 @@ export class SyncClient {
     }
     this.pending = this.pending.filter((q) => !done.has(q.mutation.id));
     this.acknowledge(resp.lastMutationId);
+    // Stored at once, not only after the next pull: after a reload, ids continue after the last one
+    // the server handled, so a new mutation is never answered as a duplicate of an old one.
+    this.persist();
     this.emit();
   }
 
