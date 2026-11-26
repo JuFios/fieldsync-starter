@@ -8,6 +8,19 @@ import { precondition } from '@fieldsync/test-kit';
 import { describeWithDb, TEST_APPLICATION_NAME, useIntegration } from '../support/integration';
 
 const SERVER_DIR = join(__dirname, '../..');
+const SYNC_CORE_DIR = join(SERVER_DIR, '../../packages/sync-core');
+
+/** Compiles a package with its build configuration; a failure carries the compiler's output. */
+async function build(dir: string): Promise<void> {
+  try {
+    await promisify(execFile)(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', 'tsconfig.build.json'], {
+      cwd: dir,
+    });
+  } catch (err) {
+    const { stdout, stderr } = err as { stdout?: string; stderr?: string };
+    throw new Error(`building ${dir} failed:\n${stdout ?? ''}${stderr ?? ''}`);
+  }
+}
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -32,11 +45,11 @@ describeWithDb('a server process killed in the middle of a mutation', () => {
   let child: ChildProcess | undefined;
 
   beforeAll(async () => {
-    // The real entry point, built from the current sources.
-    await promisify(execFile)(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', 'tsconfig.build.json'], {
-      cwd: SERVER_DIR,
-    });
-  }, 120_000);
+    // The real entry point, built from the current sources. The server compiles against, and at
+    // run time loads, the built sync-core package, so that is built first (a fresh checkout has none).
+    await build(SYNC_CORE_DIR);
+    await build(SERVER_DIR);
+  }, 180_000);
 
   afterEach(() => {
     child?.kill('SIGKILL');
