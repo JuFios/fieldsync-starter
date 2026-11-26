@@ -20,11 +20,46 @@ export interface Sql {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<SqlResult<T>>;
 }
 
+/** The handle {@link Db.tx} passes to its callback: statements in the transaction, and savepoints. */
+export interface TxSql extends Sql {
+  /**
+   * Runs `fn` inside a savepoint of the transaction: releases it when `fn` resolves; when `fn` throws,
+   * rolls back to it (undoing `fn`'s statements and releasing the locks they took, PostgreSQL
+   * 13.3.2) and rethrows, leaving the transaction usable. If rolling back to the savepoint fails
+   * (the connection is gone), that failure is thrown, with `fn`'s error as its cause.
+   */
+  savepoint<T>(fn: () => Promise<T>): Promise<T>;
+}
+
 async function run<T>(runner: QueryRunner, sql: string, params?: unknown[]): Promise<SqlResult<T>> {
   // The structured result avoids TypeORM's raw shape, which is [rows, count] for UPDATE/DELETE.
   const result = await runner.query(sql, params, true);
   const rows = (result.records ?? []) as T[];
   return { rows, rowCount: result.affected ?? rows.length };
+}
+
+/**
+ * A nested transaction of TypeORM's QueryRunner is a savepoint: inside a transaction,
+ * `startTransaction` issues `SAVEPOINT typeorm_<depth>`, `commitTransaction` releases it and
+ * `rollbackTransaction` rolls back to it (TypeORM 0.3, PostgresQueryRunner).
+ */
+async function savepoint<T>(runner: QueryRunner, fn: () => Promise<T>): Promise<T> {
+  await runner.startTransaction();
+  let result: T;
+  try {
+    result = await fn();
+  } catch (err) {
+    try {
+      await runner.rollbackTransaction();
+    } catch (rollbackErr) {
+      throw new Error(`Rollback to savepoint failed after "${messageOf(err)}": ${messageOf(rollbackErr)}`, {
+        cause: err,
+      });
+    }
+    throw err;
+  }
+  await runner.commitTransaction();
+  return result;
 }
 
 function messageOf(err: unknown): string {
@@ -70,13 +105,16 @@ export class Db implements Sql, OnModuleInit {
    * is gone), that failure is logged and the original error still reaches the caller. Connections
    * that broke are not returned to the pool (TypeORM and pg-pool discard them).
    */
-  async tx<T>(fn: (sql: Sql) => Promise<T>): Promise<T> {
+  async tx<T>(fn: (sql: TxSql) => Promise<T>): Promise<T> {
     const runner = this.dataSource.createQueryRunner();
     try {
       await runner.connect();
       await runner.startTransaction();
       try {
-        const result = await fn({ query: (sql, params) => run(runner, sql, params) });
+        const result = await fn({
+          query: (sql, params) => run(runner, sql, params),
+          savepoint: (inner) => savepoint(runner, inner),
+        });
         await runner.commitTransaction();
         return result;
       } catch (err) {
