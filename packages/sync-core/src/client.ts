@@ -25,6 +25,12 @@ interface Queued {
   queuedAt: string;
   /** UTF-8 bytes of the mutation's JSON, for splitting the queue into push bodies. */
   bytes: number;
+  /**
+   * Set once the server applied the mutation: the change-log version of its last change. The
+   * mutation stays in the queue, and in the optimistic view, until the cursor reaches this version,
+   * so an interrupted pull never takes the user's change out of the view (F-30). It is not sent again.
+   */
+  appliedAt?: number;
 }
 
 const utf8 = new TextEncoder();
@@ -189,7 +195,7 @@ export class SyncClient {
     if (!this.inFlight) {
       this.inFlight = this.runSync().finally(() => {
         this.inFlight = undefined;
-        if (this.pending.length > 0 && this.currentStatus !== 'offline') void this.sync();
+        if (this.unsent().length > 0 && this.currentStatus !== 'offline') void this.sync();
       });
     }
     return this.inFlight;
@@ -227,6 +233,7 @@ export class SyncClient {
     const batch: Mutation[] = [];
     let bytes = this.envelopeBytes();
     for (const q of this.pending) {
+      if (q.appliedAt !== undefined) continue;
       // A comma separates every mutation after the first.
       const added = q.bytes + (batch.length > 0 ? 1 : 0);
       if (batch.length === MAX_PUSH_MUTATIONS || bytes + added > MAX_PUSH_BODY_BYTES) break;
@@ -236,18 +243,30 @@ export class SyncClient {
     return batch;
   }
 
+  /** Mutations the server has not answered yet. */
+  private unsent(): Queued[] {
+    return this.pending.filter((q) => q.appliedAt === undefined);
+  }
+
   private async push(): Promise<void> {
-    if (this.pending.length === 0) return;
+    if (this.unsent().length === 0) return;
     const batch = this.nextBatch();
     const resp = await this.transport.push({ clientId: this.clientId, mutations: batch });
-    const handled = new Set(resp.results.map((r) => r.id));
+    const done = new Set<number>();
     for (const r of resp.results) {
+      const queued = this.pending.find((q) => q.mutation.id === r.id);
+      if (!queued) continue;
       if (r.status === 'rejected') {
-        const mutation = batch.find((m) => m.id === r.id);
-        if (mutation) this.rejected.push({ mutation, code: r.code, message: r.message, details: r.details });
+        this.rejected.push({ mutation: queued.mutation, code: r.code, message: r.message, details: r.details });
+        done.add(r.id);
+      } else if (r.version === undefined || r.version <= this.cursor) {
+        // Nothing to wait for: the mutation changed nothing, or the client has its change already.
+        done.add(r.id);
+      } else {
+        queued.appliedAt = r.version;
       }
     }
-    this.pending = this.pending.filter((q) => !handled.has(q.mutation.id));
+    this.pending = this.pending.filter((q) => !done.has(q.mutation.id));
     this.acknowledge(resp.lastMutationId);
     this.emit();
   }
@@ -268,7 +287,12 @@ export class SyncClient {
       }
       this.cursor = resp.nextCursor;
       this.acknowledge(resp.lastMutationId);
-      this.pending = this.pending.filter((q) => q.mutation.id > this.lastMutationId);
+      this.pending = this.pending.filter((q) => {
+        if (q.appliedAt !== undefined) return q.appliedAt > this.cursor;
+        // A mutation whose answer was lost: the last page comes from the same snapshot as the
+        // client's last applied id, so every change of those mutations is in the pages read.
+        return resp.hasMore || q.mutation.id > resp.lastMutationId;
+      });
       this.persist();
       this.emit();
       if (!resp.hasMore) break;

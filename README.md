@@ -360,6 +360,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-26 | 2 | Parallel copies of one mutation are applied several times; a retried rejection loses its reason | Fixed |
 | F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
+| F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -828,6 +829,31 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   answer for the client id. `enableImplicitConversion`: turns `""` into 0 and `1e3` into 1000.
   Clamping an out-of-range `limit` instead of refusing it: hides the client's mistake.
 - **Commits.** `0432efb` (test), `6b19648` (fix).
+
+### F-30: an applied mutation disappears from the view when the sync is interrupted (category 8)
+
+- **What.** The client dropped a mutation from its queue as soon as the push answered that it was
+  applied, and again as soon as any pull page reported a last mutation id covering it, even when
+  the change itself was still on a later page. Its optimistic view is the pulled state plus the
+  queue, so until a later pull delivered the change the user's edit was gone from the screen.
+- **Why it is dangerous.** Interrupted syncs are the normal case for the client (a dropped
+  connection between push and pull, or between two pages): the user sees their change vanish and
+  may enter it again, which creates a real duplicate. Found while making the protocol's
+  acknowledgement exact; category 8 belongs to the offline-client change, but the fix is the
+  acknowledgement itself, so it is made here.
+- **Reproduce.** `acknowledgement.spec.ts`.
+- **Fix.** An applied (or duplicate) result carries the change-log version of the mutation's last
+  change. The client keeps the mutation in its queue, applied optimistically but not sent again,
+  until its cursor reaches that version, and then drops it, so it is never shown twice either. A
+  mutation without a version (it changed nothing) or with a version the cursor already passed is
+  dropped at once. The last mutation id a pull reports removes mutations whose push answer was lost
+  only on the last page (`hasMore` false): that page comes from the same snapshot as the id, and the
+  pages before it held every change up to it.
+- **Alternatives.** Using only the pull's last mutation id on the last page (the plan's first idea):
+  a client that never reaches the end of the log under constant writes would never shorten its
+  queue. Keeping the server's rows of a mutation in the push answer: the answer would grow with the
+  mutation and duplicate what the pull delivers.
+- **Commits.** `ec9fe40` (test).
 
 ## Changes to starter tests
 

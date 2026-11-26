@@ -1,7 +1,16 @@
-import { MemoryStorage, SyncClient, type PullResponse, type PushRequest, type PushResponse } from '../src';
+import { MemoryStorage, SyncClient, type Change, type PullResponse, type PushRequest, type PushResponse } from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
+
+const ticketChange = (version: number): Change => ({
+  version,
+  entity: 'ticket',
+  id: TICKET,
+  siteId: SITE,
+  op: 'put',
+  data: { id: TICKET, siteId: SITE, title: 'Mine', description: '', status: 'open' },
+});
 
 /** Applies every pushed mutation at the given log version; pulls answer from a script, or fail. */
 class ScriptedTransport {
@@ -51,6 +60,24 @@ describe('acknowledged mutations', () => {
       c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect(c.rows('ticket').map((t) => t.title)).toEqual(['Mine']);
+    } finally {
+      c.dispose();
+    }
+  });
+
+  it('leave the queue once the pull delivers their change, and are not applied twice', async () => {
+    const transport = new ScriptedTransport();
+    transport.pulls = [
+      () => Promise.resolve({ changes: [ticketChange(3)], nextCursor: 3, hasMore: false, lastMutationId: 1 }),
+    ];
+    const c = client(transport);
+    try {
+      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.sync();
+      expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
+        pending: 0,
+        titles: ['Mine'],
+      });
     } finally {
       c.dispose();
     }
