@@ -366,7 +366,10 @@ from that statement to the commit. A deadlock is not possible with one lock orde
 test with 16 clients on three tickets sees none. Cost, measured by `npm run test:bench`
 (16 clients, 2000 one-mutation pushes, local Postgres 16): about 660 mutations/s against about
 890/s for the original server (76 %), p95 latency about 49 ms against about 25 ms; 99 % of the
-head's updates are HOT. The load test of the observability work measures it with 200 clients.
+head's updates are HOT. The accepted threshold for this benchmark is at least 70 % of the
+original throughput and a p95 of at most 50 ms on the same machine; CI runs it for correctness only,
+since timings on shared runners vary too much to assert. The load test of the observability work
+measures it with 200 clients.
 
 **Idempotency.** Each mutation is its own transaction. It locks the client's row (`SELECT … FOR
 UPDATE`, after an `INSERT … ON CONFLICT DO NOTHING` for a new client), so parallel copies of one
