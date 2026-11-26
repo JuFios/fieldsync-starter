@@ -102,6 +102,32 @@ describeWithDb('server startup', () => {
         await server.close();
       }
     });
+
+    it('describes the push body and the pull query from their DTOs', async () => {
+      const server = await startApp((await database()).url, { API_DOCS_ENABLED: 'true' });
+      try {
+        const res = await new Api(server.app).get<{
+          paths: Record<
+            string,
+            Record<string, { parameters?: Array<{ name: string; in: string; required?: boolean }> }>
+          >;
+          components: { schemas: Record<string, { required?: string[]; properties: Record<string, unknown> }> };
+        }>('/docs-json');
+        const pull = res.body.paths['/sync/pull'].get.parameters ?? [];
+        expect(pull.map((p) => [p.name, p.in, p.required ?? false]).sort()).toEqual([
+          ['clientId', 'query', false],
+          ['cursor', 'query', false],
+          ['limit', 'query', false],
+        ]);
+        const { PushRequestDto, MutationDto } = res.body.components.schemas;
+        expect([PushRequestDto.required, MutationDto.required]).toEqual([
+          ['clientId', 'mutations'],
+          ['id', 'name', 'args'],
+        ]);
+      } finally {
+        await server.close();
+      }
+    });
   });
 
   it('runs the GC on its interval while the server runs and stops it when the server closes', async () => {
