@@ -826,8 +826,9 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 - **Why it is dangerous.** The client never learns the reason and retries the same batch forever;
   every mutation queued after the rejected one is blocked (a poison mutation).
 - **Reproduce.** `rejections.spec.ts` and `client-ids.spec.ts` ("tells the client that a create
-  was rejected with ID_CONFLICT"), both known defects; in the simulation, the signature
-  `rejected-mutation-500` in the `rejections` and `full` profiles (see [Simulation](#simulation)).
+  was rejected with ID_CONFLICT"), known defects until the fix; in the simulation, the signature
+  `rejected-mutation-500` in the `rejections` and `full` profiles, which no longer tolerate it (see
+  [Simulation](#simulation)).
 - **Fix.** Each mutation's transaction runs the mutator inside a savepoint. A rejection rolls back
   to it, which undoes the mutator's writes and the locks they took, and the same transaction then
   advances the client's last mutation id, exactly as an application does: the rejected mutation is
@@ -1169,9 +1170,9 @@ Each violation has a **signature**:
 | Profile | Sites, users, clients | Actions | Faults | Tolerated signatures |
 |---|---|---|---|---|
 | `baseline` | 1 site, 3 technicians, 4 clients (one technician on two devices) | create, edit, add part, increase quantity: nothing the server can reject | all but `hang` | none: must converge on every seed |
-| `rejections` | as `baseline` | all, including status races, deletes against edits, adjustments near zero, invalid text | all but `hang` | `rejected-mutation-500` |
+| `rejections` | as `baseline` | all, including status races, deletes against edits, adjustments near zero, invalid text | all but `hang` | none; every rejection must carry a code the actions can cause |
 | `multi-site` | 2 sites; a technician of each, one of both, an admin; 4 clients | as `baseline` | all but `hang` | `foreign-site-rows` |
-| `full` | as `multi-site` | as `rejections` | all, `hang` included | `rejected-mutation-500`, `foreign-site-rows`, `stuck-request` |
+| `full` | as `multi-site` | as `rejections` | all, `hang` included | `foreign-site-rows`, `stuck-request` |
 
 A profile may produce only its tolerated signatures; anything else fails. Each tolerated signature
 is a known-defect test in the corpus, so the change that fixes the defect sees "appears fixed - flip
