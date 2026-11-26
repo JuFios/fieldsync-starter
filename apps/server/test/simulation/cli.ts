@@ -1,178 +1,148 @@
 /* eslint-disable no-console -- a command-line entry point: results go to stdout, progress to stderr */
-import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import {
-  formatFailure,
-  KNOWN_SIGNATURES,
-  minimizeRun,
-  PROFILES,
-  runScenario,
-  type ProfileName,
-  type RunResult,
-  type Signature,
-} from '@fieldsync/sim';
-import { loadDotEnv } from '../../src/config';
-import { createDataSource } from '../../src/database/data-source';
-import { runMigrations } from '../../src/database/migrator';
-import {
-  dropDatabase,
-  newDatabaseName,
-  quoteIdent,
-  startRun,
-  urlFor,
-  withMaintenanceClient,
-} from '../support/database';
-import { parseCliOptions, USAGE, UsageError, type CliOptions } from './cli-options';
-import { RealServer } from './real-server';
+import { CommanderError } from '@commander-js/extra-typings';
+import type { CheckReport, Signature } from '@fieldsync/sim';
+import { EXIT, parseCliOptions, type CliOptions, type CliProfile } from './cli-options';
 
-let interrupted = false;
-
-function version(): string {
-  const manifest = JSON.parse(readFileSync(resolve(__dirname, '../../../package.json'), 'utf8')) as { version: string };
+async function version(): Promise<string> {
+  const manifest = JSON.parse(await readFile(resolve(__dirname, '../../../package.json'), 'utf8')) as {
+    version: string;
+  };
   return manifest.version;
 }
 
-/** A migrated throw-away database next to DATABASE_URL, named so the test suites' cleanup removes leftovers. */
-async function createDatabase(): Promise<{ url: string; drop(): Promise<void> }> {
-  startRun();
-  const name = newDatabaseName('sim');
-  await withMaintenanceClient((c) => c.query(`CREATE DATABASE ${quoteIdent(name)}`));
-  const url = urlFor(name);
-  const ds = createDataSource({ url, poolSize: 1, applicationName: 'fieldsync-sim-setup' });
-  await ds.initialize();
-  try {
-    await runMigrations(ds);
-  } finally {
-    await ds.destroy();
-  }
-  return { url, drop: () => withMaintenanceClient((c) => dropDatabase(c, name)) };
-}
-
 interface ProfileSummary {
-  profile: ProfileName;
-  seeds: number;
+  profile: CliProfile;
   ms: number;
-  clean: number;
-  bySignature: Map<Signature, number[]>;
-  unexpected: RunResult[];
-  stats: Record<string, number>;
+  report: CheckReport;
 }
 
-async function runProfile(name: ProfileName, options: CliOptions, server: RealServer): Promise<ProfileSummary> {
-  const profile = PROFILES[name];
-  const started = Date.now();
-  const summary: ProfileSummary = {
-    profile: name,
-    seeds: 0,
-    ms: 0,
-    clean: 0,
-    bySignature: new Map(),
-    unexpected: [],
-    stats: {},
-  };
-  for (let i = 0; i < options.runs && !interrupted; i += 1) {
-    const seed = options.firstSeed + i;
-    const result = await runScenario({ seed, profile, server });
-    summary.seeds += 1;
-    for (const [key, value] of Object.entries(result.stats)) summary.stats[key] = (summary.stats[key] ?? 0) + value;
-    if (result.violations.length === 0) summary.clean += 1;
-    for (const signature of new Set(result.violations.map((v) => v.signature))) {
-      summary.bySignature.set(signature, [...(summary.bySignature.get(signature) ?? []), seed]);
-    }
-    if (result.violations.some((v) => !profile.allowed.includes(v.signature))) {
-      summary.unexpected.push(result);
-      console.log(formatFailure(result), '\n');
-    }
-    if (options.trace && (options.runs === 1 || result.violations.length > 0)) {
-      console.log(`Trace of ${name} seed ${seed}:\n${result.trace.join('\n')}\n`);
-    }
-    if ((i + 1) % 50 === 0) console.error(`  ${name}: ${i + 1}/${options.runs} seeds`);
-  }
-  const first = summary.unexpected[0];
-  const firstSignature = first?.violations.find((v) => !profile.allowed.includes(v.signature))?.signature;
-  if (options.minimize && first && firstSignature && !interrupted) {
-    console.error(`  ${name}: minimising seed ${first.seed} (${options.replays} replays at most)`);
-    const minimized = await minimizeRun(first, firstSignature, profile, server, options.replays);
-    console.log(formatFailure(first, minimized), '\n');
-  }
-  summary.ms = Date.now() - started;
-  return summary;
-}
-
-function printSummary(summaries: ProfileSummary[]): void {
-  console.log('Summary');
-  for (const s of summaries) {
-    const profile = PROFILES[s.profile];
-    console.log(
-      `  ${s.profile}: ${s.seeds} seeds in ${(s.ms / 1000).toFixed(1)} s (${(s.ms / Math.max(s.seeds, 1)).toFixed(0)} ms/seed), ` +
-        `${s.clean} without violations`,
+/**
+ * Runs every chosen profile. The engine, the server and the database driver are loaded only here,
+ * after the options are valid, so `--help`, `--version` and option errors start fast.
+ */
+async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSummary[]> {
+  const [{ checkProfile, formatFailure, PROFILES }, { loadDotEnv }, { createSimulationDatabase }, { RealServer }] =
+    await Promise.all([
+      import('@fieldsync/sim'),
+      import('../../src/config'),
+      import('./sim-database'),
+      import('./real-server'),
+    ]);
+  loadDotEnv();
+  if (!process.env.DATABASE_URL) {
+    throw new UsageProblem(
+      'DATABASE_URL is not set. Start Postgres (docker compose up -d postgres) and set it, see the README.',
     );
-    for (const [signature, seeds] of s.bySignature) {
-      const known = KNOWN_SIGNATURES[signature];
-      const label = profile.allowed.includes(signature)
-        ? `known defect ${known?.defect ?? '?'} -> ${known?.owner ?? '?'}`
-        : 'UNEXPECTED';
-      const shown = seeds.slice(0, 10).join(', ') + (seeds.length > 10 ? `, +${seeds.length - 10}` : '');
-      console.log(`    ${signature} (${label}): ${seeds.length} seeds, e.g. ${shown}`);
+  }
+  const database = await createSimulationDatabase();
+  const summaries: ProfileSummary[] = [];
+  let server: Awaited<ReturnType<typeof RealServer.start>> | undefined;
+  try {
+    server = await RealServer.start(database.url);
+    for (const name of options.profiles) {
+      if (signal.aborted) break;
+      const what = options.path === undefined ? `${options.runs} runs` : `path ${options.path}`;
+      console.error(`sim: ${name}, seed ${options.seed}, ${what}`);
+      const started = Date.now();
+      const report = await checkProfile({
+        profile: PROFILES[name],
+        server,
+        seed: options.seed,
+        runs: options.runs,
+        path: options.path,
+        replayPath: options.replayPath,
+        shrinkTimeMs: options.shrinkMs,
+        signal,
+        onRun: (result, index) => {
+          if (options.trace && (options.runs === 1 || result.violations.length > 0)) {
+            console.log(`Trace of ${name} seed ${options.seed} run ${index}:\n${result.trace.join('\n')}\n`);
+          }
+          if ((index + 1) % 50 === 0) console.error(`  ${name}: ${index + 1}/${options.runs} runs`);
+        },
+      });
+      if (report.failure) {
+        if (!report.failure.shrinkComplete && options.shrinkMs > 0 && !report.interrupted) {
+          console.error(`  ${name}: shrinking stopped at the --shrink-ms limit`);
+        }
+        console.log(formatFailure(report.failure), '\n');
+      }
+      summaries.push({ profile: name, ms: Date.now() - started, report });
     }
-    const averages = Object.entries(s.stats)
-      .filter(([key]) => key in profile.minimumPerSeed || key.startsWith('action:') || key === 'serverRejections')
-      .map(([key, total]) => `${key}=${(total / Math.max(s.seeds, 1)).toFixed(2)}`)
+  } finally {
+    await server?.close();
+    await database.drop();
+  }
+  return summaries;
+}
+
+/** A problem with the environment the user can fix, reported like an invalid option. */
+class UsageProblem extends Error {}
+
+function printSummary(summaries: ProfileSummary[], allowed: (profile: CliProfile) => readonly Signature[]): void {
+  console.log('Summary');
+  for (const { profile, ms, report } of summaries) {
+    const runs = report.results.length;
+    const clean = report.results.filter((r) => r.violations.length === 0).length;
+    console.log(
+      `  ${profile}: seed ${report.seed}, ${runs} runs in ${(ms / 1000).toFixed(1)} s ` +
+        `(${(ms / Math.max(runs, 1)).toFixed(0)} ms/run), ${clean} without violations` +
+        `${report.failure ? `, stopped at path ${report.failure.path} by an unexpected violation` : ''}`,
+    );
+    const bySignature = new Map<Signature, number[]>();
+    report.results.forEach((r, path) => {
+      for (const signature of new Set(r.violations.map((v) => v.signature))) {
+        bySignature.set(signature, [...(bySignature.get(signature) ?? []), path]);
+      }
+    });
+    for (const [signature, paths] of bySignature) {
+      const label = allowed(profile).includes(signature) ? 'known defect' : 'UNEXPECTED';
+      const shown = paths.slice(0, 10).join(', ') + (paths.length > 10 ? `, +${paths.length - 10}` : '');
+      console.log(`    ${signature} (${label}): ${paths.length} runs, paths ${shown}`);
+    }
+    const totals: Record<string, number> = {};
+    for (const r of report.results) {
+      for (const [key, value] of Object.entries(r.stats)) totals[key] = (totals[key] ?? 0) + value;
+    }
+    const averages = Object.entries(totals)
+      .map(([key, total]) => `${key}=${(total / Math.max(runs, 1)).toFixed(2)}`)
       .sort();
-    console.log(`    per seed: ${averages.join(' ')}`);
+    console.log(`    per run: ${averages.join(' ')}`);
   }
 }
 
 async function main(argv: readonly string[]): Promise<number> {
   let options: CliOptions;
   try {
-    options = parseCliOptions(argv);
+    options = parseCliOptions(argv, await version());
   } catch (err) {
-    if (!(err instanceof UsageError)) throw err;
-    console.error(`sim: ${err.message}\n\n${USAGE}`);
-    return 2;
-  }
-  if (options.help) {
-    console.log(USAGE);
-    return 0;
-  }
-  if (options.version) {
-    console.log(version());
-    return 0;
-  }
-  loadDotEnv();
-  if (!process.env.DATABASE_URL) {
-    console.error(
-      'sim: DATABASE_URL is not set. Start Postgres (docker compose up -d postgres) and set it, see the README.',
-    );
-    return 2;
+    if (!(err instanceof CommanderError)) throw err;
+    // Commander has already printed the help, the version or the error.
+    return err.code === 'commander.helpDisplayed' || err.code === 'commander.version' ? EXIT.ok : EXIT.usage;
   }
 
+  const controller = new AbortController();
   const onSigint = () => {
-    if (interrupted) process.exit(130);
-    interrupted = true;
-    console.error('\nsim: interrupted, finishing the current seed and cleaning up (Ctrl+C again to quit now)');
+    if (controller.signal.aborted) process.exit(EXIT.interrupted);
+    controller.abort();
+    console.error('\nsim: interrupted, finishing the current scenario and cleaning up (Ctrl+C again to quit now)');
   };
   process.on('SIGINT', onSigint);
-
-  const database = await createDatabase();
-  let server: RealServer | undefined;
-  const summaries: ProfileSummary[] = [];
+  let summaries: ProfileSummary[];
   try {
-    server = await RealServer.start(database.url);
-    for (const name of options.profiles) {
-      if (interrupted) break;
-      console.error(`sim: ${name}, seeds ${options.firstSeed}-${options.firstSeed + options.runs - 1}`);
-      summaries.push(await runProfile(name, options, server));
-    }
+    summaries = await run(options, controller.signal);
+  } catch (err) {
+    if (!(err instanceof UsageProblem)) throw err;
+    console.error(`sim: ${err.message}`);
+    return EXIT.usage;
   } finally {
-    await server?.close();
-    await database.drop();
     process.off('SIGINT', onSigint);
   }
-  printSummary(summaries);
-  if (interrupted) return 130;
-  return summaries.some((s) => s.unexpected.length > 0) ? 1 : 0;
+  const { PROFILES } = await import('@fieldsync/sim');
+  printSummary(summaries, (profile) => PROFILES[profile].allowed);
+  if (controller.signal.aborted) return EXIT.interrupted;
+  return summaries.some((s) => s.report.failure) ? EXIT.violations : EXIT.ok;
 }
 
 main(process.argv.slice(2)).then(
@@ -181,6 +151,6 @@ main(process.argv.slice(2)).then(
   },
   (err: unknown) => {
     console.error('sim: failed:', err instanceof Error ? (err.stack ?? err.message) : err);
-    process.exitCode = 1;
+    process.exitCode = EXIT.violations;
   },
 );

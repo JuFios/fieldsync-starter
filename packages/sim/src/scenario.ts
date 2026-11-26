@@ -1,6 +1,5 @@
 import { ALLOWED_TRANSITIONS, type MutatorName, type Row, type TicketStatus } from '@fieldsync/sync-core';
 import type { ActionKind, Profile } from './profiles';
-import type { Random } from './random';
 import type { Fixtures, SimUser } from './types';
 
 /** A concrete user action: the mutation a user's click produces. */
@@ -9,14 +8,49 @@ export interface Action {
   args: Record<string, unknown>;
 }
 
-/** Builds the sites and users of a profile with ids and tokens drawn from `random`. */
-export function buildFixtures(profile: Profile, random: Random): Fixtures {
-  const sites = Array.from({ length: profile.sites }, (_, i) => ({ id: random.uuid(), name: `Site ${i + 1}` }));
+/**
+ * The generated part of a user action. The rows a user acts on exist only once the run is under
+ * way, so a command carries choices (which row, which status, what text) and {@link generateAction}
+ * applies them to what the client shows when the command runs. Picks are taken modulo the number of
+ * candidates, so they shrink towards the first candidate.
+ */
+export interface ActionParams {
+  /** Act on one of the two "hot" rows (most picks: users of a site work on the same few jobs). */
+  hot: boolean;
+  pick: number;
+  sitePick: number;
+  title: string;
+  description: string;
+  /** When editing, keep the ticket's description instead of writing `description`. */
+  keepDescription: boolean;
+  /** Ask for a status the UI would not offer (an outdated screen) instead of an allowed one. */
+  offScript: boolean;
+  statusPick: number;
+  partName: string;
+  quantity: number;
+  /** A positive adjustment (`increase-part`). */
+  increase: number;
+  /** Any adjustment, zero and negative included (`adjust-part`). */
+  delta: number;
+}
+
+/** The id of the n-th object of a run (UUID version 4 layout), unique within the run. */
+export function simUuid(kind: number, n: number): string {
+  const hex = (n >>> 0).toString(16).padStart(12, '0');
+  return `00000000-0000-4000-8${kind.toString(16).padStart(3, '0')}-${hex}`;
+}
+
+/**
+ * The sites and users of a profile. Ids and tokens are derived from positions, not drawn at random:
+ * they never matter to a scenario, and fixed values keep them out of the generated, shrunk input.
+ */
+export function buildFixtures(profile: Profile): Fixtures {
+  const sites = Array.from({ length: profile.sites }, (_, i) => ({ id: simUuid(1, i + 1), name: `Site ${i + 1}` }));
   const users: SimUser[] = profile.users.map((spec, i) => ({
-    id: random.uuid(),
+    id: simUuid(2, i + 1),
     name: `${spec.role} ${i + 1}`,
     role: spec.role,
-    token: random.hex(24),
+    token: `sim-${profile.name}-user-${i + 1}`,
     sites:
       spec.role === 'admin'
         ? []
@@ -43,60 +77,31 @@ export interface ActorView {
   parts: readonly Row[];
 }
 
-const WRENCH = '\u{1F527}';
+const nth = <T>(items: readonly T[], pick: number): T => items[pick % items.length] as T;
 
-/**
- * Text a user may type, mostly plain but also non-ASCII, emoji (surrogate pairs) and lengths at the
- * limits: a title of exactly `max` UTF-16 units ending in an emoji, a description longer than its
- * limit with an emoji across the cut. With `invalid`, sometimes text the server must reject: empty,
- * one unit too long, a NUL character or an unpaired surrogate.
- */
-function text(random: Random, field: 'title' | 'description' | 'name', invalid: boolean): string {
-  const max = field === 'title' ? 200 : field === 'name' ? 100 : 5000;
-  const words = field === 'name' ? ['Seal', 'Bearing', 'Filter', 'Fuse'] : ['Pump', 'Valve', 'Belt', 'Motor', 'Sensor'];
-  const variant = random.weighted({ plain: 80, unicode: 12, limit: 5, invalid: invalid ? 3 : 0 });
-  switch (variant) {
-    case 'plain':
-      return `${random.pick(words)} ${random.hex(3)}`;
-    case 'unicode':
-      return `${random.pick(['Насос', 'Ventil ü', '泵', 'Ćwiek', 'e\u0301'])} ${WRENCH} ${random.hex(2)}`;
-    case 'limit':
-      // Description: longer than the limit, the emoji's halves on both sides of the cut. Otherwise:
-      // exactly the limit, the emoji in the last two units.
-      return field === 'description' ? `${'x'.repeat(max - 1)}${WRENCH}tail` : `${'x'.repeat(max - 2)}${WRENCH}`;
-    case 'invalid':
-      return random.pick(['', 'x'.repeat(max + 1), 'pump\u0000room', 'pump \ud83d']);
-  }
-}
-
-/**
- * A row to act on. Users of one site mostly work on the same few open jobs, so most picks come from
- * a small "hot" set (the rows with the lowest ids, the same set on every client that has them);
- * that is what makes clients write the same rows concurrently.
- */
-function pickRow(rows: readonly Row[], random: Random): Row | undefined {
+/** The row to act on: rows are ordered by id, so the hot set is the same on every client that has it. */
+function pickRow(rows: readonly Row[], params: ActionParams): Row | undefined {
   if (rows.length === 0) return undefined;
   const byId = [...rows].sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
-  return random.chance(0.75) ? random.pick(byId.slice(0, 2)) : random.pick(byId);
+  return nth(params.hot ? byId.slice(0, 2) : byId, params.pick);
 }
 
 /**
  * Turns an action kind into a concrete mutation, as a user of the client would produce it from what
  * the client shows. Users act only on rows of sites they can access. When there is nothing to act
- * on (no ticket to edit yet), the user creates a ticket instead.
+ * on (no ticket to edit yet), the user creates a ticket instead. `newId` is the id a new row gets,
+ * as the client chooses it before the mutation.
  */
-export function generateAction(kind: ActionKind, view: ActorView, random: Random, invalidText = false): Action {
-  const title = () => text(random, 'title', invalidText);
-  const description = () => (random.chance(0.3) ? text(random, 'description', invalidText) : '');
-  const ticket = pickRow(view.tickets, random);
-  const part = pickRow(view.parts, random);
+export function generateAction(kind: ActionKind, view: ActorView, params: ActionParams, newId: () => string): Action {
+  const ticket = pickRow(view.tickets, params);
+  const part = pickRow(view.parts, params);
   const create = (): Action => ({
     name: 'ticket.create',
     args: {
-      id: random.uuid(),
-      siteId: random.pick(view.sites),
-      title: title(),
-      description: description(),
+      id: newId(),
+      siteId: nth(view.sites, params.sitePick),
+      title: params.title,
+      description: params.description,
     },
   });
   switch (kind) {
@@ -109,16 +114,16 @@ export function generateAction(kind: ActionKind, view: ActorView, random: Random
         args: {
           id: ticket.id,
           siteId: ticket.siteId,
-          title: title(),
-          description: random.chance(0.5) ? description() : ticket.description,
+          title: params.title,
+          description: params.keepDescription ? ticket.description : params.description,
         },
       };
     case 'change-status': {
       if (!ticket) return create();
       const from = ticket.status as TicketStatus;
       const allowed = ALLOWED_TRANSITIONS[from];
-      // Mostly what the UI offers; sometimes a transition it would not (an outdated screen).
-      const to = allowed.length > 0 && random.chance(0.9) ? random.pick(allowed) : random.pick(STATUSES);
+      const to =
+        allowed.length > 0 && !params.offScript ? nth(allowed, params.statusPick) : nth(STATUSES, params.statusPick);
       return { name: 'ticket.setStatus', args: { id: ticket.id, siteId: ticket.siteId, from, to } };
     }
     case 'delete-ticket':
@@ -129,18 +134,18 @@ export function generateAction(kind: ActionKind, view: ActorView, random: Random
       return {
         name: 'part.add',
         args: {
-          id: random.uuid(),
+          id: newId(),
           ticketId: ticket.id,
           siteId: ticket.siteId,
-          name: text(random, 'name', invalidText),
-          quantity: random.int(1, 3),
+          name: params.partName,
+          quantity: params.quantity,
         },
       };
     case 'increase-part':
       if (!part) return create();
-      return { name: 'part.adjust', args: { id: part.id, siteId: part.siteId, delta: random.int(1, 3) } };
+      return { name: 'part.adjust', args: { id: part.id, siteId: part.siteId, delta: params.increase } };
     case 'adjust-part':
       if (!part) return create();
-      return { name: 'part.adjust', args: { id: part.id, siteId: part.siteId, delta: random.int(-3, 3) } };
+      return { name: 'part.adjust', args: { id: part.id, siteId: part.siteId, delta: params.delta } };
   }
 }

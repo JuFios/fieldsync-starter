@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { PROFILES, runScenario } from '@fieldsync/sim';
+import { checkProfile, PROFILES } from '@fieldsync/sim';
 import { MUTATORS, type MutatorDef } from '@fieldsync/sync-core';
 import { createTestDatabase, hasDatabase, type TestDatabase } from '../support/database';
-import { seedRange } from './corpus';
 import { RealServer } from './real-server';
 
 const describeWithDb = hasDatabase ? describe : describe.skip;
@@ -29,17 +28,13 @@ describeWithDb('the simulation finds the determinism defects when they are put b
     await database?.drop();
   });
 
-  it('fails a baseline seed when ticket.create makes up its own id (F-19)', async () => {
+  it('fails a baseline run when ticket.create makes up its own id (F-19)', async () => {
     MUTATORS['ticket.create'] = {
       reads: (args) => original.reads(args),
       apply: (tx, args) => original.apply(tx, { ...args, id: randomUUID() }),
     };
-    const failing = [];
-    for (const seed of seedRange(5)) {
-      const result = await runScenario({ seed, profile: PROFILES.baseline, server });
-      if (result.violations.length > 0) failing.push(seed);
-    }
-    expect(failing.length).toBeGreaterThan(0);
+    const report = await checkProfile({ profile: PROFILES.baseline, server, seed: 1, runs: 5, shrinkTimeMs: 0 });
+    expect(report.failure?.unexpected.length).toBeGreaterThan(0);
   }, 120_000);
 
   it('makes one seed give two different traces when ticket.create reads the wall clock (F-20)', async () => {
@@ -57,10 +52,11 @@ describeWithDb('the simulation finds the determinism defects when they are put b
           args,
         ),
     };
-    const first = await runScenario({ seed: 3, profile: PROFILES.baseline, server });
+    const run = () => checkProfile({ profile: PROFILES.baseline, server, seed: 3, runs: 1, shrinkTimeMs: 0 });
+    const first = await run();
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const second = await runScenario({ seed: 3, profile: PROFILES.baseline, server });
-    expect(first.violations).toEqual([]);
-    expect(second.traceHash).not.toBe(first.traceHash);
+    const second = await run();
+    expect(first.failure).toBeUndefined();
+    expect(second.results[0]?.traceHash).not.toBe(first.results[0]?.traceHash);
   }, 120_000);
 });

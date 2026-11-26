@@ -13,7 +13,7 @@ export const ACTION_KINDS = [
 ] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
-/** What the scheduler can do in one step of the fault phase. */
+/** What a command of the fault phase does (see `StepCommand`). */
 export const STEP_KINDS = ['act', 'sync', 'deliver', 'respond', 'redeliver', 'tick', 'link'] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
@@ -83,10 +83,11 @@ export interface Profile {
   sites: number;
   users: readonly UserSpec[];
   clients: readonly ClientSpec[];
-  /** Steps of the fault phase. */
-  steps: number;
+  /** Most commands fast-check generates for the fault phase of one run. */
+  maxCommands: number;
   /** Steps the system gets after the network heals to drain every queue; more is a livelock. */
   healSteps: number;
+  /** The weights below are fast-check `oneof` weights, so they are integers. */
   stepWeights: Readonly<Record<StepKind, number>>;
   actionWeights: Readonly<Record<ActionKind, number>>;
   requestFaults: Readonly<Record<RequestFault, number>>;
@@ -117,10 +118,10 @@ const NO_ACTIONS: Record<ActionKind, number> = {
 };
 
 /** Every network fault, each common enough to occur several times per seed. */
-const ALL_REQUEST_FAULTS = { none: 10, 'drop-request': 2, duplicate: 1.5, 'hold-copy': 1.5, hang: 0 } as const;
+const ALL_REQUEST_FAULTS = { none: 20, 'drop-request': 4, duplicate: 3, 'hold-copy': 3, hang: 0 } as const;
 const ALL_RESPONSE_FAULTS = { none: 10, 'drop-response': 2, 'bad-gateway': 1, truncate: 1 } as const;
 const ALL_LINK_STATES = { up: 3, down: 2, 'responses-lost': 1 } as const;
-const STEPS = { act: 6, sync: 1.5, deliver: 6, respond: 6, redeliver: 1, tick: 1.5, link: 0.6 } as const;
+const STEPS = { act: 60, sync: 15, deliver: 60, respond: 60, redeliver: 10, tick: 15, link: 8 } as const;
 
 /** Statistics every profile must keep up: each fault happens, clients contend for the same rows. */
 const NETWORK_MINIMUM = {
@@ -157,7 +158,7 @@ const baseline: Profile = {
     { user: 2, skewMs: -45_000 },
     { user: 0, skewMs: 3_000 },
   ],
-  steps: 90,
+  maxCommands: 180,
   healSteps: 400,
   stepWeights: STEPS,
   actionWeights: { ...NO_ACTIONS, 'create-ticket': 2, 'edit-ticket': 6, 'add-part': 2, 'increase-part': 2 },
@@ -176,13 +177,13 @@ const rejections: Profile = {
   name: 'rejections',
   description: 'one site, every network fault, every action including ones the server rejects',
   actionWeights: {
-    'create-ticket': 2,
-    'edit-ticket': 3,
-    'change-status': 4,
-    'delete-ticket': 1.5,
-    'add-part': 2,
-    'increase-part': 1,
-    'adjust-part': 3,
+    'create-ticket': 4,
+    'edit-ticket': 6,
+    'change-status': 8,
+    'delete-ticket': 3,
+    'add-part': 4,
+    'increase-part': 2,
+    'adjust-part': 6,
   },
   invalidText: true,
   allowed: ['rejected-mutation-500'],
@@ -219,7 +220,7 @@ const full: Profile = {
   description: 'two sites, every network fault including hung requests, every action',
   actionWeights: rejections.actionWeights,
   invalidText: true,
-  requestFaults: { ...ALL_REQUEST_FAULTS, hang: 0.3 },
+  requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
   allowed: ['rejected-mutation-500', 'foreign-site-rows', 'stuck-request'],
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
 };

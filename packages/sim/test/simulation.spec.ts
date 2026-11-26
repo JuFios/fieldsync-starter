@@ -1,78 +1,91 @@
-import {
-  formatFailure,
-  minimizeRun,
-  PROFILES,
-  runScenario,
-  type Profile,
-  type RunResult,
-  type Signature,
-} from '../src';
+import { checkProfile, formatFailure, PROFILES, type CheckReport, type RunResult, type Signature } from '../src';
 import { MemoryServer, type Defect } from './support/memory-server';
 
-const SEEDS = Array.from({ length: 15 }, (_, i) => i + 1);
+const SEED = 20301;
 
-async function runAll(profile: Profile, defects: Defect[] = [], seeds = SEEDS): Promise<RunResult[]> {
-  const server = new MemoryServer(new Set(defects));
-  const results: RunResult[] = [];
-  for (const seed of seeds) results.push(await runScenario({ seed, profile, server }));
-  return results;
+async function search(
+  name: keyof typeof PROFILES,
+  options: {
+    defects?: Defect[];
+    runs?: number;
+    seed?: number;
+    path?: string;
+    replayPath?: string;
+    shrinkTimeMs?: number;
+  } = {},
+): Promise<CheckReport> {
+  return checkProfile({
+    profile: PROFILES[name],
+    server: new MemoryServer(new Set(options.defects ?? [])),
+    seed: options.seed ?? SEED,
+    runs: options.runs ?? 15,
+    path: options.path,
+    replayPath: options.replayPath,
+    shrinkTimeMs: options.shrinkTimeMs ?? 0,
+  });
 }
 
-const signatures = (results: RunResult[]) => new Set(results.flatMap((r) => r.violations.map((v) => v.signature)));
+/** Signatures over every run of a search that does not stop: the profile allows them all. */
+async function signaturesIn(name: keyof typeof PROFILES, defects: Defect[] = []): Promise<Set<Signature>> {
+  const profile = { ...PROFILES[name], allowed: [...PROFILES.full.allowed, 'divergence', 'livelock', 'client-error'] };
+  const report = await checkProfile({
+    profile: profile as typeof PROFILES.full,
+    server: new MemoryServer(new Set(defects)),
+    seed: SEED,
+    runs: 15,
+    shrinkTimeMs: 0,
+  });
+  return new Set(report.results.flatMap((r) => r.violations.map((v) => v.signature)));
+}
+
+const hashes = (results: RunResult[]) => results.map((r) => r.traceHash);
 
 describe('simulation engine (against the in-memory reference server)', () => {
   describe('reproducibility', () => {
-    it('runs a seed twice to the same trace', async () => {
-      const server = new MemoryServer();
-      const first = await runScenario({ seed: 3, profile: PROFILES.full, server });
-      const second = await runScenario({ seed: 3, profile: PROFILES.full, server });
-      expect(second.trace).toEqual(first.trace);
-      expect(second.traceHash).toBe(first.traceHash);
+    it('runs a seed twice to the same traces', async () => {
+      const first = await search('full', { runs: 4 });
+      const second = await search('full', { runs: 4 });
+      expect(second.results.map((r) => r.trace)).toEqual(first.results.map((r) => r.trace));
     });
 
-    it('replays a recorded script to the same trace', async () => {
-      const server = new MemoryServer();
-      const recorded = await runScenario({ seed: 5, profile: PROFILES.rejections, server });
-      const replayed = await runScenario({ seed: 5, profile: PROFILES.rejections, server, script: recorded.script });
-      expect(replayed.traceHash).toBe(recorded.traceHash);
-      expect(replayed.script).toEqual(recorded.script);
+    it('replays the run at a path on its own, to the same trace', async () => {
+      const all = await search('rejections', { runs: 5 });
+      const replay = await search('rejections', { runs: 1, path: '3' });
+      expect(hashes(replay.results)).toEqual([all.results[3]?.traceHash]);
     });
 
-    it('gives different seeds different runs', async () => {
-      const hashes = new Set((await runAll(PROFILES.baseline, [], [1, 2, 3, 4, 5])).map((r) => r.traceHash));
-      expect(hashes.size).toBe(5);
+    it('gives other seeds and other runs different scenarios', async () => {
+      const one = await search('baseline', { runs: 5 });
+      const other = await search('baseline', { runs: 5, seed: SEED + 1 });
+      expect(new Set([...hashes(one.results), ...hashes(other.results)]).size).toBe(10);
     });
 
     it('records the trace in semantic terms only (no host time or randomness)', async () => {
-      const [result] = await runAll(PROFILES.baseline, [], [1]);
+      const [result] = (await search('baseline', { runs: 1 })).results;
       const text = result?.trace.join('\n') ?? '';
       expect(text).not.toMatch(/20(2[0-9]|1[0-9])-\d\d-\d\dT/); // no wall-clock timestamps (virtual time starts in 2030)
-      expect(text).toContain('seed 1 profile baseline');
+      expect(text).toContain('profile baseline');
     });
   });
 
   describe('a correct server', () => {
-    it.each(['baseline', 'rejections', 'multi-site'] as const)('converges on every seed of %s', async (name) => {
-      const results = await runAll(PROFILES[name]);
-      expect(results.filter((r) => r.violations.length > 0).map((r) => formatFailure(r))).toEqual([]);
-      expect(results.every((r) => r.quiescent)).toBe(true);
+    it.each(['baseline', 'rejections', 'multi-site'] as const)('converges on every run of %s', async (name) => {
+      const report = await search(name);
+      expect(report.failure ? formatFailure(report.failure) : '').toBe('');
+      expect(report.results).toHaveLength(15);
+      expect(report.results.every((r) => r.quiescent)).toBe(true);
     });
 
     it('only ever gets stuck on hung requests in the full profile', async () => {
-      const found = signatures(await runAll(PROFILES.full));
-      expect([...found]).toEqual(['stuck-request']);
+      expect([...(await signaturesIn('full'))]).toEqual(['stuck-request']);
     });
 
     it.each(Object.keys(PROFILES) as Array<keyof typeof PROFILES>)(
       'keeps the %s profile above its minimum statistics',
       async (name) => {
         const profile = PROFILES[name];
-        // Averages over a larger sample: per-seed values vary a lot (a seed may have no conflict at all).
-        const results = await runAll(
-          profile,
-          [],
-          Array.from({ length: 60 }, (_, i) => i + 1),
-        );
+        // Averages over a larger sample: per-run values vary a lot (a run may have no conflict at all).
+        const { results } = await search(name, { runs: 60 });
         const average = (key: string) => results.reduce((sum, r) => sum + (r.stats[key] ?? 0), 0) / results.length;
         const below = Object.entries(profile.minimumPerSeed)
           .filter(([key, min]) => average(key) < min)
@@ -93,25 +106,38 @@ describe('simulation engine (against the in-memory reference server)', () => {
     ];
 
     it.each(cases)('reports %s', async (_label, profile, defect, signature) => {
-      const found = signatures(await runAll(PROFILES[profile], defect ? [defect] : []));
-      expect(found).toContain(signature);
+      expect(await signaturesIn(profile, defect ? [defect] : [])).toContain(signature);
+    });
+
+    it('stops at the first run with a violation the profile does not allow', async () => {
+      const report = await search('baseline', { defects: ['drop-first-row'], runs: 50 });
+      expect(report.failure?.unexpected.map((v) => v.signature)).toContain('divergence');
+      expect(report.results).toHaveLength(Number(report.failure?.path) + 1);
     });
   });
 
-  describe('minimisation', () => {
-    it('shrinks a failing run to fewer steps that fail the same way', async () => {
-      const server = new MemoryServer(new Set<Defect>(['drop-first-row']));
-      const failing = await runScenario({ seed: 2, profile: PROFILES.baseline, server });
-      expect(failing.violations.map((v) => v.signature)).toContain('divergence');
+  describe('shrinking', () => {
+    it('shrinks a failure to fewer steps that still fail, and its seed and path replay it', async () => {
+      const report = await search('baseline', { defects: ['drop-first-row'], runs: 50, shrinkTimeMs: 20_000 });
+      const failure = report.failure;
+      if (!failure) throw new Error('the defect was not found');
+      expect(failure.unexpected.map((v) => v.signature)).toContain('divergence');
+      expect(failure.shrinks).toBeGreaterThan(0);
+      expect(failure.result.script.length).toBeLessThan(failure.foundSteps);
 
-      const minimized = await minimizeRun(failing, 'divergence', PROFILES.baseline, server, 200);
-      expect(minimized.result.violations.map((v) => v.signature)).toContain('divergence');
-      expect(minimized.result.script.length).toBeLessThan(failing.script.length / 4);
+      const replay = await search('baseline', {
+        defects: ['drop-first-row'],
+        seed: failure.seed,
+        path: failure.path,
+        replayPath: failure.replayPath,
+        runs: 1,
+      });
+      expect(replay.failure?.result.traceHash).toBe(failure.result.traceHash);
 
-      const report = formatFailure(failing, minimized);
-      expect(report).toContain('profile baseline, seed 2');
-      expect(report).toContain('npm run sim -- --profile baseline --seed 2');
-      expect(report).toContain(`Minimised to ${minimized.result.script.length} of ${failing.script.length} steps`);
-    });
+      const text = formatFailure(failure);
+      expect(text).toContain(`profile baseline, seed ${SEED}, path ${failure.path}`);
+      expect(text).toContain(`npm run sim -- --profile baseline --seed ${SEED} --path ${failure.path}`);
+      expect(text).toContain(`shrunk from ${failure.foundSteps} to ${failure.result.script.length} steps`);
+    }, 60_000);
   });
 });
