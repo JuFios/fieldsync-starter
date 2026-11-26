@@ -1256,34 +1256,35 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 
 ### Results
 
-A local search of 1000 runs per profile from seed 1 (`npm run sim -- --profile <name> --seed 1
---runs 1000`, one process per profile in parallel, about 6.5 minutes in all, fast-check
-4.11.0) found no violation other than the known defects each profile tolerates:
+After the protocol change, a local search of 1000 runs per profile from seed 20261126
+(`npm run sim -- --profile all --seed 20261126 --runs 1000`, about 15 minutes in all, fast-check
+4.11.0) found no violation other than the known defects each profile tolerates. No run shows a
+divergence, a lost edit, an unexpected rejection or `rejected-mutation-500`:
 
-| Profile | Runs without violations | Known-defect runs | First path (replay with `--seed 1 --path N`) | Time per run |
+| Profile | Runs without violations | Known-defect runs | First paths (replay with `--seed 20261126 --path N`) | Time per run |
 |---|---|---|---|---|
-| `baseline` | 1000 / 1000 | — | — | 196 ms |
-| `rejections` | 297 / 1000 | `rejected-mutation-500` (F-23): 703 | 0 | 379 ms |
-| `multi-site` | 81 / 1000 | `foreign-site-rows` (F-07): 919 | 0 | 193 ms |
-| `full` | 66 / 1000 | `rejected-mutation-500` (F-23): 644; `foreign-site-rows` (F-07): 584; `stuck-request` (F-13): 405 | F-23: 0, F-07: 0, F-13: 3 | 361 ms |
+| `baseline` | 1000 / 1000 | — | — | 253 ms |
+| `rejections` | 1000 / 1000 | — | — | 226 ms |
+| `multi-site` | 123 / 1000 | `foreign-site-rows` (F-07): 877 | 0, 1, 2 | 224 ms |
+| `full` | 100 / 1000 | `foreign-site-rows` (F-07): 777; `stuck-request` (F-13): 415 | F-07: 0, 1, 2; F-13: 0, 1, 3 | 204 ms |
 
-Per run on average: about 91 fault-phase steps, 4.8 dropped requests, 1.7 duplicates, 1.7 held
+Per run on average: about 90 fault-phase steps, 4.5 dropped requests, 1.7 duplicates, 1.7 held
 copies redelivered later, 2.9 dropped answers, 0.9 bad gateways, 0.9 truncated bodies, one link down
-and half a one-way partition; 2.5 writes per run (`baseline`) to a row another client wrote last; in
-the rejection profiles 86 to 93 mutations per run rejected by the server.
+and half a one-way partition; 2.6 writes per run (`baseline`) to a row another client wrote last; in
+the rejection profiles about 4 mutations per run rejected by the server, each with a code the
+profile's actions can cause.
 
-For example, the hung request of F-13 together with F-23 and F-07:
-
-```bash
-npm run sim -- --profile full --seed 1 --path 3 --trace
-```
+Before the protocol change, the same search from seed 1 found `rejected-mutation-500` (F-23) in 703
+of 1000 `rejections` runs and 644 of 1000 `full` runs (first path 0; for example
+`npm run sim -- --profile full --seed 1 --path 3 --trace` on the commit before `0abb406` shows the
+hung request of F-13 together with F-23 and F-07).
 
 ### Limitations
 
 - **No real concurrency.** Requests reach the server one at a time, so races between transactions
   (the change-log ordering of category 1, parallel duplicates of category 2) are out of the
-  simulation's reach. They need concurrent tests on Postgres: `client-ids.spec.ts` already races two
-  creates of one id; the change-log and duplicate races are tested with the protocol change.
+  simulation's reach. They are tested concurrently on Postgres: `client-ids.spec.ts`,
+  `commit-order.spec.ts`, `duplicates.spec.ts` and `lock-order.spec.ts`.
 - **One server instance**, and the notification stream is modelled as a `sync` step, not
   simulated.
 - **Not yet simulated:** page reloads and several tabs (the offline-client change), log compaction
