@@ -52,11 +52,35 @@ export const ALLOWED_TRANSITIONS: Record<TicketStatus, TicketStatus[]> = {
   cancelled: [],
 };
 
+/** An unpaired UTF-16 surrogate: valid in a JS string, refused by Postgres text and jsonb. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Rejects strings Postgres cannot store, so the client rejects them exactly like the server would:
+ * NUL is not allowed in text or jsonb, and neither is an unpaired surrogate.
+ */
+function storable(value: string, field: string): string {
+  if (value.includes('\u0000') || LONE_SURROGATE.test(value)) {
+    throw new MutationRejected('BAD_ARGS', `${field} contains characters that cannot be stored`);
+  }
+  return value;
+}
+
 function text(value: unknown, max: number, field: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max) {
     throw new MutationRejected('BAD_ARGS', `${field} must be a non-empty string up to ${max} chars`);
   }
-  return value;
+  return storable(value, field);
+}
+
+/** Optional text: anything but a string becomes empty; longer text is cut to `max` UTF-16 units. */
+function optionalText(value: unknown, max: number, field: string): string {
+  if (typeof value !== 'string') return '';
+  const kept = storable(value, field);
+  if (kept.length <= max) return kept;
+  // Never cut between the two halves of a surrogate pair: the half left over could not be stored.
+  const high = kept.charCodeAt(max - 1);
+  return kept.slice(0, high >= 0xd800 && high <= 0xdbff ? max - 1 : max);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -66,6 +90,11 @@ function uuid(value: unknown, field: string): string {
     throw new MutationRejected('BAD_ARGS', `${field} must be a UUID`);
   }
   return value;
+}
+
+/** Checks the id arguments a mutator relies on, as the server does before running it. */
+function uuids<A>(args: A, ...fields: Array<keyof A & string>): void {
+  for (const field of fields) uuid(args[field], field);
 }
 
 interface CreateArgs {
@@ -109,12 +138,13 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
     reads: () => [],
     apply(tx, a) {
       const id = uuid(a.id, 'id');
+      const siteId = uuid(a.siteId, 'siteId');
       const ts = tx.now();
       tx.insert('ticket', id, {
         id,
-        siteId: a.siteId,
+        siteId,
         title: text(a.title, 200, 'title'),
-        description: typeof a.description === 'string' ? a.description.slice(0, 5000) : '',
+        description: optionalText(a.description, 5000, 'description'),
         status: 'open',
         assigneeId: null,
         createdAt: ts,
@@ -126,12 +156,13 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.update': def<UpdateArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       const ticket = tx.get('ticket', a.id);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
       tx.put('ticket', a.id, {
         ...ticket,
         title: text(a.title, 200, 'title'),
-        description: typeof a.description === 'string' ? a.description.slice(0, 5000) : '',
+        description: optionalText(a.description, 5000, 'description'),
         updatedAt: tx.now(),
       });
     },
@@ -140,6 +171,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.setStatus': def<StatusArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       const ticket = tx.get('ticket', a.id);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
       if (ticket.status !== a.from) {
@@ -155,6 +187,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'ticket.delete': def<DeleteArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       if (!tx.get('ticket', a.id)) return;
       tx.del('ticket', a.id);
     },
@@ -166,6 +199,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
       { entity: 'part', id: a.id },
     ],
     apply(tx, a) {
+      uuids(a, 'id', 'ticketId', 'siteId');
       const ticket = tx.get('ticket', a.ticketId);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
       if (tx.get('part', a.id)) return;
@@ -185,6 +219,7 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   'part.adjust': def<PartAdjustArgs>({
     reads: (a) => [{ entity: 'part', id: a.id }],
     apply(tx, a) {
+      uuids(a, 'id', 'siteId');
       const part = tx.get('part', a.id);
       if (!part) throw new MutationRejected('NOT_FOUND', 'Part no longer exists');
       if (!Number.isInteger(a.delta) || Math.abs(a.delta) > 1000) {
