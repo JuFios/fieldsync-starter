@@ -49,9 +49,16 @@ export interface Rejection {
 }
 
 export type MutationResult =
-  | { id: number; status: 'applied' }
-  /** The server had this mutation id already, so it applied nothing now. */
-  | { id: number; status: 'duplicate' }
+  /**
+   * `version` is the change-log version of the mutation's last change: a client has the mutation's
+   * effect once its cursor reaches it. Absent when the mutation changed nothing.
+   */
+  | { id: number; status: 'applied'; version?: number }
+  /**
+   * The server had this mutation id already, so it applied nothing now; `version` as for `applied`
+   * (absent too when the original result has expired, see the change-log retention).
+   */
+  | { id: number; status: 'duplicate'; version?: number }
   | ({ id: number; status: 'rejected' } & Rejection);
 
 export type MutationStatus = MutationResult['status'];

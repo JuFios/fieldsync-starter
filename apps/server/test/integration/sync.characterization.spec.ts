@@ -98,7 +98,11 @@ describeWithDb('sync API (characterization)', () => {
 
       const pushed = await push(tech, clientId, [create(1, site, 'Broken pump')]);
       expect(pushed.status).toBe(201);
-      expect(pushed.body).toEqual({ results: [{ id: 1, status: 'applied' }], lastMutationId: 1 });
+      // The version of the mutation's last change was added to the result with the commit-ordered log.
+      expect(pushed.body).toEqual({
+        results: [{ id: 1, status: 'applied', version: expect.any(Number) }],
+        lastMutationId: 1,
+      });
 
       const pulled = await pull(tech, 0, { clientId });
       expect(pulled.status).toBe(200);
@@ -125,7 +129,10 @@ describeWithDb('sync API (characterization)', () => {
 
       const again = await push(tech, clientId, [create(1, site, 'Once')]);
       expect(again.status).toBe(201);
-      expect(again.body).toEqual({ results: [{ id: 1, status: 'duplicate' }], lastMutationId: 1 });
+      expect(again.body).toEqual({
+        results: [{ id: 1, status: 'duplicate', version: expect.any(Number) }],
+        lastMutationId: 1,
+      });
       expect(await logSize()).toBe(before);
     });
 
@@ -204,7 +211,7 @@ describeWithDb('sync API (characterization)', () => {
       const ticket = await createTicket(tech, clientId, 1, site, 'To delete');
 
       const res = await push(tech, clientId, [{ id: 2, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
-      expect(res.body.results).toEqual([{ id: 2, status: 'applied' }]);
+      expect(res.body.results).toEqual([{ id: 2, status: 'applied', version: expect.any(Number) }]);
 
       const del = (await initialPull(tech)).filter((c) => c.id === ticket).at(-1);
       expect(del).toMatchObject({ op: 'del', data: null, siteId: site, entity: 'ticket' });

@@ -75,7 +75,7 @@ function assertUuids(args: Record<string, unknown>): void {
   }
 }
 
-/** A change the mutation made, to be written to the change log by {@link appendToLog}. */
+/** A change the mutation made, to be written to the change log by {@link finishMutation}. */
 export interface LogEntry {
   siteId: string;
   entity: EntityName;
@@ -96,7 +96,7 @@ function byKey(a: { entity: string; id: string }, b: { entity: string; id: strin
  * The rows the mutator reads are locked first, in key order; the mutator runs on them; its writes
  * are then made to `entities`, also in key order (an insert locks the new key). The change log is
  * not touched here: the caller appends the returned entries as the last step of the transaction
- * ({@link appendToLog}), so the log's ordering lock is held only for the end of the transaction.
+ * ({@link finishMutation}), so the log's ordering lock is held only for the end of the transaction.
  */
 export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation, at: Date): Promise<LogEntry[]> {
   const def = mutatorNamed(m.name);
@@ -160,18 +160,33 @@ export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation,
   return entries;
 }
 
+/** How a mutation ended, as {@link finishMutation} records it. */
+export interface MutationRecord {
+  clientId: string;
+  mutationId: number;
+  status: 'applied' | 'rejected';
+  code: string | null;
+  message: string | null;
+  details: unknown;
+  /** The mutation's changes; empty for a rejection or a mutation that changed nothing. */
+  entries: readonly LogEntry[];
+  at: Date;
+}
+
 /**
- * Appends a mutation's changes to the change log, as the last statement of its transaction: takes
- * the next versions from `log_head` (locking its one row until the transaction ends), inserts the
- * log rows and stamps the changed entities with their versions, in one set-based statement.
- * Because every writer takes the head last and holds it until it commits, versions are assigned,
- * and become visible to readers, in commit order and without gaps. Does nothing without entries.
+ * Records how a mutation ended, as the last statement of its transaction, in one set-based
+ * statement: takes the next versions from `log_head` (locking its one row until the transaction
+ * ends; only when there are changes), appends the changes to the change log, stamps the changed
+ * entities with their versions, stores the result in `mutation_results` and advances the client's
+ * last mutation id. Because every writer takes the head last and holds it until it commits, versions
+ * are assigned, and become visible to readers, in commit order and without gaps. The client's and
+ * the entities' rows are locked before (see `PushService`), so the statement takes no other lock.
+ * Returns the version of the mutation's last change, or undefined if it changed nothing.
  */
-export async function appendToLog(c: Sql, entries: readonly LogEntry[], at: Date): Promise<void> {
-  if (entries.length === 0) return;
-  await c.query(
+export async function finishMutation(c: Sql, r: MutationRecord): Promise<number | undefined> {
+  const { rows } = await c.query<{ version: string | null }>(
     `WITH head AS (
-       UPDATE log_head SET version = version + $1 WHERE id = 1 RETURNING version
+       UPDATE log_head SET version = version + $1 WHERE id = 1 AND $1 > 0 RETURNING version
      ),
      logged AS (
        INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
@@ -179,18 +194,37 @@ export async function appendToLog(c: Sql, entries: readonly LogEntry[], at: Date
          FROM head, unnest($2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::jsonb[])
               WITH ORDINALITY AS e (site_id, entity, entity_id, op, data, ord)
        RETURNING version, entity, entity_id
+     ),
+     stamped AS (
+       UPDATE entities SET version = logged.version
+         FROM logged
+        WHERE entities.entity = logged.entity AND entities.id = logged.entity_id
+     ),
+     result AS (
+       INSERT INTO mutation_results (client_id, mutation_id, status, code, message, details, version, created_at)
+       VALUES ($8, $9, $10, $11, $12, $13, (SELECT version FROM head), $7)
+       RETURNING version
+     ),
+     client AS (
+       UPDATE clients SET last_mutation_id = $9 WHERE client_id = $8
      )
-     UPDATE entities SET version = logged.version
-       FROM logged
-      WHERE entities.entity = logged.entity AND entities.id = logged.entity_id`,
+     SELECT version FROM result`,
     [
-      entries.length,
-      entries.map((e) => e.siteId),
-      entries.map((e) => e.entity),
-      entries.map((e) => e.id),
-      entries.map((e) => e.op),
-      entries.map((e) => (e.data === null ? null : JSON.stringify(e.data))),
-      at,
+      r.entries.length,
+      r.entries.map((e) => e.siteId),
+      r.entries.map((e) => e.entity),
+      r.entries.map((e) => e.id),
+      r.entries.map((e) => e.op),
+      r.entries.map((e) => (e.data === null ? null : JSON.stringify(e.data))),
+      r.at,
+      r.clientId,
+      r.mutationId,
+      r.status,
+      r.code,
+      r.message,
+      r.details === undefined || r.details === null ? null : JSON.stringify(r.details),
     ],
   );
+  const version = rows[0]?.version;
+  return version === null || version === undefined ? undefined : Number(version);
 }

@@ -121,4 +121,32 @@ describeWithDb('change-log order under concurrent commits', () => {
     expect(all).toHaveLength(WRITERS * PER_WRITER);
     for (const seen of seenByReader) expect(seen).toEqual(all);
   }, 300_000);
+
+  it('answers an applied mutation, and every copy of it, with the version of its last change', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const clientId = randomUUID();
+    const ticket = randomUUID();
+    const mutations = [
+      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'T', description: '' } },
+      // Deleting a ticket that does not exist changes nothing: no version.
+      { id: 2, name: 'ticket.delete', args: { id: randomUUID(), siteId: site } },
+    ];
+    const first = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, tech.token);
+    const copy = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, tech.token);
+    const { rows } = await ctx.db.query<{ version: string }>(`SELECT version FROM change_log WHERE entity_id = $1`, [
+      ticket,
+    ]);
+    const version = Number(rows[0].version);
+    expect([first.body.results, copy.body.results]).toEqual([
+      [
+        { id: 1, status: 'applied', version },
+        { id: 2, status: 'applied' },
+      ],
+      [
+        { id: 1, status: 'duplicate', version },
+        { id: 2, status: 'duplicate' },
+      ],
+    ]);
+  });
 });

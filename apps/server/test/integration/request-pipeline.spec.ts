@@ -43,7 +43,7 @@ describeWithDb('request pipeline', () => {
       },
       tech.token,
     );
-    expect(res.body.results).toEqual([{ id: 1, status: 'applied' }]);
+    expect(res.body.results).toEqual([{ id: 1, status: 'applied', version: expect.any(Number) }]);
     const { rows } = await ctx.db.query<{ data: { title: string; description: string } }>(
       `SELECT data FROM entities WHERE entity = 'ticket' AND id = $1`,
       [id],
@@ -71,7 +71,7 @@ describeWithDb('request pipeline', () => {
       .send(body);
     expect({ status: res.status, results: (res.body as PushResponse).results }).toEqual({
       status: 201,
-      results: [{ id: 1, status: 'applied' }],
+      results: [{ id: 1, status: 'applied', version: expect.any(Number) }],
     });
     const { rows } = await ctx.db.query<{ data: { title: string } }>(
       `SELECT data FROM entities WHERE entity = 'ticket' AND id = $1`,

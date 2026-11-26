@@ -78,7 +78,7 @@ describeWithDb('request validation', () => {
         },
         user.token,
       );
-      expect(res.body.results).toEqual([{ id: 1, status: 'applied' }]);
+      expect(res.body.results).toEqual([{ id: 1, status: 'applied', version: expect.any(Number) }]);
       const { rows } = await ctx.db.query<{ data: { title: string; description: string } }>(
         `SELECT data FROM entities WHERE entity = 'ticket' AND id = $1`,
         [id],

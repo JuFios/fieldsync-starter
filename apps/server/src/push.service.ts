@@ -9,7 +9,7 @@ import {
 import type { AuthUser } from './auth';
 import { Clock } from './clock';
 import { Db, type TxSql } from './db';
-import { appendToLog, applyMutation, type LogEntry } from './server-tx';
+import { applyMutation, finishMutation, type LogEntry } from './server-tx';
 import { StreamService } from './stream.service';
 
 interface Outcome {
@@ -23,6 +23,7 @@ interface StoredResult {
   code: Rejection['code'] | null;
   message: string | null;
   details: Rejection['details'] | null;
+  version: string | null;
 }
 
 /** The result the client receives for a mutation the mutator refused. */
@@ -91,22 +92,19 @@ export class PushService {
       // The rejection is recorded like an application: the mutation is final and the next follows.
       result = rejected(m.id, err);
     }
-    await c.query(
-      `INSERT INTO mutation_results (client_id, mutation_id, status, code, message, details, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        clientId,
-        m.id,
-        result.status,
-        result.status === 'rejected' ? result.code : null,
-        result.status === 'rejected' ? result.message : null,
-        result.status === 'rejected' && result.details !== undefined ? JSON.stringify(result.details) : null,
-        at,
-      ],
-    );
-    await c.query(`UPDATE clients SET last_mutation_id = $2 WHERE client_id = $1`, [clientId, m.id]);
-    // Last: the change log's ordering lock is held from here to the commit only.
-    await appendToLog(c, entries, at);
+    // Last: one statement records the outcome and appends the changes; the change log's ordering
+    // lock is held from here to the commit only.
+    const version = await finishMutation(c, {
+      clientId,
+      mutationId: m.id,
+      status: result.status === 'rejected' ? 'rejected' : 'applied',
+      code: result.status === 'rejected' ? result.code : null,
+      message: result.status === 'rejected' ? result.message : null,
+      details: result.status === 'rejected' ? result.details : undefined,
+      entries,
+      at,
+    });
+    if (result.status === 'applied' && version !== undefined) result = { ...result, version };
     return { result, touched: [...new Set(entries.map((e) => e.siteId))] };
   }
 
@@ -131,13 +129,16 @@ export class PushService {
    */
   private async previousResult(c: TxSql, clientId: string, id: number): Promise<MutationResult> {
     const { rows } = await c.query<StoredResult>(
-      `SELECT status, code, message, details FROM mutation_results WHERE client_id = $1 AND mutation_id = $2`,
+      `SELECT status, code, message, details, version FROM mutation_results WHERE client_id = $1 AND mutation_id = $2`,
       [clientId, id],
     );
     const stored = rows[0];
     if (stored?.status === 'rejected' && stored.code !== null && stored.message !== null) {
       return rejected(id, { code: stored.code, message: stored.message, details: stored.details ?? undefined });
     }
-    return { id, status: 'duplicate' };
+    const version = stored?.version;
+    return version === null || version === undefined
+      ? { id, status: 'duplicate' }
+      : { id, status: 'duplicate', version: Number(version) };
   }
 }

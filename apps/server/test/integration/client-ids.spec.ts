@@ -33,7 +33,7 @@ describeWithDb('client-generated ids', () => {
     const id = randomUUID();
     const res = await push(tech, [create(id, site, 'Broken pump')]);
     expect(res.status).toBe(201);
-    expect(res.body.results).toEqual([{ id: 1, status: 'applied' }]);
+    expect(res.body.results).toEqual([{ id: 1, status: 'applied', version: expect.any(Number) }]);
     expect(await storedTicket(id)).toEqual([{ site_id: site, deleted: false, data: expect.objectContaining({ id }) }]);
   });
 
