@@ -1,24 +1,10 @@
 import { ConfigService } from '@nestjs/config';
 import { Expose, plainToInstance, Transform, type TransformFnParams } from 'class-transformer';
-import {
-  IsBoolean,
-  IsDefined,
-  IsInt,
-  IsString,
-  Matches,
-  Max,
-  Min,
-  validateSync,
-  type ValidationArguments,
-} from 'class-validator';
+import { IsBoolean, IsDefined, IsString, Matches, validateSync, type ValidationArguments } from 'class-validator';
+import { IntegerIn as IntegerBetween, trimmed } from './validation';
 
 /** Largest delay setInterval accepts; larger values silently become 1 ms. */
 const MAX_TIMER_MS = 2_147_483_647;
-
-/** Environment values arrive as strings, possibly padded with spaces. */
-function present(value: unknown): unknown {
-  return typeof value === 'string' ? value.trim() : value;
-}
 
 /** A blank value counts as unset, so the setting gets its default. */
 function isBlank(value: unknown): boolean {
@@ -30,33 +16,16 @@ function withValue(text: string): (args: ValidationArguments) => string {
   return (args) => `${args.property} ${text} (got "${String(args.value)}")`;
 }
 
-/**
- * Converts decimal integer strings only. Anything else ("1h", "1e4", "0x10", "2.5") is left as it
- * is and fails `@IsInt`, unlike `enableImplicitConversion`, which would turn "1e4" into 10000 and
- * "" into 0.
- */
-const ToInteger = () =>
-  Transform(({ value }: TransformFnParams) => {
-    const v = present(value);
-    return typeof v === 'string' && /^-?\d+$/.test(v) ? Number(v) : v;
-  });
-
 /** Accepts exactly "true" or "false". */
 const ToBoolean = () =>
   Transform(({ value }: TransformFnParams) => {
-    const v = present(value);
+    const v = trimmed(value);
     return v === 'true' ? true : v === 'false' ? false : v;
   });
 
-/** `@IsInt`, `@Min` and `@Max` with one message, so a bad value is reported once. */
+/** An integer setting; the message names the variable and its value (settings are never secrets here). */
 function IntegerIn(min: number, max: number): PropertyDecorator {
-  const message = withValue(`must be an integer from ${min} to ${max}`);
-  return (target, key) => {
-    ToInteger()(target, key);
-    IsInt({ message })(target, key);
-    Min(min, { message })(target, key);
-    Max(max, { message })(target, key);
-  };
+  return IntegerBetween(min, max, { message: withValue(`must be an integer from ${min} to ${max}`) });
 }
 
 /**
@@ -77,7 +46,7 @@ export class EnvironmentVariables {
    * here), and an unreachable database is reported when the server connects.
    */
   @Expose()
-  @Transform(({ value }: TransformFnParams) => present(value))
+  @Transform(({ value }: TransformFnParams) => trimmed(value))
   @IsDefined({ message: '$property is required (a postgres:// connection string)' })
   @IsString({ message: '$property must be a postgres:// or postgresql:// connection string (value not shown)' })
   @Matches(/^postgres(?:ql)?:\/\//i, {
