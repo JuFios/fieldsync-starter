@@ -59,6 +59,21 @@ function applyLocally(state: Map<string, Row>, m: Mutation, time: string): void 
   }
 }
 
+/**
+ * The arguments exactly as the server will receive them: a JSON round trip of `args`. Queueing the
+ * snapshot keeps later changes the caller makes to the object out of the queue, makes the client
+ * apply the same values as the server (JSON drops `undefined`, turns NaN into null, ...), and makes
+ * an unsendable value fail here once instead of in every push of the queue behind it.
+ */
+function wireArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const json = JSON.stringify(args) as string | undefined;
+  const snapshot: unknown = json === undefined ? undefined : JSON.parse(json);
+  if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new TypeError('Mutation arguments must serialise to a JSON object');
+  }
+  return snapshot as Record<string, unknown>;
+}
+
 export class SyncClient {
   readonly clientId: string;
   private readonly transport: Transport;
@@ -109,11 +124,15 @@ export class SyncClient {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Queues a mutation and applies it optimistically. Throws a TypeError, without queueing anything,
+   * when `args` cannot be sent as JSON (a BigInt, a cycle); see {@link wireArgs}.
+   */
   mutate(name: MutatorName, args: Record<string, unknown>): void {
     const mutation: Mutation = {
       id: this.lastMutationId + this.pending.length + 1,
       name,
-      args,
+      args: wireArgs(args),
     };
     this.pending.push({ mutation, queuedAt: new Date().toISOString() });
     this.emit();
