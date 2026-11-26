@@ -25,6 +25,7 @@ export const REJECTION_CODES = [
   'STATUS_CONFLICT',
   'INVALID_TRANSITION',
   'NEGATIVE_QUANTITY',
+  'FIELD_CONFLICT',
   'UNKNOWN_MUTATOR',
   'INTERNAL',
 ] as const;
@@ -38,7 +39,15 @@ export interface RejectionDetails {
   INVALID_TRANSITION: { from: TicketStatus; to: string; allowed: readonly TicketStatus[] };
   /** The adjustment would take the stored quantity below zero. */
   NEGATIVE_QUANTITY: { quantity: number; delta: number };
+  /**
+   * Fields the edit changes were changed by someone else since the user saw them: for each, the
+   * value it has now and the one the user typed, so the user can keep either.
+   */
+  FIELD_CONFLICT: { fields: ReadonlyArray<{ field: EditableTicketField; current: string; yours: string }> };
 }
+
+/** The ticket fields `ticket.update` edits. */
+export type EditableTicketField = 'title' | 'description';
 
 export interface Rejection {
   code: RejectionCode;

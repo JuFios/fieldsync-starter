@@ -4,6 +4,7 @@ import {
   MUTATORS,
   MutationRejected,
   mutatorNamed,
+  ticketEdit,
   type MutatorTx,
 } from '../src/mutators';
 import type { EntityName, Row, TicketStatus } from '../src/types';
@@ -226,4 +227,84 @@ describe('mutatorNamed', () => {
       expect(isMutatorName(name)).toBe(false);
     },
   );
+});
+
+describe('ticket.update merges edits of different fields', () => {
+  const stored: Row = { ...ticket('open'), title: 'Pump', description: 'Leaks' };
+  const update = (args: Record<string, unknown>) => {
+    const tx = new FakeTx([['ticket', TICKET, stored]]);
+    MUTATORS['ticket.update'].apply(tx, { id: TICKET, siteId: SITE, ...args });
+    return tx.get('ticket', TICKET);
+  };
+  const rejection = (args: Record<string, unknown>) => rejectionOf(() => update(args) as unknown as void);
+
+  it('changes only the title, keeping the description', () => {
+    expect(update({ title: 'Pump 2' })).toMatchObject({ title: 'Pump 2', description: 'Leaks', updatedAt: TX_TIME });
+  });
+
+  it('changes only the description, keeping the title', () => {
+    expect(update({ description: '' })).toMatchObject({ title: 'Pump', description: '' });
+  });
+
+  it('writes both fields of an edit without a base, as the original form did', () => {
+    expect(update({ title: 'A', description: 'B' })).toMatchObject({ title: 'A', description: 'B' });
+  });
+
+  it('applies an edit whose base is still the stored value', () => {
+    expect(update({ title: 'Pump 2', base: { title: 'Pump' } })).toMatchObject({ title: 'Pump 2' });
+  });
+
+  it('ignores the base of a field the edit does not change', () => {
+    expect(update({ title: 'Pump 2', base: { title: 'Pump', description: 'old' } })).toMatchObject({ title: 'Pump 2' });
+  });
+
+  it('rejects an edit of a field changed since, with the current and the typed value', () => {
+    const err = rejection({
+      title: 'Main pump',
+      description: 'Leaks badly',
+      base: { title: 'Old', description: 'Old' },
+    });
+    expect({ code: err.code, message: err.message, details: err.details }).toEqual({
+      code: 'FIELD_CONFLICT',
+      message: 'title and description were changed by someone else',
+      details: {
+        fields: [
+          { field: 'title', current: 'Pump', yours: 'Main pump' },
+          { field: 'description', current: 'Leaks', yours: 'Leaks badly' },
+        ],
+      },
+    });
+  });
+
+  it('does not conflict when the edit writes the value already stored', () => {
+    expect(update({ title: 'Pump', base: { title: 'Old' } })).toMatchObject({ title: 'Pump' });
+  });
+
+  it.each([
+    [{}, 'An edit must change the title or the description'],
+    [{ description: 5 }, 'description must be a string'],
+    [{ title: 'T', base: [] }, 'base must be an object'],
+    [{ title: 'T', base: { title: 1 } }, 'base.title must be a string'],
+  ])('rejects %j as BAD_ARGS', (args, message) => {
+    const err = rejection(args);
+    expect({ code: err.code, message: err.message }).toEqual({ code: 'BAD_ARGS', message });
+  });
+});
+
+describe('ticketEdit', () => {
+  const t = { id: TICKET, siteId: SITE };
+  const seen = { title: 'Pump', description: 'Leaks' };
+
+  it('sends only the changed fields, each with the value the user saw', () => {
+    expect(ticketEdit(t, seen, { title: 'Pump 2', description: 'Leaks' })).toEqual({
+      id: TICKET,
+      siteId: SITE,
+      title: 'Pump 2',
+      base: { title: 'Pump' },
+    });
+  });
+
+  it('is undefined when nothing changed', () => {
+    expect(ticketEdit(t, seen, seen)).toBeUndefined();
+  });
 });

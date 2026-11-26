@@ -54,7 +54,7 @@ export function actionParamsArb(invalid: boolean): fc.Arbitrary<ActionParams> {
       { weight: 7, arbitrary: fc.constant('') },
       { weight: 3, arbitrary: textArb('description', invalid) },
     ),
-    keepDescription: fc.boolean(),
+    editFields: fc.constantFrom('title' as const, 'description' as const, 'both' as const),
     offScript: often(1, 9),
     statusPick: fc.nat(),
     partName: textArb('name', invalid),

@@ -358,6 +358,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
 | F-25 | 1 | A change that commits after a later one is never delivered | Fixed |
 | F-26 | 2 | Parallel copies of one mutation are applied several times; a retried rejection loses its reason | Fixed |
+| F-27 | 9 | An edit of one ticket field overwrites another client's edit of the other field | Fixed |
 | F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
 | F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
@@ -785,6 +786,29 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   but outside the data and easy to forget in another code path. Serializable isolation: correct,
   but a conflict becomes a retry of the whole transaction, and retries are what caused the problem.
 - **Commits.** `e5831da` (test).
+
+### F-27: an edit of one ticket field overwrites another client's edit of the other field (category 9)
+
+- **What.** `ticket.update` always wrote both the title and the description, with the values the
+  user's form held. Two technicians who edit the same ticket offline, one the title and one the
+  description, sync in some order, and the second sync writes back the first one's field as it was
+  before. An edit of one field alone was refused (`title` was required) or emptied the description.
+- **Why it is dangerous.** A confirmed edit is lost silently, on every client and the server. The
+  simulation could not see it: every client loses the same edit, so they all still converge.
+- **Reproduce.** `merge.spec.ts`.
+- **Fix.** An edit names only the fields the user changed, with `base`: the value each had on the
+  user's screen (`ticketEdit()` in `sync-core` builds it; the ticket page and the simulation use it).
+  Edits of different fields merge. An edit of a field someone else changed since is rejected with
+  `FIELD_CONFLICT`, naming for each such field the value it has now and the one the user typed, so
+  the user can keep either (decision record [3.3.5](#merge-semantics-335)). An edit without `base`
+  writes its fields (the last write in server order wins), so mutations queued by the original
+  client still apply. The simulation's edits change one field or both, and the profiles allow
+  `FIELD_CONFLICT` as a legitimate rejection.
+- **Alternatives.** Last writer wins per field without a base: different fields merge, but of two
+  edits of the same field one disappears without anybody being told, which the task asks to avoid.
+  A version per ticket (optimistic locking of the row): edits of different fields would conflict
+  too. Merging text (operational transform, CRDT): out of scope (task, section 9).
+- **Commits.** `b9d7f5e` (test).
 
 ### F-28: a batch of long mutations is refused with 413 on every retry (category 3)
 

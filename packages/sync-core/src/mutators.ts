@@ -1,4 +1,12 @@
-import type { EntityName, MutatorName, RejectionCode, RejectionDetails, Row, TicketStatus } from './types';
+import type {
+  EditableTicketField,
+  EntityName,
+  MutatorName,
+  RejectionCode,
+  RejectionDetails,
+  Row,
+  TicketStatus,
+} from './types';
 
 /** A mutator refuses the mutation; the server records it, the client shows it. */
 export class MutationRejected extends Error {
@@ -114,12 +122,37 @@ interface CreateArgs {
   title: string;
   description: string;
 }
+/**
+ * An edit names only the fields the user changed. `base` holds, for each of them, the value the user
+ * saw when they started editing: when the stored value has changed since (someone else edited the
+ * same field), the edit is rejected with FIELD_CONFLICT instead of overwriting that change. Without
+ * a base for a field the edit simply writes it (the last write in server order wins).
+ */
 interface UpdateArgs {
   id: string;
   siteId: string;
-  title: string;
-  description: string;
+  title?: unknown;
+  description?: unknown;
+  base?: unknown;
 }
+const EDITABLE_FIELDS: readonly EditableTicketField[] = ['title', 'description'];
+
+/** The base values of an edit: a plain object of strings for the editable fields, or nothing. */
+function baseOf(value: unknown): Partial<Record<EditableTicketField, string>> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new MutationRejected('BAD_ARGS', 'base must be an object');
+  }
+  const base: Partial<Record<EditableTicketField, string>> = {};
+  for (const field of EDITABLE_FIELDS) {
+    if (!Object.hasOwn(value, field)) continue;
+    const seen: unknown = (value as Record<string, unknown>)[field];
+    if (typeof seen !== 'string') throw new MutationRejected('BAD_ARGS', `base.${field} must be a string`);
+    base[field] = seen;
+  }
+  return base;
+}
+
 interface StatusArgs {
   id: string;
   siteId: string;
@@ -169,12 +202,29 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
       uuids(a, 'id', 'siteId');
       const ticket = tx.get('ticket', a.id);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
-      tx.put('ticket', a.id, {
-        ...ticket,
-        title: text(a.title, 200, 'title'),
-        description: optionalText(a.description, 5000, 'description'),
-        updatedAt: tx.now(),
+      const changes: Partial<Record<EditableTicketField, string>> = {};
+      if (a.title !== undefined) changes.title = text(a.title, 200, 'title');
+      if (a.description !== undefined) {
+        if (typeof a.description !== 'string') throw new MutationRejected('BAD_ARGS', 'description must be a string');
+        changes.description = optionalText(a.description, 5000, 'description');
+      }
+      const fields = EDITABLE_FIELDS.filter((f) => changes[f] !== undefined);
+      if (fields.length === 0)
+        throw new MutationRejected('BAD_ARGS', 'An edit must change the title or the description');
+      const base = baseOf(a.base);
+      const conflicts = fields.flatMap((field) => {
+        const seen = base[field];
+        const current = String(ticket[field]);
+        const yours = changes[field] as string;
+        // Writing the value that is already stored conflicts with nobody.
+        return seen === undefined || seen === current || yours === current ? [] : [{ field, current, yours }];
       });
+      if (conflicts.length > 0) {
+        const names = conflicts.map((c) => c.field).join(' and ');
+        const verb = conflicts.length === 1 ? 'was' : 'were';
+        throw rejectWith('FIELD_CONFLICT', `${names} ${verb} changed by someone else`, { fields: conflicts });
+      }
+      tx.put('ticket', a.id, { ...ticket, ...changes, updatedAt: tx.now() });
     },
   }),
 
@@ -259,4 +309,24 @@ export function mutatorNamed(name: string): MutatorDef | undefined {
 
 export function isMutatorName(name: string): name is MutatorName {
   return Object.hasOwn(MUTATORS, name);
+}
+
+/**
+ * The arguments of `ticket.update` for what the user typed: only the fields that differ from what
+ * they saw (`seen`), each with that value as its base. Undefined when nothing changed.
+ */
+export function ticketEdit(
+  ticket: { id: string; siteId: string },
+  seen: Readonly<Record<EditableTicketField, string>>,
+  typed: Readonly<Record<EditableTicketField, string>>,
+): Record<string, unknown> | undefined {
+  const changed = EDITABLE_FIELDS.filter((f) => typed[f] !== seen[f]);
+  if (changed.length === 0) return undefined;
+  const args: Record<string, unknown> = { id: ticket.id, siteId: ticket.siteId };
+  const base: Record<string, string> = {};
+  for (const field of changed) {
+    args[field] = typed[field];
+    base[field] = seen[field];
+  }
+  return { ...args, base };
 }

@@ -110,6 +110,9 @@ export interface Profile {
   minimumPerSeed: Readonly<Record<string, number>>;
 }
 
+/** Concurrent edits of one field: the later one is rejected with the current value (3.3.5). */
+const SAME_FIELD_EDITS: readonly RejectionCode[] = ['FIELD_CONFLICT'];
+
 const NO_ACTIONS: Record<ActionKind, number> = {
   'create-ticket': 0,
   'edit-ticket': 0,
@@ -171,8 +174,9 @@ const baseline: Profile = {
   invalidText: false,
   maxTickMs: 8_000,
   allowed: [],
-  // Creates, edits and parts of existing tickets: the server must apply every one.
-  rejectionCodes: [],
+  // Creates, edits and parts of existing tickets: the server applies every one, except an edit of a
+  // field another client changed since the user saw it.
+  rejectionCodes: SAME_FIELD_EDITS,
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, 'action:edit-ticket': 6 },
 };
 
@@ -187,6 +191,7 @@ const REJECTABLE: readonly RejectionCode[] = [
   'NOT_FOUND',
   'NEGATIVE_QUANTITY',
   'BAD_ARGS',
+  'FIELD_CONFLICT',
 ];
 
 /**
@@ -234,7 +239,7 @@ const multiSite: Profile = {
     { user: 3, skewMs: 1_000 },
   ],
   allowed: ['foreign-site-rows'],
-  rejectionCodes: FOREIGN_TICKET_EDITS,
+  rejectionCodes: [...FOREIGN_TICKET_EDITS, ...SAME_FIELD_EDITS],
   // Users of different sites see fewer of each other's tickets, so fewer rows have several writers.
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, 'action:edit-ticket': 6 },
 };
