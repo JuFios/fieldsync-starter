@@ -141,11 +141,32 @@ function guard<T>(run: () => T): T {
   }
 }
 
-/** The violations a client's divergence from the server's rows shows. */
+/**
+ * The violations a client's divergence from the server's rows shows: `foreign-site-rows` for rows of
+ * sites its user cannot access, and separately `divergence` for anything else (rows of its own sites
+ * missing, different or kept after the server deleted them), so a tolerated leak of foreign rows
+ * never hides a lost or wrong row.
+ */
 export function convergenceViolations(client: string, divergence: Divergence): Violation[] {
-  return [
-    { signature: divergence.foreign.length > 0 ? 'foreign-site-rows' : 'divergence', client, detail: divergence },
-  ];
+  const violations: Violation[] = [];
+  const foreign = new Set(divergence.foreign);
+  if (foreign.size > 0) {
+    violations.push({
+      signature: 'foreign-site-rows',
+      client,
+      detail: { missing: [], unexpected: [...divergence.foreign], foreign: [...divergence.foreign], different: [] },
+    });
+  }
+  const own: Divergence = {
+    missing: divergence.missing,
+    unexpected: divergence.unexpected.filter((key) => !foreign.has(key)),
+    foreign: [],
+    different: divergence.different,
+  };
+  if (own.missing.length + own.unexpected.length + own.different.length > 0) {
+    violations.push({ signature: 'divergence', client, detail: own });
+  }
+  return violations;
 }
 
 /**
