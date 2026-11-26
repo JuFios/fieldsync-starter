@@ -96,6 +96,10 @@ export class RealServer implements SimServer {
     const holder: { server?: RealServer } = {};
     const sink = (error: ServerError) => holder.server?.errors.push(error);
     app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost).httpAdapter, sink));
+    // The binding's own client is the only one, and it keeps one connection alive between requests.
+    // Without this, Node closes that connection after keepAliveTimeout of idleness, and a request sent
+    // as it closes fails with ECONNRESET. 0 disables the timeout (Node's http.Server documentation).
+    (app.getHttpServer() as Server).keepAliveTimeout = 0;
     try {
       // Listening once keeps the server under our control: supertest binds a server that is not
       // listening to a new ephemeral port for every request and closes it afterwards.
