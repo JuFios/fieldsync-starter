@@ -174,7 +174,7 @@ describe('SyncClient', () => {
     jest.setSystemTime(new Date('2030-01-01T00:10:00.000Z'));
     const after = client.rows('ticket')[0];
     expect(after).toEqual(before);
-    expect(before.createdAt).toBe('2030-01-01T00:00:00.000Z');
+    expect(before?.createdAt).toBe('2030-01-01T00:00:00.000Z');
   });
 
   it('queues the arguments as they were when mutate was called', () => {
@@ -204,7 +204,7 @@ describe('SyncClient', () => {
     const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
     client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
     await client.sync();
-    expect(client.rows('ticket')[0].createdAt).toBe('2030-01-01T00:00:00.000Z');
+    expect(client.rows('ticket')[0]?.createdAt).toBe('2030-01-01T00:00:00.000Z');
     expect(transport.pushedIds).toHaveLength(1);
     expect(clock.pendingTimers).toBe(1);
 

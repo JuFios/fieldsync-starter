@@ -85,7 +85,8 @@ export function knownDefectTitle(defect: KnownDefect, name: string): string {
 /** Parses a title produced by {@link knownDefectTitle}; returns undefined for ordinary tests. */
 export function parseKnownDefectTitle(title: string): { id: string; owner: string } | undefined {
   const match = TITLE.exec(title);
-  return match ? { id: match[1], owner: match[2] } : undefined;
+  const [, id, owner] = match ?? [];
+  return id !== undefined && owner !== undefined ? { id, owner } : undefined;
 }
 
 /**

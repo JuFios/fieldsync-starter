@@ -129,10 +129,10 @@ export class SyncClient {
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
   private rejected: RejectedMutation[] = [];
-  private lastError?: SyncError;
+  private lastError: SyncError | undefined;
   private changeCount = 0;
   private retryTimer?: TimerHandle;
-  private inFlight?: Promise<void>;
+  private inFlight: Promise<void> | undefined;
   private disposed = false;
 
   constructor(opts: SyncClientOptions) {
@@ -284,7 +284,12 @@ export class SyncClient {
       const queued = this.pending.find((q) => q.mutation.id === r.id);
       if (!queued) continue;
       if (r.status === 'rejected') {
-        this.rejected.push({ mutation: queued.mutation, code: r.code, message: r.message, details: r.details });
+        this.rejected.push({
+          mutation: queued.mutation,
+          code: r.code,
+          message: r.message,
+          ...(r.details === undefined ? {} : { details: r.details }),
+        });
         done.add(r.id);
       } else if (r.version === undefined || r.version <= this.cursor) {
         // Nothing to wait for: the mutation changed nothing, or the client has its change already.
