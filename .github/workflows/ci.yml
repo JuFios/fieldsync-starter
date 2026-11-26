@@ -146,9 +146,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build images, check them and start the stack
         run: scripts/docker-smoke.sh
-      # Report only: known vulnerabilities of the kept runtime versions must not turn CI red. The
-      # report is in the job summary.
+      # Report only: known vulnerabilities of the kept runtime versions must not turn CI red, and
+      # neither may the scanner itself (a vulnerability database download that fails or is rate
+      # limited). A failed scan shows as a warning on the step; the report is in the job summary.
       - name: Vulnerability report (Trivy)
+        continue-on-error: true
         run: |
           {
             echo '## Image vulnerabilities (HIGH, CRITICAL)'
