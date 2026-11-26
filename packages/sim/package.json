@@ -1,0 +1,42 @@
+{
+  "name": "@fieldsync/sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic multi-client network simulation of the sync protocol: seeded randomness, virtual time, a fault-injecting network, a sequential scheduler, an oracle and a minimiser.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@fieldsync/sync-core": "*"
+  },
+  "devDependencies": {
+    "@fieldsync/test-kit": "*"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": ".",
+    "testRegex": "test/.*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
+    "moduleNameMapper": {
+      "^@fieldsync/(sync-core|test-kit)$": "<rootDir>/../$1/src"
+    },
+    "reporters": [
+      "default",
+      [
+        "@fieldsync/test-kit/dist/reporter",
+        {
+          "label": "sim"
+        }
+      ]
+    ]
+  }
+}
