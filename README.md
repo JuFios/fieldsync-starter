@@ -751,9 +751,14 @@ random) on an emptied database. Then:
 ### Properties
 
 - **Liveness.** After the network heals, every client's queue drains within the heal budget. A
-  client still busy at the end is a livelock.
+  client still busy at the end is a livelock (or the signature of the known defect that stuck it).
 - **Convergence.** Then every client holds exactly the server's live rows of the sites its user can
-  access, with the same contents (key order ignored). The server's rows are read straight from the
+  access, with the same contents (key order ignored). When some clients never drained, the others
+  are still checked: they sync once more with only their own requests delivered, so the server's
+  rows do not change, and are compared like after a full heal. A client stuck on a tolerated known
+  defect therefore never hides a lost row elsewhere. Rows of sites the user cannot access are
+  reported as `foreign-site-rows`, and anything else (a missing, different or stale row of the
+  user's own sites) separately as `divergence`, so a tolerated leak never hides a wrong row either. The server's rows are read straight from the
   `entities` table and the accessible sites come from the run's fixtures: neither goes through the
   server's pull path or access checks, so the system is never its own oracle.
 - **Determinism.** A seed run twice gives the same traces, byte for byte (compared by SHA-256), and
@@ -836,7 +841,7 @@ The integration job runs `npm run test:sim` (`corpus.ts`): from seed 1, the firs
 `baseline` and the first 20 of each other profile (the runs fast-check generates first, so no
 scenario is chosen for being convenient), the check that one seed gives the same traces twice on the
 real server, the binding's own tests and the detection checks below. The first unexpected failure
-of a profile is shrunk for up to 60 s. Budget: 60 s on the CI runner (about 32 s locally); the step
+of a profile is shrunk for up to 60 s. Budget: 60 s on the CI runner (about 25 s locally); the step
 has a 5-minute timeout as a safety net only, since a timing assertion would be flaky on shared
 runners. Changing a seed, a run count or the budget needs a reason here.
 
@@ -862,27 +867,26 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 ### Results
 
 A local search of 1000 runs per profile from seed 1 (`npm run sim -- --profile <name> --seed 1
---runs 1000 --shrink-ms 0`, one process per profile in parallel, about 6 minutes in all, fast-check
+--runs 1000`, one process per profile in parallel, about 6.5 minutes in all, fast-check
 4.11.0) found no violation other than the known defects each profile tolerates:
 
 | Profile | Runs without violations | Known-defect runs | First path (replay with `--seed 1 --path N`) | Time per run |
 |---|---|---|---|---|
-| `baseline` | 1000 / 1000 | — | — | 164 ms |
-| `rejections` | 297 / 1000 | `rejected-mutation-500` (F-23): 703 | 0 | 338 ms |
-| `multi-site` | 81 / 1000 | `foreign-site-rows` (F-07): 919 | 0 | 165 ms |
-| `full` | 66 / 1000 | `rejected-mutation-500` (F-23): 644; `stuck-request` (F-13): 405; `foreign-site-rows` (F-07): 166 | F-23: 0, F-13: 3, F-07: 4 | 320 ms |
+| `baseline` | 1000 / 1000 | — | — | 196 ms |
+| `rejections` | 297 / 1000 | `rejected-mutation-500` (F-23): 703 | 0 | 379 ms |
+| `multi-site` | 81 / 1000 | `foreign-site-rows` (F-07): 919 | 0 | 193 ms |
+| `full` | 66 / 1000 | `rejected-mutation-500` (F-23): 644; `foreign-site-rows` (F-07): 584; `stuck-request` (F-13): 405 | F-23: 0, F-07: 0, F-13: 3 | 361 ms |
 
 Per run on average: about 91 fault-phase steps, 4.8 dropped requests, 1.7 duplicates, 1.7 held
 copies redelivered later, 2.9 dropped answers, 0.9 bad gateways, 0.9 truncated bodies, one link down
 and half a one-way partition; 2.5 writes per run (`baseline`) to a row another client wrote last; in
 the rejection profiles 86 to 93 mutations per run rejected by the server.
 
-For example, the hung request of F-13 together with F-23:
+For example, the hung request of F-13 together with F-23 and F-07:
 
 ```bash
 npm run sim -- --profile full --seed 1 --path 3 --trace
 ```
-
 
 ### Limitations
 
