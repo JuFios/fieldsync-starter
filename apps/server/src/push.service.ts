@@ -86,8 +86,14 @@ export class PushService {
    * Locks are always taken in this order: client row, entity rows by key, `log_head` last.
    */
   private async applyOne(c: TxSql, user: AuthUser, clientId: string, m: ReceivedMutation): Promise<Outcome> {
-    const last = await this.lockClient(c, clientId, user.id);
-    if (m.id <= last) return { result: await this.previousResult(c, clientId, m.id), touched: [] };
+    const { last, ownerId } = await this.lockClient(c, clientId, user.id);
+    if (m.id <= last) {
+      // Only the client's owner learns how its mutations ended (their rejections carry stored data).
+      // That another user can push under this client id at all is a known defect (F-33).
+      const result: MutationResult =
+        ownerId === user.id ? await this.previousResult(c, clientId, m.id) : { id: m.id, status: 'duplicate' };
+      return { result, touched: [] };
+    }
     if (m.id !== last + 1) {
       // A gap: the mutations between were never received. The client cannot fill it (it would have
       // to renumber mutations a delayed copy of an older request may still carry), so it is told.
@@ -137,18 +143,18 @@ export class PushService {
     return { result, touched: [...new Set(entries.map((e) => e.siteId))] };
   }
 
-  /** Locks the client's row, creating it on its first push, and returns its last applied id. */
-  private async lockClient(c: TxSql, clientId: string, userId: string): Promise<number> {
+  /** Locks the client's row, creating it on its first push; returns its last applied id and its owner. */
+  private async lockClient(c: TxSql, clientId: string, userId: string): Promise<{ last: number; ownerId: string }> {
     await c.query(
       `INSERT INTO clients (client_id, user_id, last_mutation_id) VALUES ($1, $2, 0)
        ON CONFLICT (client_id) DO NOTHING`,
       [clientId, userId],
     );
-    const { rows } = await c.query<{ last_mutation_id: string }>(
-      `SELECT last_mutation_id FROM clients WHERE client_id = $1 FOR UPDATE`,
+    const { rows } = await c.query<{ last_mutation_id: string; user_id: string }>(
+      `SELECT last_mutation_id, user_id FROM clients WHERE client_id = $1 FOR UPDATE`,
       [clientId],
     );
-    return Number(rows[0].last_mutation_id);
+    return { last: Number(rows[0].last_mutation_id), ownerId: rows[0].user_id };
   }
 
   /**

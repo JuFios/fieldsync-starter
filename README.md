@@ -375,7 +375,8 @@ measures it with 200 clients.
 UPDATE`, after an `INSERT … ON CONFLICT DO NOTHING` for a new client), so parallel copies of one
 mutation queue up and the second sees the first one's result. `mutation_results` keeps the outcome
 of every mutation: a copy of an applied one is answered `duplicate` with the version of its change,
-a copy of a rejected one with the same rejection. Results are deleted with the change log they
+a copy of a rejected one with the same rejection; only the client's owner gets these outcomes
+(F-33). Results are deleted with the change log they
 refer to (the same retention), after which such a client needs a reset anyway. Client ids are
 UUIDs. Push stays `READ COMMITTED`: under `REPEATABLE READ` two copies of a new client's first
 mutation fail with 40001 on the `ON CONFLICT` insert.
@@ -492,6 +493,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
 | F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
 | F-32 | 2 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
+| F-33 | 4 | A client id is not bound to its user: another user can push under it and take the owner's next mutation id | Open (known defect) |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -1053,6 +1055,26 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   ids: the server could no longer tell a gap from a duplicate (see F-09).
 - **Commits.** `479a024` (test), `5a998ac` (fix).
 
+### F-33: a client id is not bound to its user (category 4)
+
+Found after the access-control area was assigned (decision Д-15): the fix belongs to the
+access-control change; this change adds the known-defect test.
+
+- **What.** The server takes any client id with any token. The `clients` row records the user who
+  pushed first, but nothing checks it. Another user who knows a client id can push mutations under
+  it; the owner's next mutation with the same id is then answered `duplicate` and dropped by the
+  owner's client. Pull also returns the last mutation id of any client id.
+- **Why it is dangerous.** A user can make another user's changes disappear without anyone being
+  told. Client ids are random UUIDs, so this needs one to leak (for example from a log of pull URLs).
+- **Reproduce.** `client-ownership.spec.ts`, "does not let another user's push take the next
+  mutation id of the owner's client" (known defect, owner `access-control`).
+- **What this change does.** Copies of a handled mutation are answered with their stored outcome
+  (rejection details include stored field values) only for the client's owner; anyone else gets a
+  bare `duplicate` (`client-ownership.spec.ts`, "never tells another user the outcome of the owner's
+  mutations").
+- **Planned fix.** Answer 403 for a client id that belongs to another user, in push and pull. The
+  web app then needs one client id per user in a browser (it shares one for every user today).
+
 ## Changes to starter tests
 
 | Starter test | Change | Reason |
@@ -1354,7 +1376,7 @@ work.
   there.
 - E2e runs on one Postgres share the database name `fieldsync_e2e` unless `E2E_DATABASE` is set;
   two simultaneous runs against the same server would collide.
-- Five defects are reproduced but not fixed yet (F-07, F-08, F-10, F-11, F-13); each is a
+- Six defects are reproduced but not fixed yet (F-07, F-08, F-10, F-11, F-13, F-33); each is a
   known-defect test with an owner and is listed by every test run.
 - Writes are serialized on the change log's head for the last statement of each mutation, which
   bounds write throughput per database (see [3.3.1](#protocol-correctness-331)).

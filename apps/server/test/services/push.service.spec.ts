@@ -31,6 +31,8 @@ class FakeTables {
     number,
     { status: string; code: string | null; message: string | null; details: unknown; version: string | null }
   >();
+  /** The user the client row belongs to (set by its first push). */
+  owner: string | undefined;
   /** The change log's head; each change takes the next version. */
   head = 0;
   /** Statements in order, without their parameters, to check the locking order. */
@@ -41,10 +43,11 @@ class FakeTables {
     this.statements.push(kind);
     if (sql.includes('INSERT INTO clients')) {
       this.last ??= 0;
+      this.owner ??= params[1] as string;
       return result([], 1);
     }
     if (sql.includes('FROM clients') && sql.includes('FOR UPDATE')) {
-      return result([{ last_mutation_id: String(this.last ?? 0) }]);
+      return result([{ last_mutation_id: String(this.last ?? 0), user_id: this.owner }]);
     }
     if (sql.includes('FROM clients')) {
       return result(this.last === undefined ? [] : [{ last_mutation_id: String(this.last) }]);
@@ -137,7 +140,7 @@ describe('PushService', () => {
       await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
       expect(tables.statements).toEqual([
         'INSERT INTO clients',
-        'SELECT last_mutation_id FROM',
+        'SELECT last_mutation_id, user_id',
         'mutator',
         'finish mutation',
         'SELECT last_mutation_id FROM',
