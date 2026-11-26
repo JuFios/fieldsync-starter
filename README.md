@@ -83,6 +83,7 @@ With `API_DOCS_ENABLED=true` the server describes its API at <http://localhost:3
 | `npm run test:unit` | Unit tests of test-kit, sync-core, the simulation engine and the server (every service method, with its collaborators replaced in the Nest testing module) | |
 | `npm run test:integration` | Server tests on a real Postgres | `DATABASE_URL` |
 | `npm run test:sim` | The simulation corpus against the real server on Postgres (see [Simulation](#simulation)) | `DATABASE_URL` |
+| `npm run test:bench` | Push throughput through the change log's head (16 clients, 2000 mutations; `BENCH_CLIENTS`, `BENCH_MUTATIONS`): checks each mutation is applied once and prints mutations/s and latency percentiles; not part of `npm test` | `DATABASE_URL` |
 | `npm run sim -- --help` | Local simulation search over any number of scenarios, with shrinking (see [Simulation](#simulation)) | `DATABASE_URL` |
 | `npm test` | Unit, integration and simulation tests; database suites are skipped (with a notice) without `DATABASE_URL` | |
 | `npm run test:e2e` | Playwright, Chromium, against the production builds | `npm run build`, `DATABASE_URL`, `npx playwright install chromium` once |

@@ -75,6 +75,12 @@ jobs:
       - name: Simulation corpus
         run: npm run test:sim
         timeout-minutes: 5
+      # Write throughput through the change log's head: checks that every mutation is applied once
+      # with its own version and prints the numbers; it asserts no timing, which would be flaky on
+      # shared runners (measured numbers: decision record 3.3.1 in the README).
+      - name: Push throughput benchmark
+        run: npm run test:bench
+        timeout-minutes: 5
 
   # The simulation command is a developer tool run on every platform; without Postgres it can still
   # be checked for its help, version, option errors and exit codes (scripts/sim-cli-smoke.sh).
