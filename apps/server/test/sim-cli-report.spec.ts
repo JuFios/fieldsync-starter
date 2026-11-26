@@ -51,6 +51,12 @@ describe('npm run sim report', () => {
       expect(text).toContain('livelock (UNEXPECTED): 12 runs, paths 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, +2');
     });
 
+    it('names the replayed path, not its index in the replay, when one run was replayed with --path', () => {
+      const report: CheckReport = { seed: 1, results: [run([rejected], {})] };
+      const text = formatProfileSummary({ profile: 'full', ms: 500, report }, ['rejected-mutation-500'], '3');
+      expect(text).toContain('rejected-mutation-500 (known defect): 1 run, paths 3');
+    });
+
     it('reports a profile that ran no scenario without dividing by zero', () => {
       const text = formatProfileSummary({ profile: 'baseline', ms: 0, report: { seed: 1, results: [] } }, []);
       expect(text).toBe('  baseline: seed 1, 0 runs in 0.0 s (0 ms/run), 0 without violations\n    per run: ');
