@@ -1,4 +1,11 @@
-import { ALLOWED_TRANSITIONS, MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
+import {
+  ALLOWED_TRANSITIONS,
+  isMutatorName,
+  MUTATORS,
+  MutationRejected,
+  mutatorNamed,
+  type MutatorTx,
+} from '../src/mutators';
 import type { EntityName, Row, TicketStatus } from '../src/types';
 
 /** The time a FakeTx reports; mutators must take every timestamp from it. */
@@ -204,4 +211,19 @@ describe('part mutators', () => {
     MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: 3 });
     expect(tx.get('part', PART)?.quantity).toBe(4);
   });
+});
+
+describe('mutatorNamed', () => {
+  it.each(Object.keys(MUTATORS))('finds %s', (name) => {
+    expect(mutatorNamed(name)).toBe(MUTATORS[name as keyof typeof MUTATORS]);
+    expect(isMutatorName(name)).toBe(true);
+  });
+
+  it.each(['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf', '', 'ticket.Create'])(
+    'finds nothing for %j, inherited names included',
+    (name) => {
+      expect(mutatorNamed(name)).toBeUndefined();
+      expect(isMutatorName(name)).toBe(false);
+    },
+  );
 });

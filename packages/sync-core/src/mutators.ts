@@ -248,3 +248,15 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
     },
   }),
 };
+
+/**
+ * The mutator a name refers to, or undefined. Only the table's own entries count: a plain lookup
+ * would also find what every object inherits (`toString`, `constructor`, `__proto__`, ...).
+ */
+export function mutatorNamed(name: string): MutatorDef | undefined {
+  return isMutatorName(name) ? MUTATORS[name] : undefined;
+}
+
+export function isMutatorName(name: string): name is MutatorName {
+  return Object.hasOwn(MUTATORS, name);
+}

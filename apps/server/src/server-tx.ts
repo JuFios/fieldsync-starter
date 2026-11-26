@@ -1,9 +1,9 @@
 import {
-  MUTATORS,
   MutationRejected,
+  mutatorNamed,
   type EntityName,
-  type Mutation,
   type MutatorTx,
+  type ReceivedMutation,
   type Row,
 } from '@fieldsync/sync-core';
 import { authorize } from './access';
@@ -79,9 +79,9 @@ function assertUuids(args: Record<string, unknown>): void {
  * Applies one mutation inside the caller's transaction; returns the site ids it touched. `at` is the
  * server time of the mutation: the mutator's `tx.now()` and the `created_at` of its log entries.
  */
-export async function applyMutation(c: Sql, user: AuthUser, m: Mutation, at: Date): Promise<string[]> {
-  const def = MUTATORS[m.name];
-  if (!def) throw new MutationRejected('UNKNOWN_MUTATOR', `Unknown mutator ${String(m.name)}`);
+export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation, at: Date): Promise<string[]> {
+  const def = mutatorNamed(m.name);
+  if (!def) throw new MutationRejected('UNKNOWN_MUTATOR', 'Unknown mutator');
   assertUuids(m.args);
   await authorize(c, user, m);
 

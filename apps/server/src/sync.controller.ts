@@ -9,7 +9,6 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import type { PushRequest } from '@fieldsync/sync-core';
 import type { Response } from 'express';
 import { accessibleSites } from './access';
 import type { AuthedRequest } from './auth';
@@ -49,8 +48,7 @@ export class SyncController {
   @ApiBadRequestResponse({ description: 'Malformed request, or a mutation id out of order.' })
   @ApiInternalServerErrorResponse({ description: 'The batch failed while a mutation was applied.' })
   push(@Req() req: AuthedRequest, @Body() body: PushRequestDto) {
-    // The mutator name is not checked here: the push looks it up and rejects an unknown one.
-    return this.pushService.push(req.user, body as PushRequest);
+    return this.pushService.push(req.user, body);
   }
 
   @Get('sync/pull')

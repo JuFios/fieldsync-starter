@@ -71,6 +71,13 @@ export interface PushRequest {
   mutations: Mutation[];
 }
 
+/** A mutation as the server receives it: any name may arrive, unknown ones are rejected. */
+export interface ReceivedMutation {
+  id: number;
+  name: string;
+  args: Record<string, unknown>;
+}
+
 export interface PushResponse {
   results: MutationResult[];
   lastMutationId: number;

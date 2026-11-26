@@ -343,7 +343,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-09 | 2 | Client reuses a mutation id after a rejection | Open (known defect) |
 | F-10 | 8 | Pending mutations are lost on reload | Open (known defect) |
 | F-11 | 8 | Two tabs sharing a `clientId` lose each other's mutations | Open (known defect) |
-| F-12 | 3 | Mutator names from `Object.prototype` crash the push | Open (known defect) |
+| F-12 | 3 | Mutator names from `Object.prototype` crash the push | Fixed |
 | F-13 | 6 | A request that never answers blocks syncing forever | Open (known defect) |
 | F-14 | other | A failed rollback replaces the original error | Fixed |
 | F-15 | other | A dropped database connection crashes the server | Fixed |
@@ -495,8 +495,15 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 - **Why it is dangerous.** The whole push answers 500, so the client retries the same batch
   forever; even with rejections handled, such a mutation would be reported as an internal error
   rather than `UNKNOWN_MUTATOR`.
-- **Reproduce.** `mutator-lookup.spec.ts` (known defect).
-- **Fix.** Not fixed yet; owned by the protocol change. **Commits.** `791bd98` (test).
+- **Reproduce.** `mutator-lookup.spec.ts`.
+- **Fix.** `mutatorNamed(name)` in `sync-core` counts only the table's own entries
+  (`Object.hasOwn`), with `isMutatorName` as a type guard; the server rejects any other name with
+  `UNKNOWN_MUTATOR`. The push body's DTO accepts any name up to 64 characters, so an unknown name
+  rejects its own mutation, not the batch.
+- **Alternatives.** A `Map` of mutators: the same safety, but the table is also the typed
+  `Record<MutatorName, MutatorDef>` the client uses. `Object.create(null)` for the table: hides the
+  problem in one object instead of fixing the lookup.
+- **Commits.** `791bd98` (test).
 
 ### F-13: a request that never answers blocks syncing forever (category 6)
 

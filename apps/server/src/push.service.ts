@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { MutationRejected, type MutationResult, type PushRequest, type PushResponse } from '@fieldsync/sync-core';
+import { MutationRejected, type MutationResult, type PushResponse, type ReceivedMutation } from '@fieldsync/sync-core';
 import type { AuthUser } from './auth';
 import { Clock } from './clock';
 import { Db } from './db';
@@ -25,7 +25,7 @@ export class PushService {
     private readonly clock: Clock,
   ) {}
 
-  async push(user: AuthUser, req: PushRequest): Promise<PushResponse> {
+  async push(user: AuthUser, req: { clientId: string; mutations: ReceivedMutation[] }): Promise<PushResponse> {
     const results: MutationResult[] = [];
     for (const m of req.mutations) {
       const last = await this.lastMutationId(req.clientId);
