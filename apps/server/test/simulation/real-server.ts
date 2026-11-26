@@ -3,7 +3,7 @@ import { BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow } from '@fieldsync/sim';
 import type { EntityName, Row } from '@fieldsync/sync-core';
-import type { Server } from 'node:http';
+import { Agent, type Server } from 'node:http';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { configureApp } from '../../src/app.factory';
@@ -71,6 +71,13 @@ export class RealServer implements SimServer {
     private readonly db: Pool,
   ) {}
 
+  /**
+   * One kept-alive connection for every request. superagent's default (`agent: false`) opens a
+   * connection per request, and each closed one waits in TIME_WAIT (30 s on macOS): a long search
+   * would run out of ephemeral ports. Requests are sequential, so one socket is enough.
+   */
+  private readonly agent = new Agent({ keepAlive: true, maxSockets: 1 });
+
   static async start(databaseUrl: string): Promise<RealServer> {
     const config = loadConfig({
       DATABASE_URL: databaseUrl,
@@ -90,7 +97,9 @@ export class RealServer implements SimServer {
     const sink = (error: ServerError) => holder.server?.errors.push(error);
     app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost).httpAdapter, sink));
     try {
-      await app.init();
+      // Listening once keeps the server under our control: supertest binds a server that is not
+      // listening to a new ephemeral port for every request and closes it afterwards.
+      await app.listen(0, '127.0.0.1');
     } catch (err) {
       await app.close();
       throw err;
@@ -124,8 +133,9 @@ export class RealServer implements SimServer {
 
   async send(simRequest: SimRequest): Promise<SimResponse> {
     this.errors = [];
-    const agent = request(this.httpServer);
-    const res = await agent[methodOf(simRequest.method)](simRequest.path)
+    const client = request(this.httpServer);
+    const res = await client[methodOf(simRequest.method)](simRequest.path)
+      .agent(this.agent)
       .set(simRequest.headers)
       // Every status is an answer for the simulation, not an error of the request.
       .ok(() => true)
@@ -144,6 +154,7 @@ export class RealServer implements SimServer {
   }
 
   async close(): Promise<void> {
+    this.agent.destroy();
     await this.db.end();
     await this.app.close();
   }
