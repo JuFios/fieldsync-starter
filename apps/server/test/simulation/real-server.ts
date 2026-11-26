@@ -64,7 +64,8 @@ export class RealServer implements SimServer {
 
   private constructor(
     private readonly app: INestApplication,
-    private readonly http: Server,
+    /** The application's HTTP server, for tests of the binding itself. */
+    readonly httpServer: Server,
     private readonly clock: SimulatedClock,
     /** Direct connection for fixtures and the oracle, independent of the server's data layer. */
     private readonly db: Pool,
@@ -123,7 +124,7 @@ export class RealServer implements SimServer {
 
   async send(simRequest: SimRequest): Promise<SimResponse> {
     this.errors = [];
-    const agent = request(this.http);
+    const agent = request(this.httpServer);
     const res = await agent[methodOf(simRequest.method)](simRequest.path)
       .set(simRequest.headers)
       // Every status is an answer for the simulation, not an error of the request.
