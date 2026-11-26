@@ -127,6 +127,19 @@ describe('ticket mutators', () => {
 });
 
 describe('part mutators', () => {
+  it('rejects a part whose id is already taken instead of reporting it as added', () => {
+    const existing = { id: PART, ticketId: TICKET, siteId: SITE, name: 'Seal', quantity: 1 };
+    const tx = new FakeTx([
+      ['ticket', TICKET, ticket('open')],
+      ['part', PART, existing],
+    ]);
+    const err = rejectionOf(() =>
+      MUTATORS['part.add'].apply(tx, { id: PART, ticketId: TICKET, siteId: SITE, name: 'Valve', quantity: 5 }),
+    );
+    expect(err.code).toBe('ID_CONFLICT');
+    expect(tx.get('part', PART)).toEqual(existing);
+  });
+
   it('does not let a quantity go below zero', () => {
     const tx = new FakeTx([['part', PART, { id: PART, quantity: 1 }]]);
     const err = rejectionOf(() => MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: -2 }));

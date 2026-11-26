@@ -99,6 +99,25 @@ describeWithDb('client-generated ids', () => {
     }
   });
 
+  it('does not report a part as added when its id already names another part', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const ticket = randomUUID();
+    const part = randomUUID();
+    const setup = await push(tech, [
+      create(ticket, site, 'Pump'),
+      { id: 2, name: 'part.add', args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 1 } },
+    ]);
+    precondition(setup.status === 201, `setup push answered ${setup.status}`);
+
+    const res = await push(tech, [
+      { id: 1, name: 'part.add', args: { id: part, ticketId: ticket, siteId: site, name: 'Valve', quantity: 5 } },
+    ]);
+    expect(res.status === 201 && res.body.results[0]?.status === 'applied').toBe(false);
+    const { rows } = await ctx.db.query(`SELECT data FROM entities WHERE entity = 'part' AND id = $1`, [part]);
+    expect(rows).toEqual([{ data: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 1 } }]);
+  });
+
   it('rejects a create whose id is taken with ID_CONFLICT', async () => {
     const { north, id, techNorth } = await southTicketAndNorthTech();
     const user = { id: techNorth.id, role: techNorth.role };
