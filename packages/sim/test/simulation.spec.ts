@@ -127,6 +127,31 @@ describe('simulation engine (against the in-memory reference server)', () => {
       expect(both.length).toBeGreaterThan(0);
     });
 
+    it('names every client in a violation when no client can converge, even with a heal budget of one step', async () => {
+      // Every client misses the first row; a client that did not finish catching up within the
+      // budget must be reported as not drained, never silently left out of the verdict.
+      const profile = {
+        ...PROFILES.rejections,
+        healSteps: 1,
+        allowed: ['rejected-mutation-500', 'divergence', 'livelock', 'stuck-request'] as Signature[],
+      };
+      const report = await checkProfile({
+        profile,
+        server: new MemoryServer(new Set<Defect>(['rejection-500', 'drop-first-row'])),
+        seed: SEED,
+        runs: 15,
+        shrinkTimeMs: 0,
+      });
+      const clients = profile.clients.map((_, i) => `c${i}`);
+      const unnamed = report.results.flatMap((r, path) => {
+        const named = new Set(
+          r.violations.flatMap((v) => ('clients' in v ? v.clients : 'client' in v ? [v.client] : [])),
+        );
+        return clients.filter((c) => !named.has(c)).map((c) => `path ${path}: ${c}`);
+      });
+      expect(unnamed).toEqual([]);
+    });
+
     it('stops at the first run with a violation the profile does not allow', async () => {
       const report = await search('baseline', { defects: ['drop-first-row'], runs: 50 });
       expect(report.failure?.unexpected.map((v) => v.signature)).toContain('divergence');
