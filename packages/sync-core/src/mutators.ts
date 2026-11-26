@@ -120,11 +120,15 @@ function optionalText(value: unknown, max: number, field: string): string {
   return cut.isWellFormed() ? cut : kept.slice(0, max - 1);
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/**
+ * A UUID in lower case, the form Postgres prints and crypto.randomUUID() makes. Only one spelling
+ * is accepted because ids are also compared as text (a part's ticketId, the client's row keys).
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function uuid(value: unknown, field: string): string {
   if (typeof value !== 'string' || !UUID.test(value)) {
-    throw new MutationRejected('BAD_ARGS', `${field} must be a UUID`);
+    throw new MutationRejected('BAD_ARGS', `${field} must be a UUID in lower case`);
   }
   return value;
 }

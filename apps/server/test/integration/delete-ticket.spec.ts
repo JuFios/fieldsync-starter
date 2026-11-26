@@ -94,4 +94,31 @@ describeWithDb('deleting a ticket', () => {
       client.release();
     }
   });
+
+  it('never stores a part under another spelling of its ticket id, so the delete finds every part', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const ticket = randomUUID();
+    const part = randomUUID();
+    const clientId = randomUUID();
+    const mutations: Mutation[] = [
+      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'Pump', description: '' } },
+      {
+        id: 2,
+        name: 'part.add',
+        args: { id: part, ticketId: ticket.toUpperCase(), siteId: site, name: 'Seal', quantity: 1 },
+      },
+      { id: 3, name: 'ticket.delete', args: { id: ticket, siteId: site } },
+    ];
+    const res = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, tech.token);
+    expect(res.body.results.map((r) => (r.status === 'rejected' ? r.code : r.status))).toEqual([
+      'applied',
+      'BAD_ARGS',
+      'applied',
+    ]);
+    const { rows } = await ctx.db.query(`SELECT 1 FROM entities WHERE entity = 'part' AND NOT deleted AND id = $1`, [
+      part,
+    ]);
+    expect(rows).toEqual([]);
+  });
 });

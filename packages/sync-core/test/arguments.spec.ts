@@ -74,6 +74,15 @@ describe('mutator arguments the server cannot store', () => {
     expect(outcomes).toEqual(idFields.map((field) => [field, 'BAD_ARGS']));
   });
 
+  // Ids are compared as text in places (a part's ticketId, the client's row keys), so one id must
+  // have one spelling: the lower-case form Postgres and crypto.randomUUID() produce.
+  it.each(NAMES)('%s rejects ids in upper case', (name) => {
+    const idFields = ['id', 'siteId', 'ticketId'].filter((field) => field in VALID[name]);
+    const upper = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+    const outcomes = idFields.map((field) => [field, outcome(name, { ...VALID[name], [field]: upper })]);
+    expect(outcomes).toEqual(idFields.map((field) => [field, 'BAD_ARGS']));
+  });
+
   const unstorable: Array<[string, string]> = [
     ['a NUL character', 'pump\u0000room'],
     ['an unpaired high surrogate', 'pump \ud83d'],

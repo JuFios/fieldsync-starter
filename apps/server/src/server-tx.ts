@@ -10,7 +10,11 @@ import { authorize } from './access';
 import type { AuthUser } from './auth';
 import type { Sql } from './db';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/**
+ * A UUID in lower case, the form Postgres prints and crypto.randomUUID() makes. Only one spelling
+ * is accepted because ids are also compared as text (a part's ticketId, the client's row keys).
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 interface Loaded {
   row: Row | undefined;
@@ -78,7 +82,7 @@ function assertUuids(args: Record<string, unknown>): void {
   for (const field of ['id', 'ticketId', 'siteId']) {
     const value = args[field];
     if (value !== undefined && (typeof value !== 'string' || !UUID.test(value))) {
-      throw new MutationRejected('BAD_ARGS', `${field} must be a UUID`);
+      throw new MutationRejected('BAD_ARGS', `${field} must be a UUID in lower case`);
     }
   }
 }

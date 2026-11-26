@@ -1027,7 +1027,10 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   a later adjustment of such a part is rejected with `NOT_FOUND`. A migration deletes the orphans an
   existing database already has and publishes their deletion through the log head, so clients drop
   them too. The client and the reference server of the simulation find a ticket's parts in their
-  state.
+  state. Parts are found by comparing the ticket id as text, so ids are accepted only in lower case
+  (the form Postgres prints and `crypto.randomUUID()` makes); the same migration first stores the
+  ticket id of existing parts in lower case and publishes that, since the original server kept it as
+  the client sent it.
 - **Alternatives.** A foreign key with `ON DELETE CASCADE`: rows are never deleted (tombstones keep
   ids taken), and a cascade would not write the change log. Hiding parts of deleted tickets in the
   UI only: the data stays and keeps diverging from what the user expects.

@@ -405,6 +405,30 @@ describeWithDb('database migrations', () => {
       });
     });
 
+    it('keep a part whose ticket id is in upper case, store it in lower case and publish it', async () => {
+      const db = await starterDatabase();
+      const site = '00000000-0000-4000-8000-0000000000a1';
+      const ticket = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const part = '55555555-5555-4555-8555-555555555555';
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO entities VALUES
+            ('ticket', '${ticket}', '${site}', '{"title":"kept"}', false, 1),
+            ('part', '${part}', '${site}', '{"ticketId":"${ticket.toUpperCase()}","name":"Seal"}', false, 2);
+          SELECT setval('change_log_version_seq', 2);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      expect({
+        parts: await ds.query(`SELECT id, deleted, data, version FROM entities WHERE entity = 'part'`),
+        log: await ds.query(`SELECT version, entity_id, op, data FROM change_log ORDER BY version`),
+      }).toEqual({
+        parts: [{ id: part, deleted: false, data: { ticketId: ticket, name: 'Seal' }, version: '3' }],
+        log: [{ version: '3', entity_id: part, op: 'put', data: { ticketId: ticket, name: 'Seal' } }],
+      });
+    });
+
     it('store client ids as uuid and drop clients whose id is not one', async () => {
       const db = await starterDatabase();
       await sql(db, (c) =>
