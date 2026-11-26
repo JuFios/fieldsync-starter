@@ -1,4 +1,4 @@
-import fc from 'fast-check';
+import { fc, test } from '@fast-check/jest';
 import { MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
 import type { EntityName, MutatorName, Row, TicketStatus } from '../src/types';
 
@@ -8,8 +8,8 @@ import type { EntityName, MutatorName, Row, TicketStatus } from '../src/types';
  * outcome, either the same writes or a rejection with the same code, so they may not read
  * randomness or a clock themselves: ids come from the arguments and time from the transaction.
  *
- * Property-based (fast-check): arguments and prior state are generated, including invalid and
- * hostile values. A failure prints the seed and path that replay it.
+ * Property-based (fast-check through @fast-check/jest): arguments and prior state are generated,
+ * including invalid and hostile values. A failure prints the seed and path that replay it.
  */
 
 const SITES = ['33333333-3333-4333-8333-333333333333', '66666666-6666-4666-8666-666666666666'];
@@ -207,54 +207,44 @@ const mutationArb = fc.record({ name: fc.constantFrom(...NAMES), args: argsArb, 
 const RUNS = { numRuns: 2_000 };
 
 describe('mutator determinism (property-based)', () => {
-  it('only ever applies or rejects a mutation: no other exception, for any arguments', () => {
-    fc.assert(
-      fc.property(mutationArb, ({ name, args, state }) => {
-        expect(() => outcome(name, args, state)).not.toThrow();
-      }),
-      RUNS,
-    );
-  });
+  test.prop([mutationArb], RUNS)(
+    'only ever applies or rejects a mutation: no other exception, for any arguments',
+    ({ name, args, state }) => {
+      expect(() => outcome(name, args, state)).not.toThrow();
+    },
+  );
 
-  it('reads no ambient randomness or clock, for any arguments and state', () => {
-    fc.assert(
-      fc.property(mutationArb, ({ name, args, state }) => {
-        const expected = outcome(name, args, state);
-        expect(withAmbient('forbidden', () => outcome(name, args, state))).toEqual(expected);
-      }),
-      RUNS,
-    );
-  });
+  test.prop([mutationArb], RUNS)(
+    'reads no ambient randomness or clock, for any arguments and state',
+    ({ name, args, state }) => {
+      const expected = outcome(name, args, state);
+      expect(withAmbient('forbidden', () => outcome(name, args, state))).toEqual(expected);
+    },
+  );
 
-  it('gives the same outcome in two environments with different random sources and wall clocks', () => {
-    fc.assert(
-      fc.property(mutationArb, ({ name, args, state }) => {
-        const client = outcome(name, structuredClone(args), state);
-        const server = withAmbient('other-values', () =>
-          outcome(name, JSON.parse(JSON.stringify(args)) as Record<string, unknown>, state),
-        );
-        expect(server).toEqual(client);
-      }),
-      RUNS,
-    );
-  });
+  test.prop([mutationArb], RUNS)(
+    'gives the same outcome in two environments with different random sources and wall clocks',
+    ({ name, args, state }) => {
+      const client = outcome(name, structuredClone(args), state);
+      const server = withAmbient('other-values', () =>
+        outcome(name, JSON.parse(JSON.stringify(args)) as Record<string, unknown>, state),
+      );
+      expect(server).toEqual(client);
+    },
+  );
 
-  it('gives the same outcome every time the same mutation is applied to the same state', () => {
-    fc.assert(
-      fc.property(mutationArb, ({ name, args, state }) => {
-        expect(outcome(name, args, state)).toEqual(outcome(name, args, state));
-      }),
-      RUNS,
-    );
-  });
+  test.prop([mutationArb], RUNS)(
+    'gives the same outcome every time the same mutation is applied to the same state',
+    ({ name, args, state }) => {
+      expect(outcome(name, args, state)).toEqual(outcome(name, args, state));
+    },
+  );
 
-  it('generates both outcomes for every mutator, so the properties are not vacuous', () => {
-    const seen = new Set<string>();
-    fc.assert(
-      fc.property(mutationArb, ({ name, args, state }) => {
-        seen.add(`${name}:${'writes' in outcome(name, args, state) ? 'applied' : 'rejected'}`);
-      }),
-      { numRuns: 5_000, seed: 42 },
+  test('generates both outcomes for every mutator, so the properties are not vacuous', () => {
+    const seen = new Set(
+      fc
+        .sample(mutationArb, { numRuns: 5_000, seed: 42 })
+        .map(({ name, args, state }) => `${name}:${'writes' in outcome(name, args, state) ? 'applied' : 'rejected'}`),
     );
     expect([...seen].sort()).toEqual(NAMES.flatMap((n) => [`${n}:applied`, `${n}:rejected`]).sort());
   });
