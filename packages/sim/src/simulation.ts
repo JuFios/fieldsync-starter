@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { HttpTransport, MemoryStorage, SyncClient, type Row } from '@fieldsync/sync-core';
-import { VirtualClock } from './clock';
+import { SimClock } from './clock';
 import type { LinkState, NetworkEvent, RequestFault, ResponseFault } from './network';
 import { SimNetwork } from './network';
 import { canonicalJson, compareWithServer, type Divergence } from './oracle';
@@ -135,7 +135,7 @@ export async function runScenario(options: RunOptions): Promise<RunResult> {
   const { seed, profile, server } = options;
   const root = new Random(seed);
   const fixtures: Fixtures = buildFixtures(profile, root.fork('fixtures'));
-  const clock = new VirtualClock(START);
+  const clock = new SimClock(START);
   const trace: string[] = [`seed ${seed} profile ${profile.name}`];
   const stats = new Counters();
   const violations: Violation[] = [];
@@ -358,9 +358,11 @@ export async function runScenario(options: RunOptions): Promise<RunResult> {
         continue;
       }
       if (busy().length > 0) {
-        const due = clock.nextDue();
-        if (due === undefined) break; // nothing in transit and nothing scheduled: the busy clients are stuck
-        await execute('heal', { kind: 'tick', ms: due - clock.now() });
+        // Nothing in transit: let the next retry timer fire. With no timer set the busy clients are stuck.
+        const moved = await clock.advanceToNext(settle);
+        if (moved === undefined) break;
+        trace.push(`heal next timer +${moved}ms`);
+        stats.add('timersFired');
         continue;
       }
       if (!finalRound) {

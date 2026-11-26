@@ -10,7 +10,8 @@
     "test": "jest"
   },
   "dependencies": {
-    "@fieldsync/sync-core": "*"
+    "@fieldsync/sync-core": "*",
+    "@sinonjs/fake-timers": "^15.5.0"
   },
   "devDependencies": {
     "@fieldsync/test-kit": "*"
