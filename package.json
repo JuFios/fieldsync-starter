@@ -22,6 +22,7 @@
     "test:unit": "npm run build:core && npm run build:test-kit && npm test -w @fieldsync/test-kit && npm test -w @fieldsync/sync-core && npm test -w @fieldsync/sim && npm run test:unit -w @fieldsync/server",
     "test:integration": "npm run build:test-kit && npm run test:integration -w @fieldsync/server",
     "test:sim": "npm run build:test-kit && npm run test:sim -w @fieldsync/server",
+    "test:bench": "npm run build:test-kit && npm run test:bench -w @fieldsync/server",
     "sim": "npm run build:core && npm run build:sim && npm run sim -w @fieldsync/server --",
     "test:e2e": "npm test -w @fieldsync/e2e",
     "build:sim": "npm run build -w @fieldsync/sim"
