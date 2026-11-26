@@ -405,27 +405,37 @@ describeWithDb('database migrations', () => {
       });
     });
 
-    it('keep a part whose ticket id is in upper case, store it in lower case and publish it', async () => {
+    it('store the ids inside tickets and parts in lower case, keep their parts and publish them', async () => {
       const db = await starterDatabase();
       const site = '00000000-0000-4000-8000-0000000000a1';
       const ticket = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-      const part = '55555555-5555-4555-8555-555555555555';
+      const part = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const up = (id: string) => id.toUpperCase();
       await sql(db, (c) =>
         c.query(`
           INSERT INTO entities VALUES
-            ('ticket', '${ticket}', '${site}', '{"title":"kept"}', false, 1),
-            ('part', '${part}', '${site}', '{"ticketId":"${ticket.toUpperCase()}","name":"Seal"}', false, 2);
+            ('ticket', '${ticket}', '${site}', '{"id":"${up(ticket)}","siteId":"${up(site)}","title":"kept"}', false, 1),
+            ('part', '${part}', '${site}',
+             '{"id":"${up(part)}","ticketId":"${up(ticket)}","siteId":"${site}","name":"Seal"}', false, 2);
           SELECT setval('change_log_version_seq', 2);
         `),
       );
       const ds = await dataSource(db, MIGRATIONS);
       await runMigrations(ds);
+      const ticketData = { id: ticket, siteId: site, title: 'kept' };
+      const partData = { id: part, ticketId: ticket, siteId: site, name: 'Seal' };
       expect({
-        parts: await ds.query(`SELECT id, deleted, data, version FROM entities WHERE entity = 'part'`),
-        log: await ds.query(`SELECT version, entity_id, op, data FROM change_log ORDER BY version`),
+        rows: await ds.query(`SELECT entity, deleted, data, version FROM entities ORDER BY entity`),
+        log: await ds.query(`SELECT version, entity, op, data FROM change_log ORDER BY version`),
       }).toEqual({
-        parts: [{ id: part, deleted: false, data: { ticketId: ticket, name: 'Seal' }, version: '3' }],
-        log: [{ version: '3', entity_id: part, op: 'put', data: { ticketId: ticket, name: 'Seal' } }],
+        rows: [
+          { entity: 'part', deleted: false, data: partData, version: '3' },
+          { entity: 'ticket', deleted: false, data: ticketData, version: '4' },
+        ],
+        log: [
+          { version: '3', entity: 'part', op: 'put', data: partData },
+          { version: '4', entity: 'ticket', op: 'put', data: ticketData },
+        ],
       });
     });
 

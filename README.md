@@ -1032,8 +1032,8 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   them too. The client and the reference server of the simulation find a ticket's parts in their
   state. Parts are found by comparing the ticket id as text, so ids are accepted only in lower case
   (the form Postgres prints and `crypto.randomUUID()` makes); the same migration first stores the
-  ticket id of existing parts in lower case and publishes that, since the original server kept it as
-  the client sent it.
+  ids inside existing tickets and parts (`id`, `siteId`, `ticketId`) in lower case and publishes
+  that, since the original server kept them as the client sent them.
 - **Alternatives.** A foreign key with `ON DELETE CASCADE`: rows are never deleted (tombstones keep
   ids taken), and a cascade would not write the change log. Hiding parts of deleted tickets in the
   UI only: the data stays and keeps diverging from what the user expects.

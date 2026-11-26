@@ -5,10 +5,11 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  * deleted or missing. Like any deletion, each is published in the change log, with versions from
  * the log head, so clients that hold the part drop it on their next pull.
  *
- * First, the ticket id inside a part is stored in lower case, as ids are everywhere else: the
- * original server took it as the client sent it, and the cascade finds a ticket's parts by
- * comparing that text, so a part with an upper-case ticket id would outlive its ticket (and be
- * taken for an orphan here). The change is published like any other, so clients get it too.
+ * First, the ids inside tickets and parts (`id`, `siteId`, `ticketId`) are stored in lower case,
+ * as ids are everywhere else: the original server kept them as the client sent them, the cascade
+ * finds a ticket's parts by comparing the ticket id as text (a part with an upper-case one would
+ * outlive its ticket, and be taken for an orphan here), and mutations made from such a row would
+ * now be rejected. The changes are published like any other, so clients get them too.
  */
 export class DeleteOrphanParts1795910400000 implements MigrationInterface {
   name = 'DeleteOrphanParts1795910400000';
@@ -16,10 +17,15 @@ export class DeleteOrphanParts1795910400000 implements MigrationInterface {
   async up(q: QueryRunner): Promise<void> {
     await q.query(`
       WITH mixed AS (
-        SELECT id, site_id, jsonb_set(data, '{ticketId}', to_jsonb(lower(data->>'ticketId'))) AS data,
-               row_number() OVER (ORDER BY id) AS n
+        SELECT entity, id, site_id,
+               data || jsonb_strip_nulls(jsonb_build_object(
+                 'id', lower(data->>'id'), 'siteId', lower(data->>'siteId'), 'ticketId', lower(data->>'ticketId')
+               )) AS data,
+               row_number() OVER (ORDER BY entity, id) AS n
           FROM entities
-         WHERE entity = 'part' AND NOT deleted AND data->>'ticketId' <> lower(data->>'ticketId')
+         WHERE entity IN ('ticket', 'part') AND NOT deleted
+           AND (data->>'id' <> lower(data->>'id') OR data->>'siteId' <> lower(data->>'siteId')
+                OR data->>'ticketId' <> lower(data->>'ticketId'))
       ),
       head AS (
         UPDATE log_head SET version = version + (SELECT count(*) FROM mixed)
@@ -28,13 +34,13 @@ export class DeleteOrphanParts1795910400000 implements MigrationInterface {
       ),
       logged AS (
         INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
-        SELECT head.version - (SELECT count(*) FROM mixed) + m.n, m.site_id, 'part', m.id, 'put', m.data, now()
+        SELECT head.version - (SELECT count(*) FROM mixed) + m.n, m.site_id, m.entity, m.id, 'put', m.data, now()
           FROM mixed m, head
-        RETURNING entity_id, version, data
+        RETURNING entity, entity_id, version, data
       )
       UPDATE entities e SET data = logged.data, version = logged.version
         FROM logged
-       WHERE e.entity = 'part' AND e.id = logged.entity_id
+       WHERE e.entity = logged.entity AND e.id = logged.entity_id
     `);
     await q.query(`
       WITH orphans AS (
