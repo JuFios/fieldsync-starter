@@ -194,19 +194,15 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
   }),
 
   'part.add': def<PartAddArgs>({
-    reads: (a) => [
-      { entity: 'ticket', id: a.ticketId },
-      { entity: 'part', id: a.id },
-    ],
+    reads: (a) => [{ entity: 'ticket', id: a.ticketId }],
     apply(tx, a) {
       uuids(a, 'id', 'ticketId', 'siteId');
       const ticket = tx.get('ticket', a.ticketId);
       if (!ticket) throw new MutationRejected('NOT_FOUND', 'Ticket no longer exists');
-      if (tx.get('part', a.id)) return;
       if (!Number.isInteger(a.quantity) || a.quantity < 1 || a.quantity > 1000) {
         throw new MutationRejected('BAD_ARGS', 'quantity must be an integer from 1 to 1000');
       }
-      tx.put('part', a.id, {
+      tx.insert('part', a.id, {
         id: a.id,
         ticketId: a.ticketId,
         siteId: ticket.siteId,
