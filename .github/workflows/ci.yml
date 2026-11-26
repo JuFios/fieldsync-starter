@@ -66,6 +66,11 @@ jobs:
       - run: npm ci
       - name: Integration tests
         run: npm run test:integration
+      # The fixed seed corpus of the deterministic simulation against the real server (budget: 60 s;
+      # the step timeout is only a safety net, see the Simulation section of the README).
+      - name: Simulation corpus
+        run: npm run test:sim
+        timeout-minutes: 5
 
   e2e:
     name: End-to-end tests (Chromium)
