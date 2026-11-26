@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import {
   MutationRejected,
   type MutationResult,
@@ -9,6 +9,7 @@ import {
 import type { AuthUser } from './auth';
 import { Clock } from './clock';
 import { Db, type TxSql } from './db';
+import { ProblemException } from './problem';
 import { applyMutation, finishMutation, type LogEntry } from './server-tx';
 import { StreamService } from './stream.service';
 
@@ -79,7 +80,14 @@ export class PushService {
     const last = await this.lockClient(c, clientId, user.id);
     if (m.id <= last) return { result: await this.previousResult(c, clientId, m.id), touched: [] };
     if (m.id !== last + 1) {
-      throw new BadRequestException(`Out-of-order mutation ${m.id}, expected ${last + 1}`);
+      // A gap: the mutations between were never received. The client cannot fill it (it would have
+      // to renumber mutations a delayed copy of an older request may still carry), so it is told.
+      throw new ProblemException(
+        HttpStatus.CONFLICT,
+        'MUTATION_OUT_OF_ORDER',
+        `Mutation ${m.id} does not follow the last applied one; expected ${last + 1}`,
+        { expected: last + 1 },
+      );
     }
     const at = this.clock.now();
     let result: MutationResult;

@@ -1,5 +1,5 @@
 import { Module, ValidationPipe, type DynamicModule } from '@nestjs/common';
-import { APP_GUARD, APP_PIPE } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthGuard } from './auth';
@@ -9,6 +9,7 @@ import { typeOrmOptions } from './database/typeorm';
 import { Db } from './db';
 import { GcService } from './gc.service';
 import { HealthController } from './health.controller';
+import { ProblemFilter } from './problem';
 import { PullService } from './pull.service';
 import { PushService } from './push.service';
 import { StreamService } from './stream.service';
@@ -27,7 +28,10 @@ import { SyncController } from './sync.controller';
     { provide: APP_GUARD, useClass: AuthGuard },
     // Global validation, registered in the module so in-process test applications get it too. It
     // checks DTO-typed parameters; `whitelist` strips properties a DTO does not declare.
-    { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true, transform: true }) },
+    // `stopAtFirstError`: one message per invalid property.
+    { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true, transform: true, stopAtFirstError: true }) },
+    // Every error is answered as a problem (RFC 9457), see ProblemFilter.
+    { provide: APP_FILTER, useClass: ProblemFilter },
   ],
 })
 export class AppModule {

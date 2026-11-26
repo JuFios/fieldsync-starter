@@ -1,8 +1,8 @@
-import { BadRequestException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { MutationRejected, rejectWith, type ReceivedMutation } from '@fieldsync/sync-core';
 import { Clock } from '../../src/clock';
 import { Db } from '../../src/db';
+import { ProblemException } from '../../src/problem';
 import { PushService } from '../../src/push.service';
 import { applyMutation, finishMutation, type LogEntry, type MutationRecord } from '../../src/server-tx';
 import { StreamService } from '../../src/stream.service';
@@ -217,11 +217,12 @@ describe('PushService', () => {
       expect(res.results).toEqual([{ id: 3, status: 'duplicate' }]);
     });
 
-    it('rejects a gap in the mutation ids with 400 and the expected id', async () => {
+    it('answers a gap in the mutation ids with 409 and the expected id', async () => {
       tables.last = 1;
       const run = push.push(USER, { clientId: CLIENT, mutations: [mutation(3)] });
-      await expect(run).rejects.toThrow(BadRequestException);
-      await expect(run).rejects.toThrow('Out-of-order mutation 3, expected 2');
+      await expect(run).rejects.toMatchObject({ code: 'MUTATION_OUT_OF_ORDER', details: { expected: 2 } });
+      await expect(run).rejects.toBeInstanceOf(ProblemException);
+      await expect(run.catch((e: ProblemException) => e.getStatus())).resolves.toBe(409);
       expect(apply).not.toHaveBeenCalled();
     });
 

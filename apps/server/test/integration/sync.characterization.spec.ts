@@ -136,7 +136,9 @@ describeWithDb('sync API (characterization)', () => {
       expect(await logSize()).toBe(before);
     });
 
-    it('rejects a mutation id that skips ahead with 400', async () => {
+    // Changed with the protocol work: a gap is a conflict with the server's state (409, with the id
+    // it expects), not a malformed request (it was 400).
+    it('rejects a mutation id that skips ahead with 409 and the expected id', async () => {
       const site = await ctx.fixtures.site();
       const tech = await ctx.fixtures.technician(site);
       const clientId = randomUUID();
@@ -144,7 +146,8 @@ describeWithDb('sync API (characterization)', () => {
       const before = await logSize();
 
       const res = await push(tech, clientId, [create(3, site, 'Third')]);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'MUTATION_OUT_OF_ORDER', details: { expected: 2 } });
       expect(await logSize()).toBe(before);
     });
 

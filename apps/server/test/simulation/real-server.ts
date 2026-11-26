@@ -1,5 +1,5 @@
 import { Catch, HttpException, type ArgumentsHost, type INestApplication } from '@nestjs/common';
-import { BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
+import { HttpAdapterHost } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow } from '@fieldsync/sim';
@@ -8,6 +8,7 @@ import { Agent, type Server } from 'node:http';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { configureApp } from '../../src/app.factory';
+import { ProblemFilter } from '../../src/problem';
 import { AppModule } from '../../src/app.module';
 import { Clock } from '../../src/clock';
 
@@ -34,12 +35,12 @@ class SimulatedClock extends Clock {
 
 /** Records the class and code of every exception a request raises, then answers like Nest does. */
 @Catch()
-class RecordingExceptionFilter extends BaseExceptionFilter {
+class RecordingExceptionFilter extends ProblemFilter {
   constructor(
-    adapter: HttpAdapterHost['httpAdapter'],
+    adapterHost: HttpAdapterHost,
     private readonly sink: (error: ServerError) => void,
   ) {
-    super(adapter);
+    super(adapterHost);
   }
 
   override catch(exception: unknown, host: ArgumentsHost): void {
@@ -98,7 +99,7 @@ export class RealServer implements SimServer {
     // The filter is created before the server object, so it reaches the server through this holder.
     const holder: { server?: RealServer } = {};
     const sink = (error: ServerError) => holder.server?.errors.push(error);
-    app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost).httpAdapter, sink));
+    app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost), sink));
     // The binding's own client is the only one, and it keeps one connection alive between requests.
     // Without this, Node closes that connection after keepAliveTimeout of idleness, and a request sent
     // as it closes fails with ECONNRESET. 0 disables the timeout (Node's http.Server documentation).

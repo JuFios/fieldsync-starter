@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { PullQueryDto, PushRequestDto } from '../src/sync.dto';
 
 /** The pipe exactly as AppModule registers it. */
-const pipe = new ValidationPipe({ whitelist: true, transform: true });
+const pipe = new ValidationPipe({ whitelist: true, transform: true, stopAtFirstError: true });
 const body: ArgumentMetadata = { type: 'body', metatype: PushRequestDto };
 const query: ArgumentMetadata = { type: 'query', metatype: PullQueryDto };
 
