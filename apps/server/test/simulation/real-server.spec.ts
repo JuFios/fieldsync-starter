@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Fixtures, SimRequest } from '@fieldsync/sim';
 import { precondition } from '@fieldsync/test-kit';
+import type { Socket } from 'node:net';
 import { Pool } from 'pg';
 import { createTestDatabase, hasDatabase, type TestDatabase } from '../support/database';
 import { RealServer } from './real-server';
@@ -19,6 +20,10 @@ describeWithDb('the simulation binding of the real server', () => {
   beforeAll(async () => {
     database = await createTestDatabase();
     server = await RealServer.start(database.url);
+    server.httpServer.on('connection', (socket: Socket) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+    });
     db = new Pool({ connectionString: database.url, max: 1 });
   });
   afterAll(async () => {
@@ -26,6 +31,10 @@ describeWithDb('the simulation binding of the real server', () => {
     await server?.close();
     await database?.drop();
   });
+
+  /** The server's open connections (Node keeps no public list, so they are collected as they open). */
+  const sockets = new Set<Socket>();
+  const openSockets = () => [...sockets].filter((s) => !s.destroyed);
 
   const push = (mutations: unknown[], clientId = randomUUID()): SimRequest => ({
     method: 'POST',
@@ -108,6 +117,30 @@ describeWithDb('the simulation binding of the real server', () => {
     // One new connection, or none when an earlier request of this server left one open to reuse.
     expect(connections).toBeLessThanOrEqual(1);
   });
+
+  it('keeps its connection open across a pause longer than the default keep-alive timeout', async () => {
+    // Node closes idle keep-alive sockets after keepAliveTimeout (5 s by default); a request sent just
+    // as the server closes the socket fails with ECONNRESET and would abort a long search. (Node adds about
+    // a second to the timeout before it closes the socket, hence the pause of 6.5 s.)
+    const me = { method: 'GET', path: '/me', headers: { authorization: `Bearer ${user.token}` } };
+    await server.reset(fixtures, () => time);
+    precondition((await server.send(me)).status === 200, 'the first request failed');
+    let closed = 0;
+    let connections = 0;
+    const onConnection = (socket: Socket) => {
+      connections += 1;
+      socket.once('close', () => (closed += 1));
+    };
+    server.httpServer.on('connection', onConnection);
+    for (const socket of openSockets()) socket.once('close', () => (closed += 1));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 6_500));
+      precondition((await server.send(me)).status === 200, 'the request after the pause failed');
+    } finally {
+      server.httpServer.off('connection', onConnection);
+    }
+    expect({ closed, connections }).toEqual({ closed: 0, connections: 0 });
+  }, 15_000);
 
   it('reports only rows that are not deleted, straight from the table', async () => {
     await server.reset(fixtures, () => time);
