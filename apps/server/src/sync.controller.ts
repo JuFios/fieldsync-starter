@@ -96,7 +96,7 @@ export class SyncController {
   @Get('sync/stream')
   @ApiOperation({
     summary: 'Server-sent events: a `poke` event whenever an accessible site changes',
-    description: 'The client pulls after a poke. The token may also be passed as `?token=`.',
+    description: 'The client pulls after a poke.',
   })
   @ApiProduces('text/event-stream')
   @ApiOkResponse({ description: 'An open event stream.' })

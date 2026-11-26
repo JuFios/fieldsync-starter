@@ -95,6 +95,8 @@ describeWithDb('server startup', () => {
           '/sync/stream',
         ]);
         expect(res.body.components.securitySchemes.bearer.scheme).toBe('bearer');
+        // A token in the URL ends up in logs and history; the docs must not recommend it.
+        expect(JSON.stringify(res.body.paths['/sync/stream'])).not.toMatch(/token=/);
         expect((await new Api(server.app).get('/docs')).status).toBe(200);
       } finally {
         await server.close();
