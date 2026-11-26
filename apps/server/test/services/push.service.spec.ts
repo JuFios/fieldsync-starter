@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import type { Mutation } from '@fieldsync/sync-core';
+import { MutationRejected, rejectWith, type Mutation } from '@fieldsync/sync-core';
 import { Clock } from '../../src/clock';
 import { Db } from '../../src/db';
 import { PushService } from '../../src/push.service';
@@ -94,6 +94,46 @@ describe('PushService', () => {
       ]);
       expect(apply).toHaveBeenCalledTimes(1);
       expect(res.lastMutationId).toBe(3);
+    });
+
+    it('answers a rejected mutation with its code, message and details, records it as handled and goes on', async () => {
+      apply
+        .mockResolvedValueOnce([NORTH])
+        .mockRejectedValueOnce(
+          rejectWith('STATUS_CONFLICT', 'Status is now "done"', { current: 'done', allowed: ['open'] }),
+        )
+        .mockResolvedValueOnce([NORTH]);
+      const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] });
+      expect(res).toEqual({
+        results: [
+          { id: 1, status: 'applied' },
+          {
+            id: 2,
+            status: 'rejected',
+            code: 'STATUS_CONFLICT',
+            message: 'Status is now "done"',
+            details: { current: 'done', allowed: ['open'] },
+          },
+          { id: 3, status: 'applied' },
+        ],
+        lastMutationId: 3,
+      });
+      // Every mutation ran in a savepoint, and the rejected one advanced the client like the others.
+      expect(db.inTx.savepoint).toHaveBeenCalledTimes(3);
+      expect(db.inTx.query.mock.calls.map(([, params]) => params)).toEqual([
+        [CLIENT, USER.id, 1],
+        [CLIENT, USER.id, 2],
+        [CLIENT, USER.id, 3],
+      ]);
+      expect(notify.mock.calls).toEqual([[[NORTH]], [[NORTH]]]);
+    });
+
+    it('leaves out details a rejection does not have', async () => {
+      apply.mockRejectedValueOnce(new MutationRejected('NOT_FOUND', 'Ticket no longer exists'));
+      const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
+      expect(res.results).toEqual([
+        { id: 1, status: 'rejected', code: 'NOT_FOUND', message: 'Ticket no longer exists' },
+      ]);
     });
 
     it('rejects a gap in the mutation ids with 400 and the expected id', async () => {

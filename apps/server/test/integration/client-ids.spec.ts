@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { MutationRejected, type Mutation, type PushResponse } from '@fieldsync/sync-core';
-import { knownDefect, precondition } from '@fieldsync/test-kit';
+import { precondition } from '@fieldsync/test-kit';
 import { Db } from '../../src/db';
 import { applyMutation } from '../../src/server-tx';
 import type { TestUser } from '../support/fixtures';
@@ -126,16 +126,12 @@ describeWithDb('client-generated ids', () => {
     await expect(attempt).rejects.toMatchObject({ code: 'ID_CONFLICT' });
   });
 
-  knownDefect(
-    { id: 'F-23', owner: 'sync-protocol', reason: 'a rejected mutation fails the whole push with HTTP 500' },
-    'tells the client that a create was rejected with ID_CONFLICT',
-    async () => {
-      const { north, id, techNorth } = await southTicketAndNorthTech();
-      const res = await push(techNorth, [create(id, north, 'Hijacked')]);
-      expect({ status: res.status, results: res.body.results }).toEqual({
-        status: 201,
-        results: [{ id: 1, status: 'rejected', error: expect.stringContaining('ID_CONFLICT') }],
-      });
-    },
-  );
+  it('tells the client that a create was rejected with ID_CONFLICT', async () => {
+    const { north, id, techNorth } = await southTicketAndNorthTech();
+    const res = await push(techNorth, [create(id, north, 'Hijacked')]);
+    expect({ status: res.status, results: res.body.results }).toEqual({
+      status: 201,
+      results: [{ id: 1, status: 'rejected', code: 'ID_CONFLICT', message: expect.stringContaining('already exists') }],
+    });
+  });
 });

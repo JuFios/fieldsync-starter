@@ -63,7 +63,8 @@ export class RealServer implements SimServer {
   private errors: ServerError[] = [];
 
   private constructor(
-    private readonly app: INestApplication,
+    /** The application, for tests of the binding itself. */
+    readonly app: INestApplication,
     /** The application's HTTP server, for tests of the binding itself. */
     readonly httpServer: Server,
     private readonly clock: SimulatedClock,

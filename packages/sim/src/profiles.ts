@@ -50,11 +50,6 @@ export interface KnownSignature {
 
 /** Signatures of known defects that later changes fix. Everything else is a failure. */
 export const KNOWN_SIGNATURES: Partial<Record<Signature, KnownSignature>> = {
-  'rejected-mutation-500': {
-    defect: 'F-23',
-    owner: 'sync-protocol',
-    reason: 'a rejected mutation fails the whole push with HTTP 500, so the queue never drains',
-  },
   'foreign-site-rows': {
     defect: 'F-07',
     owner: 'access-control',
@@ -215,7 +210,7 @@ const rejections: Profile = {
     'adjust-part': 6,
   },
   invalidText: true,
-  allowed: ['rejected-mutation-500'],
+  allowed: [],
   rejectionCodes: REJECTABLE,
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, serverRejections: 1, 'action:change-status': 3 },
 };
@@ -252,7 +247,7 @@ const full: Profile = {
   actionWeights: rejections.actionWeights,
   invalidText: true,
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
-  allowed: ['rejected-mutation-500', 'foreign-site-rows', 'stuck-request'],
+  allowed: ['foreign-site-rows', 'stuck-request'],
   rejectionCodes: [...REJECTABLE, ...FOREIGN_TICKET_EDITS],
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
 };

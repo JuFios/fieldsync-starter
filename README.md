@@ -354,7 +354,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-20 | 7 | Mutators stamp rows with the clock of whatever environment runs them | Fixed |
 | F-21 | 7 | Mutators accept arguments the server cannot store | Fixed |
 | F-22 | 7 | Queued mutations keep a live reference to the caller's arguments | Fixed |
-| F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Open (known defect) |
+| F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Fixed |
 | F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
 | F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
@@ -682,8 +682,21 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 - **Reproduce.** `rejections.spec.ts` and `client-ids.spec.ts` ("tells the client that a create
   was rejected with ID_CONFLICT"), both known defects; in the simulation, the signature
   `rejected-mutation-500` in the `rejections` and `full` profiles (see [Simulation](#simulation)).
-- **Fix.** Not fixed yet; owned by the protocol change. **Commits.** `34047d5` (test), `5120e40`
-  (`ID_CONFLICT` test), `c0e1b7d` (simulation corpus).
+- **Fix.** Each mutation's transaction runs the mutator inside a savepoint. A rejection rolls back
+  to it, which undoes the mutator's writes and the locks they took, and the same transaction then
+  advances the client's last mutation id, exactly as an application does: the rejected mutation is
+  final, and the ones after it are applied. The answer names the reason:
+  `{ id, status: 'rejected', code, message, details? }` (codes and details in
+  [3.3.5](#merge-semantics-335)), and the client drops the mutation from its queue and keeps the
+  rejection for the user. The characterization test "leaves no trace of a mutation that the mutator
+  rejects" changed with this fix: it pinned the 500 behaviour (last mutation id left at 1) and now
+  expects the rejection in the answer and the id advanced. In the simulation, rejections are checked
+  by code: a profile may only see the codes its actions can cause (`unexpected-rejection`).
+- **Alternatives.** Rolling back the whole batch: one bad mutation would still block every other
+  one. A transaction per mutation without a savepoint, recording the rejection in a second
+  transaction: between the two, a retried copy of the mutation could run again. Answering 4xx for
+  the batch: the client could not tell which mutation was refused.
+- **Commits.** `34047d5` (test), `5120e40` (`ID_CONFLICT` test), `c0e1b7d` (simulation corpus).
 
 ### F-24: adding a part under a taken id is reported as applied (other)
 

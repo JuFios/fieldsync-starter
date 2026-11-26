@@ -214,7 +214,9 @@ describeWithDb('sync API (characterization)', () => {
       expect(rows).toEqual([{ deleted: true, data: null }]);
     });
 
-    it('leaves no trace of a mutation that the mutator rejects', async () => {
+    // Changed with F-23: the rejection used to fail the push with 500 and leave the client's last
+    // mutation id at 1, so the client retried it forever; now it is answered and recorded as handled.
+    it('leaves no trace of a mutation that the mutator rejects, and records it as handled', async () => {
       const site = await ctx.fixtures.site();
       const tech = await ctx.fixtures.technician(site);
       const clientId = randomUUID();
@@ -222,7 +224,7 @@ describeWithDb('sync API (characterization)', () => {
       const before = await logSize();
       const part = randomUUID();
 
-      await push(tech, clientId, [
+      const res = await push(tech, clientId, [
         {
           id: 2,
           name: 'part.add',
@@ -230,6 +232,13 @@ describeWithDb('sync API (characterization)', () => {
         },
       ]);
 
+      expect({ status: res.status, body: res.body }).toEqual({
+        status: 201,
+        body: {
+          results: [{ id: 2, status: 'rejected', code: 'NOT_FOUND', message: 'Ticket no longer exists' }],
+          lastMutationId: 2,
+        },
+      });
       expect(await logSize()).toBe(before);
       const parts = await ctx.db.query(`SELECT 1 FROM entities WHERE entity = 'part' AND id = $1`, [part]);
       expect(parts.rowCount).toBe(0);
@@ -237,7 +246,7 @@ describeWithDb('sync API (characterization)', () => {
         `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
         [clientId],
       );
-      expect(Number(client.rows[0].last_mutation_id)).toBe(1);
+      expect(Number(client.rows[0].last_mutation_id)).toBe(2);
     });
 
     it('pages through the log by limit', async () => {
