@@ -75,18 +75,37 @@ function assertUuids(args: Record<string, unknown>): void {
   }
 }
 
+/** A change the mutation made, to be written to the change log by {@link appendToLog}. */
+export interface LogEntry {
+  siteId: string;
+  entity: EntityName;
+  id: string;
+  op: 'put' | 'del';
+  data: Row | null;
+}
+
+/** Locks are taken in one order everywhere (entity, then id), so two mutations never deadlock. */
+function byKey(a: { entity: string; id: string }, b: { entity: string; id: string }): number {
+  return a.entity === b.entity ? (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : a.entity < b.entity ? -1 : 1;
+}
+
 /**
- * Applies one mutation inside the caller's transaction; returns the site ids it touched. `at` is the
- * server time of the mutation: the mutator's `tx.now()` and the `created_at` of its log entries.
+ * Applies one mutation inside the caller's transaction and returns the changes it made, for the
+ * change log. `at` is the server time of the mutation (the mutator's `tx.now()`).
+ *
+ * The rows the mutator reads are locked first, in key order; the mutator runs on them; its writes
+ * are then made to `entities`, also in key order (an insert locks the new key). The change log is
+ * not touched here: the caller appends the returned entries as the last step of the transaction
+ * ({@link appendToLog}), so the log's ordering lock is held only for the end of the transaction.
  */
-export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation, at: Date): Promise<string[]> {
+export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation, at: Date): Promise<LogEntry[]> {
   const def = mutatorNamed(m.name);
   if (!def) throw new MutationRejected('UNKNOWN_MUTATOR', 'Unknown mutator');
   assertUuids(m.args);
   await authorize(c, user, m);
 
   const loaded = new Map<string, Loaded>();
-  for (const key of def.reads(m.args)) {
+  for (const key of [...def.reads(m.args)].sort(byKey)) {
     const { rows } = await c.query<{ data: Row | null; site_id: string; deleted: boolean }>(
       `SELECT data, site_id, deleted FROM entities WHERE entity = $1 AND id = $2 FOR UPDATE`,
       [key.entity, key.id],
@@ -101,44 +120,77 @@ export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation,
   const tx = new BufferedTx(loaded, at.toISOString());
   def.apply(tx, m.args);
 
-  const touched = new Set<string>();
-  for (const w of tx.writes) {
+  // The last write to each row is the one that counts.
+  const last = new Map<string, Write>();
+  for (const w of tx.writes) last.set(`${w.entity}/${w.id}`, w);
+  const entries: LogEntry[] = [];
+  for (const w of [...last.values()].sort(byKey)) {
     const siteId = w.op === 'del' ? tx.siteOf(w.entity, w.id) : (w.row?.siteId as string);
     if (!siteId) continue;
-    touched.add(siteId);
-    const op = w.op === 'del' ? 'del' : 'put';
-    const { rows } = await c.query<{ version: string }>(
-      `INSERT INTO change_log (site_id, entity, entity_id, op, data, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING version`,
-      [siteId, w.entity, w.id, op, op === 'put' ? JSON.stringify(w.row) : null, at],
-    );
-    const version = rows[0].version;
     if (w.op === 'insert') {
       // DO NOTHING instead of catching a unique violation: the transaction stays usable, and an
       // insert that races a concurrent one with the same id waits for it and then sees the conflict.
       // A deleted row (tombstone) conflicts as well, so a client-chosen id can never revive or move it.
+      // The version is set by appendToLog in the same transaction.
       const inserted = await c.query(
-        `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ($1, $2, $3, $4, false, $5)
+        `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ($1, $2, $3, $4, false, 0)
          ON CONFLICT (entity, id) DO NOTHING RETURNING id`,
-        [w.entity, w.id, siteId, JSON.stringify(w.row), version],
+        [w.entity, w.id, siteId, JSON.stringify(w.row)],
       );
       if (inserted.rowCount === 0) {
         throw new MutationRejected('ID_CONFLICT', `${w.entity} ${w.id} already exists`);
       }
     } else if (w.op === 'put') {
       await c.query(
-        `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ($1, $2, $3, $4, false, $5)
-         ON CONFLICT (entity, id) DO UPDATE
-           SET site_id = EXCLUDED.site_id, data = EXCLUDED.data, deleted = false, version = EXCLUDED.version`,
-        [w.entity, w.id, siteId, JSON.stringify(w.row), version],
+        `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ($1, $2, $3, $4, false, 0)
+         ON CONFLICT (entity, id) DO UPDATE SET site_id = EXCLUDED.site_id, data = EXCLUDED.data, deleted = false`,
+        [w.entity, w.id, siteId, JSON.stringify(w.row)],
       );
     } else {
-      await c.query(`UPDATE entities SET deleted = true, data = NULL, version = $3 WHERE entity = $1 AND id = $2`, [
-        w.entity,
-        w.id,
-        version,
-      ]);
+      await c.query(`UPDATE entities SET deleted = true, data = NULL WHERE entity = $1 AND id = $2`, [w.entity, w.id]);
     }
+    entries.push({
+      siteId,
+      entity: w.entity,
+      id: w.id,
+      op: w.op === 'del' ? 'del' : 'put',
+      data: w.op === 'del' ? null : (w.row ?? null),
+    });
   }
-  return [...touched];
+  return entries;
+}
+
+/**
+ * Appends a mutation's changes to the change log, as the last statement of its transaction: takes
+ * the next versions from `log_head` (locking its one row until the transaction ends), inserts the
+ * log rows and stamps the changed entities with their versions, in one set-based statement.
+ * Because every writer takes the head last and holds it until it commits, versions are assigned,
+ * and become visible to readers, in commit order and without gaps. Does nothing without entries.
+ */
+export async function appendToLog(c: Sql, entries: readonly LogEntry[], at: Date): Promise<void> {
+  if (entries.length === 0) return;
+  await c.query(
+    `WITH head AS (
+       UPDATE log_head SET version = version + $1 WHERE id = 1 RETURNING version
+     ),
+     logged AS (
+       INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
+       SELECT head.version - $1 + e.ord, e.site_id, e.entity, e.entity_id, e.op, e.data, $7
+         FROM head, unnest($2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::jsonb[])
+              WITH ORDINALITY AS e (site_id, entity, entity_id, op, data, ord)
+       RETURNING version, entity, entity_id
+     )
+     UPDATE entities SET version = logged.version
+       FROM logged
+      WHERE entities.entity = logged.entity AND entities.id = logged.entity_id`,
+    [
+      entries.length,
+      entries.map((e) => e.siteId),
+      entries.map((e) => e.entity),
+      entries.map((e) => e.id),
+      entries.map((e) => e.op),
+      entries.map((e) => (e.data === null ? null : JSON.stringify(e.data))),
+      at,
+    ],
+  );
 }

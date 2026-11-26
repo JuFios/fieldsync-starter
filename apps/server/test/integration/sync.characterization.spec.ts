@@ -280,8 +280,10 @@ describeWithDb('sync API (characterization)', () => {
       const site = await ctx.fixtures.site();
       const insert = (age: string) =>
         ctx.db.query<{ version: string }>(
-          `INSERT INTO change_log (site_id, entity, entity_id, op, data, created_at)
-           VALUES ($1, 'ticket', $2, 'put', '{}', now() - $3::interval) RETURNING version`,
+          // Versions come from the log head, as the server takes them.
+          `WITH head AS (UPDATE log_head SET version = version + 1 WHERE id = 1 RETURNING version)
+           INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
+           SELECT head.version, $1, 'ticket', $2, 'put', '{}', now() - $3::interval FROM head RETURNING version`,
           [site, randomUUID(), age],
         );
       const old = [await insert('8 days'), await insert('30 days')].map((r) => r.rows[0].version);

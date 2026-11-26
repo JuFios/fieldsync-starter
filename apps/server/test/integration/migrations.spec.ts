@@ -332,6 +332,41 @@ describeWithDb('database migrations', () => {
       expect(clients).toEqual([{ client_id: '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', last_mutation_id: '7' }]);
     });
 
+    it('start the log head after the last version the original sequence handed out', async () => {
+      const db = await starterDatabase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO change_log (site_id, entity, entity_id, op) VALUES
+            ('00000000-0000-4000-8000-0000000000a1', 'ticket', '11111111-1111-4111-8111-111111111111', 'put'),
+            ('00000000-0000-4000-8000-0000000000a1', 'ticket', '11111111-1111-4111-8111-111111111111', 'put'),
+            ('00000000-0000-4000-8000-0000000000a1', 'ticket', '11111111-1111-4111-8111-111111111111', 'del');
+          -- The newest row is gone (a GC run, or a rolled-back insert), but a client may hold it as its cursor.
+          DELETE FROM change_log WHERE version = 3;
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const head = await ds.query<Array<{ version: string }>>('SELECT version FROM log_head');
+      // A version must now be given: nothing in the log hands one out by itself any more.
+      const withoutVersion = await ds
+        .query(`INSERT INTO change_log (site_id, entity, entity_id, op) VALUES ($1, 'ticket', $2, 'put')`, [
+          '00000000-0000-4000-8000-0000000000a1',
+          '11111111-1111-4111-8111-111111111111',
+        ])
+        .then(
+          () => 'inserted',
+          (e: { driverError?: { code?: string } }) => e.driverError?.code,
+        );
+      expect({ head, withoutVersion }).toEqual({ head: [{ version: '3' }], withoutVersion: '23502' });
+    });
+
+    it('start the log head at 0 on an empty log', async () => {
+      const db = await emptyDatabase();
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      expect(await ds.query('SELECT id, version FROM log_head')).toEqual([{ id: 1, version: '0' }]);
+    });
+
     it('revert to the first schema', async () => {
       const db = await emptyDatabase();
       const ds = await dataSource(db, MIGRATIONS);

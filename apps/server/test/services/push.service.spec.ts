@@ -4,18 +4,20 @@ import { MutationRejected, rejectWith, type ReceivedMutation } from '@fieldsync/
 import { Clock } from '../../src/clock';
 import { Db } from '../../src/db';
 import { PushService } from '../../src/push.service';
-import { applyMutation } from '../../src/server-tx';
+import { appendToLog, applyMutation, type LogEntry } from '../../src/server-tx';
 import { StreamService } from '../../src/stream.service';
 import { mockDb, result, type MockDb } from './support';
 
 // The mutation itself is applied by server-tx (tested on Postgres); here only the push loop matters.
-jest.mock('../../src/server-tx', () => ({ applyMutation: jest.fn() }));
+jest.mock('../../src/server-tx', () => ({ applyMutation: jest.fn(), appendToLog: jest.fn() }));
 const apply = jest.mocked(applyMutation);
+const append = jest.mocked(appendToLog);
 
 const NOW = new Date('2026-11-26T12:00:00.000Z');
 const USER = { id: 'user-1', role: 'technician' as const };
 const CLIENT = '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b';
 const NORTH = 'site-north';
+const ENTRY: LogEntry = { siteId: NORTH, entity: 'ticket', id: 't1', op: 'put', data: { title: 'T' } };
 
 const mutation = (id: number): ReceivedMutation => ({ id, name: 'ticket.setStatus', args: { id: 't1' } });
 
@@ -84,7 +86,11 @@ describe('PushService', () => {
     tables = new FakeTables();
     db.query.mockImplementation((sql, params) => Promise.resolve(tables.answer(sql, params)));
     db.inTx.query.mockImplementation((sql, params) => Promise.resolve(tables.answer(sql, params)));
-    apply.mockReset().mockResolvedValue([NORTH]);
+    apply.mockReset().mockResolvedValue([ENTRY]);
+    append.mockReset().mockImplementation(() => {
+      tables.statements.push('append to log');
+      return Promise.resolve();
+    });
     notify = jest.fn();
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -127,10 +133,10 @@ describe('PushService', () => {
       expect(notify.mock.calls).toEqual([[[NORTH]], [[NORTH]]]);
     });
 
-    it('locks the client before the mutator runs and records the outcome after it', async () => {
+    it('locks the client first, runs the mutator, records the outcome and appends to the log last', async () => {
       apply.mockImplementation(() => {
         tables.statements.push('mutator');
-        return Promise.resolve([NORTH]);
+        return Promise.resolve([ENTRY]);
       });
       await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
       expect(tables.statements).toEqual([
@@ -139,8 +145,10 @@ describe('PushService', () => {
         'mutator',
         'INSERT INTO mutation_results',
         'UPDATE clients SET',
+        'append to log',
         'SELECT last_mutation_id FROM',
       ]);
+      expect(append).toHaveBeenCalledWith(db.inTx, [ENTRY], NOW);
       expect(db.inTx.savepoint).toHaveBeenCalledTimes(1);
     });
 
@@ -159,11 +167,11 @@ describe('PushService', () => {
 
     it('answers a rejected mutation with its reason, records it as handled and goes on', async () => {
       apply
-        .mockResolvedValueOnce([NORTH])
+        .mockResolvedValueOnce([ENTRY])
         .mockRejectedValueOnce(
           rejectWith('STATUS_CONFLICT', 'Status is now "done"', { current: 'done', allowed: ['open'] }),
         )
-        .mockResolvedValueOnce([NORTH]);
+        .mockResolvedValueOnce([ENTRY]);
       const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] });
       const rejection = {
         id: 2,
@@ -216,7 +224,7 @@ describe('PushService', () => {
     });
 
     it('stops at a mutation whose transaction fails, keeping the earlier ones, and notifies nobody for it', async () => {
-      apply.mockResolvedValueOnce([NORTH]).mockRejectedValueOnce(new Error('deadlock detected'));
+      apply.mockResolvedValueOnce([ENTRY]).mockRejectedValueOnce(new Error('deadlock detected'));
       await expect(
         push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] }),
       ).rejects.toThrow('deadlock detected');

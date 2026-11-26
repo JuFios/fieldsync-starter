@@ -356,6 +356,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-22 | 7 | Queued mutations keep a live reference to the caller's arguments | Fixed |
 | F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Fixed |
 | F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
+| F-25 | 1 | A change that commits after a later one is never delivered | Fixed |
 | F-26 | 2 | Parallel copies of one mutation are applied several times; a retried rejection loses its reason | Fixed |
 | F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
@@ -727,6 +728,34 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   deleted part's) is rejected with `ID_CONFLICT`. Retried pushes are deduplicated by mutation id, so
   the early return was not needed for idempotency.
 - **Commits.** `dec7ec0` (test), `dfe8082` (fix).
+
+### F-25: a change that commits after a later one is never delivered (category 1)
+
+- **What.** A change-log version came from the `bigserial` sequence when the row was inserted, not
+  when its transaction committed. A transaction that took version 5 and committed after the one
+  that took 6 was invisible to a pull that ran in between; that pull answered `nextCursor = 6`, and
+  the next pull asked for versions after 6.
+- **Why it is dangerous.** The change is never delivered to that client: it silently diverges from
+  the server until it reloads everything. Any two concurrent pushes can cause it.
+- **Reproduce.** `commit-order.spec.ts`, "delivers a change that commits after a change with a later
+  position in the log": the test's own connection holds an uncommitted row with the id a ticket
+  create is about to insert, so the create waits inside its transaction after taking its version
+  while a second create commits; no hook in the server.
+- **Fix.** Versions come from a one-row table, `log_head` (decision record
+  [3.3.1](#protocol-correctness-331)). Appending to the change log is the last statement of every
+  writing transaction: one statement takes the next versions from the head (locking its row until
+  the transaction ends), inserts the log rows and stamps the changed entities. Every writer holds
+  the head from that statement to its commit, so versions are assigned and become visible in commit
+  order and without gaps; a reader can never see version 6 before 5. All other locks (the client's
+  row, the entity rows in key order) are taken before, so the head is held only for the end of the
+  transaction. The migration starts the head after the last version the sequence handed out (rows of
+  rolled-back inserts or the newest rows removed by the GC may have taken one, and a client may hold
+  it as its cursor) and drops the sequence. Also covered by a stress test: 16 writers and 4 readers
+  paging with small pages, every reader sees every version exactly once and in order.
+- **Alternatives.** See the decision record: an advisory lock with the sequence, a commit-time
+  watermark with `xid8` (`pg_snapshot_xmin`), or keeping the sequence and making readers stop below
+  the oldest running writer.
+- **Commits.** `0c6d9f9` (test).
 
 ### F-26: parallel copies of one mutation are applied several times (category 2)
 

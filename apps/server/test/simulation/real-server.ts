@@ -12,7 +12,7 @@ import { AppModule } from '../../src/app.module';
 import { Clock } from '../../src/clock';
 
 /** The application's own tables, in an order TRUNCATE accepts (it truncates them all at once anyway). */
-const TABLES = ['clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
+const TABLES = ['mutation_results', 'clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
 
 /** The supertest method for an HTTP method of the sync client (it sends GET and POST only). */
 function methodOf(method: string): 'get' | 'post' {
@@ -56,7 +56,7 @@ class RecordingExceptionFilter extends BaseExceptionFilter {
 /**
  * The real server on a real database, as a {@link SimServer}: the production AppModule with only the
  * Clock replaced and the production app settings, called over real HTTP through supertest. Data
- * is reset between runs with TRUNCATE ... RESTART IDENTITY, so versions start at 1 for every run and
+ * is reset between runs with TRUNCATE ... RESTART IDENTITY and a zero log head, so versions start at 1 for every run and
  * the physical row order is the same in every run of a seed.
  */
 export class RealServer implements SimServer {
@@ -122,6 +122,7 @@ export class RealServer implements SimServer {
     this.clock.source = now;
     this.errors = [];
     await this.db.query(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY`);
+    await this.db.query('UPDATE log_head SET version = 0');
     for (const site of fixtures.sites) {
       await this.db.query('INSERT INTO sites (id, name) VALUES ($1, $2)', [site.id, site.name]);
     }

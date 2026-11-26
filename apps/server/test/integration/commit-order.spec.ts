@@ -73,4 +73,52 @@ describeWithDb('change-log order under concurrent commits', () => {
       blocker.release();
     }
   });
+
+  it('delivers every change exactly once and in order to readers that page while 16 writers commit', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const WRITERS = 16;
+    const PER_WRITER = 40;
+    const READERS = 4;
+    let writing = true;
+    // Earlier tests of this file wrote to the log too: start where it ends now.
+    const head = await ctx.db.query<{ version: string }>(`SELECT version FROM log_head`);
+    const start = Number(head.rows[0].version);
+
+    const writers = Array.from({ length: WRITERS }, async () => {
+      const clientId = randomUUID();
+      for (let id = 1; id <= PER_WRITER; id += 1) {
+        const mutation = {
+          id,
+          name: 'ticket.create',
+          args: { id: randomUUID(), siteId: site, title: `w${id}`, description: '' },
+        };
+        const res = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations: [mutation] }, tech.token);
+        precondition(res.body.results?.[0]?.status === 'applied', `push answered ${JSON.stringify(res.body)}`);
+      }
+    });
+    const readers = Array.from({ length: READERS }, async (_, n) => {
+      const seen: number[] = [];
+      let cursor = start;
+      // Pages of different sizes, until the writers are done and a last pass finds nothing new.
+      for (let quiet = 0; quiet < 2;) {
+        const res = await ctx.api.get<PullResponse>(`/sync/pull?cursor=${cursor}&limit=${3 + n * 4}`, tech.token);
+        seen.push(...res.body.changes.map((c) => c.version));
+        cursor = res.body.nextCursor;
+        if (!writing && !res.body.hasMore) quiet += 1;
+      }
+      return seen;
+    });
+    await Promise.all(writers);
+    writing = false;
+    const seenByReader = await Promise.all(readers);
+
+    const { rows } = await ctx.db.query<{ version: string }>(
+      `SELECT version FROM change_log WHERE version > $1 ORDER BY version`,
+      [start],
+    );
+    const all = rows.map((r) => Number(r.version));
+    expect(all).toHaveLength(WRITERS * PER_WRITER);
+    for (const seen of seenByReader) expect(seen).toEqual(all);
+  }, 300_000);
 });
