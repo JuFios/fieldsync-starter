@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { MutationRejected, rejectWith, type Mutation } from '@fieldsync/sync-core';
+import { MutationRejected, rejectWith, type ReceivedMutation } from '@fieldsync/sync-core';
 import { Clock } from '../../src/clock';
 import { Db } from '../../src/db';
 import { PushService } from '../../src/push.service';
@@ -14,28 +14,76 @@ const apply = jest.mocked(applyMutation);
 
 const NOW = new Date('2026-11-26T12:00:00.000Z');
 const USER = { id: 'user-1', role: 'technician' as const };
-const CLIENT = 'client-1';
+const CLIENT = '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b';
 const NORTH = 'site-north';
 
-const mutation = (id: number): Mutation => ({ id, name: 'ticket.setStatus', args: { id: 't1', status: 'done' } });
+const mutation = (id: number): ReceivedMutation => ({ id, name: 'ticket.setStatus', args: { id: 't1' } });
+
+/**
+ * The clients and mutation_results tables as the SQL of the push sees them: answers the statements
+ * by their text and keeps the state the transaction writes.
+ */
+class FakeTables {
+  last: number | undefined;
+  readonly results = new Map<
+    number,
+    { status: string; code: string | null; message: string | null; details: string | null }
+  >();
+  /** Statements in order, without their parameters, to check the locking order. */
+  readonly statements: string[] = [];
+
+  answer(sql: string, params: unknown[] = []) {
+    const kind = sql.trim().split(/\s+/).slice(0, 3).join(' ');
+    this.statements.push(kind);
+    if (sql.includes('INSERT INTO clients')) {
+      this.last ??= 0;
+      return result([], 1);
+    }
+    if (sql.includes('FROM clients') && sql.includes('FOR UPDATE')) {
+      return result([{ last_mutation_id: String(this.last ?? 0) }]);
+    }
+    if (sql.includes('FROM clients')) {
+      return result(this.last === undefined ? [] : [{ last_mutation_id: String(this.last) }]);
+    }
+    if (sql.includes('INSERT INTO mutation_results')) {
+      const [, id, status, code, message, details] = params as [
+        string,
+        number,
+        string,
+        string | null,
+        string | null,
+        string | null,
+      ];
+      this.results.set(id, { status, code, message, details });
+      return result([], 1);
+    }
+    if (sql.includes('FROM mutation_results')) {
+      const stored = this.results.get(params[1] as number);
+      return result(
+        stored
+          ? [{ ...stored, details: stored.details === null ? null : (JSON.parse(stored.details) as unknown) }]
+          : [],
+      );
+    }
+    if (sql.includes('UPDATE clients')) {
+      this.last = params[1] as number;
+      return result([], 1);
+    }
+    throw new Error(`unexpected statement: ${sql}`);
+  }
+}
 
 describe('PushService', () => {
   let push: PushService;
   let db: MockDb;
+  let tables: FakeTables;
   let notify: jest.Mock;
-  /** last_mutation_id as the clients table holds it; the mocked transaction advances it. */
-  let stored: number | undefined;
 
   beforeEach(async () => {
     db = mockDb();
-    stored = undefined;
-    db.query.mockImplementation(() =>
-      Promise.resolve(result(stored === undefined ? [] : [{ last_mutation_id: String(stored) }])),
-    );
-    db.inTx.query.mockImplementation((_sql, params) => {
-      stored = params?.[2] as number;
-      return Promise.resolve(result([], 1));
-    });
+    tables = new FakeTables();
+    db.query.mockImplementation((sql, params) => Promise.resolve(tables.answer(sql, params)));
+    db.inTx.query.mockImplementation((sql, params) => Promise.resolve(tables.answer(sql, params)));
     apply.mockReset().mockResolvedValue([NORTH]);
     notify = jest.fn();
     const moduleRef = await Test.createTestingModule({
@@ -52,17 +100,16 @@ describe('PushService', () => {
   describe('lastMutationId', () => {
     it('is 0 for an unknown client', async () => {
       await expect(push.lastMutationId(CLIENT)).resolves.toBe(0);
-      expect(db.query).toHaveBeenCalledWith('SELECT last_mutation_id FROM clients WHERE client_id = $1', [CLIENT]);
     });
 
     it('converts the stored bigint to a number', async () => {
-      stored = 42;
+      tables.last = 42;
       await expect(push.lastMutationId(CLIENT)).resolves.toBe(42);
     });
   });
 
   describe('push', () => {
-    it('applies new mutations in order, each in a transaction that records the client, and notifies their sites', async () => {
+    it('applies new mutations in order, each in its own transaction, and notifies their sites', async () => {
       const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2)] });
 
       expect(res).toEqual({
@@ -77,15 +124,29 @@ describe('PushService', () => {
         [USER, 2, NOW],
       ]);
       expect(db.tx).toHaveBeenCalledTimes(2);
-      expect(db.inTx.query.mock.calls.map(([, params]) => params)).toEqual([
-        [CLIENT, USER.id, 1],
-        [CLIENT, USER.id, 2],
-      ]);
       expect(notify.mock.calls).toEqual([[[NORTH]], [[NORTH]]]);
     });
 
-    it('reports mutations the client already sent as duplicates without applying them again', async () => {
-      stored = 2;
+    it('locks the client before the mutator runs and records the outcome after it', async () => {
+      apply.mockImplementation(() => {
+        tables.statements.push('mutator');
+        return Promise.resolve([NORTH]);
+      });
+      await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
+      expect(tables.statements).toEqual([
+        'INSERT INTO clients',
+        'SELECT last_mutation_id FROM',
+        'mutator',
+        'INSERT INTO mutation_results',
+        'UPDATE clients SET',
+        'SELECT last_mutation_id FROM',
+      ]);
+      expect(db.inTx.savepoint).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers copies of applied mutations as duplicates without applying them again', async () => {
+      await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2)] });
+      apply.mockClear();
       const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] });
       expect(res.results).toEqual([
         { id: 1, status: 'duplicate' },
@@ -96,7 +157,7 @@ describe('PushService', () => {
       expect(res.lastMutationId).toBe(3);
     });
 
-    it('answers a rejected mutation with its code, message and details, records it as handled and goes on', async () => {
+    it('answers a rejected mutation with its reason, records it as handled and goes on', async () => {
       apply
         .mockResolvedValueOnce([NORTH])
         .mockRejectedValueOnce(
@@ -104,40 +165,42 @@ describe('PushService', () => {
         )
         .mockResolvedValueOnce([NORTH]);
       const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] });
+      const rejection = {
+        id: 2,
+        status: 'rejected',
+        code: 'STATUS_CONFLICT',
+        message: 'Status is now "done"',
+        details: { current: 'done', allowed: ['open'] },
+      };
       expect(res).toEqual({
-        results: [
-          { id: 1, status: 'applied' },
-          {
-            id: 2,
-            status: 'rejected',
-            code: 'STATUS_CONFLICT',
-            message: 'Status is now "done"',
-            details: { current: 'done', allowed: ['open'] },
-          },
-          { id: 3, status: 'applied' },
-        ],
+        results: [{ id: 1, status: 'applied' }, rejection, { id: 3, status: 'applied' }],
         lastMutationId: 3,
       });
-      // Every mutation ran in a savepoint, and the rejected one advanced the client like the others.
-      expect(db.inTx.savepoint).toHaveBeenCalledTimes(3);
-      expect(db.inTx.query.mock.calls.map(([, params]) => params)).toEqual([
-        [CLIENT, USER.id, 1],
-        [CLIENT, USER.id, 2],
-        [CLIENT, USER.id, 3],
-      ]);
       expect(notify.mock.calls).toEqual([[[NORTH]], [[NORTH]]]);
+
+      // A copy of the rejected mutation gets the same rejection back, without running the mutator.
+      apply.mockClear();
+      const again = await push.push(USER, { clientId: CLIENT, mutations: [mutation(2)] });
+      expect(again.results).toEqual([rejection]);
+      expect(apply).not.toHaveBeenCalled();
     });
 
-    it('leaves out details a rejection does not have', async () => {
+    it('leaves out details a rejection does not have, also in the answer to a copy', async () => {
       apply.mockRejectedValueOnce(new MutationRejected('NOT_FOUND', 'Ticket no longer exists'));
-      const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
-      expect(res.results).toEqual([
-        { id: 1, status: 'rejected', code: 'NOT_FOUND', message: 'Ticket no longer exists' },
-      ]);
+      const first = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
+      const copy = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1)] });
+      const rejection = { id: 1, status: 'rejected', code: 'NOT_FOUND', message: 'Ticket no longer exists' };
+      expect([first.results, copy.results]).toEqual([[rejection], [rejection]]);
+    });
+
+    it('answers a copy whose result has expired as a duplicate', async () => {
+      tables.last = 5;
+      const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(3)] });
+      expect(res.results).toEqual([{ id: 3, status: 'duplicate' }]);
     });
 
     it('rejects a gap in the mutation ids with 400 and the expected id', async () => {
-      stored = 1;
+      tables.last = 1;
       const run = push.push(USER, { clientId: CLIENT, mutations: [mutation(3)] });
       await expect(run).rejects.toThrow(BadRequestException);
       await expect(run).rejects.toThrow('Out-of-order mutation 3, expected 2');
@@ -145,7 +208,7 @@ describe('PushService', () => {
     });
 
     it('answers an empty batch with the stored last mutation id', async () => {
-      stored = 5;
+      tables.last = 5;
       await expect(push.push(USER, { clientId: CLIENT, mutations: [] })).resolves.toEqual({
         results: [],
         lastMutationId: 5,
@@ -157,7 +220,6 @@ describe('PushService', () => {
       await expect(
         push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] }),
       ).rejects.toThrow('deadlock detected');
-      expect(stored).toBe(1);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(apply).toHaveBeenCalledTimes(2);
     });

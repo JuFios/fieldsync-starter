@@ -1,19 +1,38 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { MutationRejected, type MutationResult, type PushResponse, type ReceivedMutation } from '@fieldsync/sync-core';
+import {
+  MutationRejected,
+  type MutationResult,
+  type PushResponse,
+  type ReceivedMutation,
+  type Rejection,
+} from '@fieldsync/sync-core';
 import type { AuthUser } from './auth';
 import { Clock } from './clock';
-import { Db } from './db';
+import { Db, type TxSql } from './db';
 import { applyMutation } from './server-tx';
 import { StreamService } from './stream.service';
 
+interface Outcome {
+  result: MutationResult;
+  /** Sites whose data the mutation changed, to notify after the commit. */
+  touched: string[];
+}
+
+interface StoredResult {
+  status: 'applied' | 'rejected';
+  code: Rejection['code'] | null;
+  message: string | null;
+  details: Rejection['details'] | null;
+}
+
 /** The result the client receives for a mutation the mutator refused. */
-function rejected(id: number, err: MutationRejected): MutationResult {
+function rejected(id: number, rejection: Rejection): MutationResult {
   return {
     id,
     status: 'rejected',
-    code: err.code,
-    message: err.message,
-    ...(err.details === undefined ? {} : { details: err.details }),
+    code: rejection.code,
+    message: rejection.message,
+    ...(rejection.details === undefined ? {} : { details: rejection.details }),
   };
 }
 
@@ -25,36 +44,15 @@ export class PushService {
     private readonly clock: Clock,
   ) {}
 
+  /**
+   * Applies the client's mutations in order, each in its own transaction, and answers each one.
+   * Effectively once: a mutation is applied at most once however many copies of it arrive, at once
+   * or later, and every copy is answered with the original outcome (see {@link applyOne}).
+   */
   async push(user: AuthUser, req: { clientId: string; mutations: ReceivedMutation[] }): Promise<PushResponse> {
     const results: MutationResult[] = [];
     for (const m of req.mutations) {
-      const last = await this.lastMutationId(req.clientId);
-      if (m.id <= last) {
-        results.push({ id: m.id, status: 'duplicate' });
-        continue;
-      }
-      if (m.id !== last + 1) {
-        throw new BadRequestException(`Out-of-order mutation ${m.id}, expected ${last + 1}`);
-      }
-      const { result, touched } = await this.db.tx(async (c) => {
-        // The mutator runs in a savepoint: a rejection undoes its writes but keeps the transaction,
-        // which records the rejection by advancing the client's last mutation id like an
-        // application does, so the mutation is final and the ones after it can follow.
-        let outcome: { result: MutationResult; touched: string[] };
-        try {
-          const sites = await c.savepoint(() => applyMutation(c, user, m, this.clock.now()));
-          outcome = { result: { id: m.id, status: 'applied' }, touched: sites };
-        } catch (err) {
-          if (!(err instanceof MutationRejected)) throw err;
-          outcome = { result: rejected(m.id, err), touched: [] };
-        }
-        await c.query(
-          `INSERT INTO clients (client_id, user_id, last_mutation_id) VALUES ($1, $2, $3)
-           ON CONFLICT (client_id) DO UPDATE SET last_mutation_id = $3`,
-          [req.clientId, user.id, m.id],
-        );
-        return outcome;
-      });
+      const { result, touched } = await this.db.tx((c) => this.applyOne(c, user, req.clientId, m));
       if (touched.length > 0) this.streams.notify(touched);
       results.push(result);
     }
@@ -67,5 +65,76 @@ export class PushService {
       [clientId],
     );
     return rows.length ? Number(rows[0].last_mutation_id) : 0;
+  }
+
+  /**
+   * One mutation in the caller's transaction. The client's row is locked first, so copies of a
+   * mutation (and different mutations of one client) run one after another: the copy that gets the
+   * lock second sees the last applied id the first one committed. The mutator then runs in a
+   * savepoint, taken after the lock so that rolling back to it keeps the lock (PostgreSQL 13.3.2).
+   */
+  private async applyOne(c: TxSql, user: AuthUser, clientId: string, m: ReceivedMutation): Promise<Outcome> {
+    const last = await this.lockClient(c, clientId, user.id);
+    if (m.id <= last) return { result: await this.previousResult(c, clientId, m.id), touched: [] };
+    if (m.id !== last + 1) {
+      throw new BadRequestException(`Out-of-order mutation ${m.id}, expected ${last + 1}`);
+    }
+    const at = this.clock.now();
+    let outcome: Outcome;
+    try {
+      const sites = await c.savepoint(() => applyMutation(c, user, m, at));
+      outcome = { result: { id: m.id, status: 'applied' }, touched: sites };
+    } catch (err) {
+      if (!(err instanceof MutationRejected)) throw err;
+      // The rejection is recorded like an application: the mutation is final and the next follows.
+      outcome = { result: rejected(m.id, err), touched: [] };
+    }
+    const r = outcome.result;
+    await c.query(
+      `INSERT INTO mutation_results (client_id, mutation_id, status, code, message, details, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        clientId,
+        m.id,
+        r.status,
+        r.status === 'rejected' ? r.code : null,
+        r.status === 'rejected' ? r.message : null,
+        r.status === 'rejected' && r.details !== undefined ? JSON.stringify(r.details) : null,
+        at,
+      ],
+    );
+    await c.query(`UPDATE clients SET last_mutation_id = $2 WHERE client_id = $1`, [clientId, m.id]);
+    return outcome;
+  }
+
+  /** Locks the client's row, creating it on its first push, and returns its last applied id. */
+  private async lockClient(c: TxSql, clientId: string, userId: string): Promise<number> {
+    await c.query(
+      `INSERT INTO clients (client_id, user_id, last_mutation_id) VALUES ($1, $2, 0)
+       ON CONFLICT (client_id) DO NOTHING`,
+      [clientId, userId],
+    );
+    const { rows } = await c.query<{ last_mutation_id: string }>(
+      `SELECT last_mutation_id FROM clients WHERE client_id = $1 FOR UPDATE`,
+      [clientId],
+    );
+    return Number(rows[0].last_mutation_id);
+  }
+
+  /**
+   * The answer for a copy of a mutation that was already handled: its rejection, or "duplicate" if
+   * it was applied. Results older than the change-log retention are gone; such a copy is answered as
+   * a duplicate (its client has to reload its state anyway).
+   */
+  private async previousResult(c: TxSql, clientId: string, id: number): Promise<MutationResult> {
+    const { rows } = await c.query<StoredResult>(
+      `SELECT status, code, message, details FROM mutation_results WHERE client_id = $1 AND mutation_id = $2`,
+      [clientId, id],
+    );
+    const stored = rows[0];
+    if (stored?.status === 'rejected' && stored.code !== null && stored.message !== null) {
+      return rejected(id, { code: stored.code, message: stored.message, details: stored.details ?? undefined });
+    }
+    return { id, status: 'duplicate' };
   }
 }

@@ -35,11 +35,13 @@ describe('GcService', () => {
   });
 
   describe('collect', () => {
-    it('deletes change-log entries older than the retention, by the server clock, and returns how many', async () => {
-      db.query.mockResolvedValue(result([], 7));
+    it('deletes change-log entries and mutation results older than the retention, by the server clock', async () => {
+      db.query.mockResolvedValueOnce(result([], 7)).mockResolvedValueOnce(result([], 3));
       await expect(gc.collect()).resolves.toBe(7);
-      expect(db.query).toHaveBeenCalledWith('DELETE FROM change_log WHERE created_at < $1', [
-        new Date('2026-11-26T11:00:00.000Z'),
+      const cutoff = new Date('2026-11-26T11:00:00.000Z');
+      expect(db.query.mock.calls).toEqual([
+        ['DELETE FROM change_log WHERE created_at < $1', [cutoff]],
+        ['DELETE FROM mutation_results WHERE created_at < $1', [cutoff]],
       ]);
     });
 
@@ -57,9 +59,9 @@ describe('GcService', () => {
       await jest.advanceTimersByTimeAsync(59_999);
       expect(db.query).not.toHaveBeenCalled();
       await jest.advanceTimersByTimeAsync(1);
-      expect(db.query).toHaveBeenCalledTimes(1);
-      await jest.advanceTimersByTimeAsync(60_000);
       expect(db.query).toHaveBeenCalledTimes(2);
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(db.query).toHaveBeenCalledTimes(4);
     });
 
     it('logs a failed run and keeps running', async () => {
@@ -70,7 +72,7 @@ describe('GcService', () => {
       await jest.advanceTimersByTimeAsync(60_000);
       expect(error).toHaveBeenCalledWith('connection reset');
       await jest.advanceTimersByTimeAsync(60_000);
-      expect(db.query).toHaveBeenCalledTimes(2);
+      expect(db.query).toHaveBeenCalledTimes(3);
     });
   });
 });

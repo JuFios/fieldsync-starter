@@ -356,6 +356,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-22 | 7 | Queued mutations keep a live reference to the caller's arguments | Fixed |
 | F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Fixed |
 | F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
+| F-26 | 2 | Parallel copies of one mutation are applied several times; a retried rejection loses its reason | Fixed |
 | F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
 
@@ -726,6 +727,34 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   deleted part's) is rejected with `ID_CONFLICT`. Retried pushes are deduplicated by mutation id, so
   the early return was not needed for idempotency.
 - **Commits.** `dec7ec0` (test), `dfe8082` (fix).
+
+### F-26: parallel copies of one mutation are applied several times (category 2)
+
+- **What.** `PushService` read the client's last applied mutation id with a separate query, outside
+  the transaction that applied the mutation and without a lock. Copies of one push that arrive at
+  the same time all read the same id and all apply the mutation. A copy that arrived after a
+  rejection was answered `duplicate`, without the reason.
+- **Why it is dangerous.** Retries are normal for an offline-first client (a lost answer, a flaky
+  network delivering a request twice): of 50 copies of `part.adjust (+1)` pushed at once about 20
+  were applied, so the quantity grew by 20. A client whose first answer was lost never learns why
+  its mutation was refused.
+- **Reproduce.** `duplicates.spec.ts`: 50 parallel copies in each of 100 rounds, overlapping
+  batches of one client, parallel and retried copies of a rejected mutation.
+- **Fix.** The mutation's transaction first locks the client's row (`SELECT … FOR UPDATE`, creating
+  it on the first push) and reads the last applied id there, so copies and different mutations of
+  one client run one after another and each sees what the previous one committed. The mutator runs
+  in a savepoint taken after the lock (rolling back to it keeps the lock, PostgreSQL 13.3.2). The
+  outcome of every mutation is stored in `mutation_results` in the same transaction; a copy of a
+  handled mutation is answered with it: the rejection with its code and details, or `duplicate`
+  for an applied one. `clients.user_id` now references `users`. Results live as long as the change
+  log (the GC deletes both by the same cutoff); a copy older than that is answered `duplicate`, and
+  its client has to reload anyway.
+- **Alternatives.** A unique key on `(client_id, mutation_id)` alone: it stops the second
+  application only when the insert of the key comes before the mutation's writes, and the loser's
+  answer still has no reason. An advisory lock per client: the same serialisation as the row lock,
+  but outside the data and easy to forget in another code path. Serializable isolation: correct,
+  but a conflict becomes a retry of the whole transaction, and retries are what caused the problem.
+- **Commits.** `e5831da` (test).
 
 ### F-28: a batch of long mutations is refused with 413 on every retry (category 3)
 

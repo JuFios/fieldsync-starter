@@ -31,11 +31,15 @@ export class GcService implements OnModuleInit {
     this.scheduler.addInterval(GC_INTERVAL_NAME, timer);
   }
 
+  /** Deletes change-log entries and mutation results older than the retention; returns the log entries deleted. */
   async collect(): Promise<number> {
     // The cutoff comes from the same clock that stamps created_at, see Clock.
     const retentionMs = this.config.get('CHANGELOG_RETENTION_SECONDS', { infer: true }) * 1000;
     const cutoff = new Date(this.clock.now().getTime() - retentionMs);
     const res = await this.db.query(`DELETE FROM change_log WHERE created_at < $1`, [cutoff]);
+    // Results answer retried copies of a mutation; a client whose copies are older than the log
+    // retention has to reload its state anyway, so they are kept exactly as long as the log.
+    await this.db.query(`DELETE FROM mutation_results WHERE created_at < $1`, [cutoff]);
     return res.rowCount;
   }
 }

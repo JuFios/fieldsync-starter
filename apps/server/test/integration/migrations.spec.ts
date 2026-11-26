@@ -5,12 +5,18 @@ import { Client } from 'pg';
 import { DataSource, type MigrationInterface, type QueryRunner } from 'typeorm';
 import { createDataSource, MIGRATIONS_TABLE } from '../../src/database/data-source';
 import { MIGRATIONS } from '../../src/database/migrations';
+import { InitialSchema1795564800000 } from '../../src/database/migrations/1795564800000-initial-schema';
 import { MIGRATION_LOCK_KEY, pendingMigrations, runMigrations } from '../../src/database/migrator';
 import { createTestDatabase, type TestDatabase } from '../support/database';
 import { describeWithDb } from '../support/integration';
 
 const STARTER_SCHEMA = readFileSync(join(__dirname, '../support/starter-schema.sql'), 'utf8');
 const INITIAL = 'InitialSchema1795564800000';
+/**
+ * The first migration alone: the tests of the migration mechanism (locking, transactions) and of
+ * adopting the original database run on it; the later migrations have tests of their own below.
+ */
+const BASELINE = [InitialSchema1795564800000];
 
 class SlowTable9999999999998 implements MigrationInterface {
   name = 'SlowTable9999999999998';
@@ -81,7 +87,12 @@ describeWithDb('database migrations', () => {
     migrations?: Array<new () => unknown>,
     poolSize = 3,
   ): Promise<DataSource> {
-    const ds = createDataSource({ url: db.url, poolSize, applicationName: 'fieldsync-test', migrations });
+    const ds = createDataSource({
+      url: db.url,
+      poolSize,
+      applicationName: 'fieldsync-test',
+      migrations: migrations ?? BASELINE,
+    });
     sources.push(ds);
     await ds.initialize();
     return ds;
@@ -171,7 +182,7 @@ describeWithDb('database migrations', () => {
 
   it('runs a migration that must not run inside a transaction', async () => {
     const db = await emptyDatabase();
-    const ds = await dataSource(db, [...MIGRATIONS, ConcurrentIndex9999999999999]);
+    const ds = await dataSource(db, [...BASELINE, ConcurrentIndex9999999999999]);
 
     expect(await runMigrations(ds)).toEqual([INITIAL, 'ConcurrentIndex9999999999999']);
 
@@ -183,7 +194,7 @@ describeWithDb('database migrations', () => {
 
   it('applies each migration once when several runs start at the same time', async () => {
     const db = await emptyDatabase();
-    const migrations = [...MIGRATIONS, SlowTable9999999999998];
+    const migrations = [...BASELINE, SlowTable9999999999998];
     const runs = await Promise.all([1, 2, 3].map(async () => runMigrations(await dataSource(db, migrations))));
 
     expect(runs.flat().sort()).toEqual([INITIAL, 'SlowTable9999999999998'].sort());
@@ -241,7 +252,7 @@ describeWithDb('database migrations', () => {
       url: db.url,
       poolSize: 3,
       applicationName: 'fieldsync-test',
-      migrations: [...MIGRATIONS, LongTable9999999999997],
+      migrations: [...BASELINE, LongTable9999999999997],
     });
     const ds = new DataSource({ ...base.options, extra: { options: '-c idle_session_timeout=0' } });
     sources.push(ds);
@@ -258,7 +269,7 @@ describeWithDb('database migrations', () => {
 
   it('reports the migrations as applied, and the lost lock, when the lock connection drops while they run', async () => {
     const db = await emptyDatabase();
-    const ds = await dataSource(db, [...MIGRATIONS, SlowTable9999999999998]);
+    const ds = await dataSource(db, [...BASELINE, SlowTable9999999999998]);
     let run: Promise<string[]> = Promise.resolve([]);
     const warnings = await lockWarnings(async () => {
       run = runMigrations(ds);
@@ -281,5 +292,53 @@ describeWithDb('database migrations', () => {
 
     await expect(run).resolves.toEqual([INITIAL, 'SlowTable9999999999998']);
     expect(warnings).toEqual([expect.stringContaining('The migration lock was lost during the run')]);
+  });
+
+  describe('later migrations', () => {
+    const ALL = MIGRATIONS.map((m) => m.name);
+
+    it('apply in order on an empty database and leave nothing pending', async () => {
+      const db = await emptyDatabase();
+      const ds = await dataSource(db, MIGRATIONS);
+      expect(await runMigrations(ds)).toEqual(ALL);
+      expect(await pendingMigrations(ds)).toEqual([]);
+      expect(await snapshot(db)).toEqual(
+        expect.arrayContaining([
+          'constraint clients clients_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)',
+          'index CREATE INDEX mutation_results_created_idx ON public.mutation_results USING btree (created_at)',
+        ]),
+      );
+    });
+
+    it('apply on top of a database the original server created, keeping its data', async () => {
+      const db = await starterDatabase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO users VALUES ('00000000-0000-4000-8000-000000000002', 'Tom', 'technician', 'tech-a-token');
+          INSERT INTO clients VALUES ('0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', '00000000-0000-4000-8000-000000000002', 7);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      expect(await runMigrations(ds)).toEqual(ALL);
+      const clients = await sql(
+        db,
+        async (c) =>
+          (
+            await c.query<{ client_id: string; last_mutation_id: string }>(
+              'SELECT client_id, last_mutation_id FROM clients',
+            )
+          ).rows,
+      );
+      expect(clients).toEqual([{ client_id: '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', last_mutation_id: '7' }]);
+    });
+
+    it('revert to the first schema', async () => {
+      const db = await emptyDatabase();
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      for (let i = 1; i < MIGRATIONS.length; i += 1) await ds.undoLastMigration();
+      const reference = await starterDatabase();
+      expect(await snapshot(db)).toEqual(await snapshot(reference));
+    });
   });
 });
