@@ -362,6 +362,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
 | F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
+| F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -878,6 +879,28 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   queue. Keeping the server's rows of a mutation in the push answer: the answer would grow with the
   mutation and duplicate what the pull delivers.
 - **Commits.** `ec9fe40` (test).
+
+### F-31: deleting a ticket leaves its parts behind (category 9)
+
+- **What.** `ticket.delete` deleted the ticket row only. Its parts stayed live on the server and on
+  every client, and an adjustment of such a part, made by someone who had not seen the deletion
+  yet, was still applied.
+- **Why it is dangerous.** Concurrent edits do not merge into a consistent result: a delete and a
+  part edit leave a part that belongs to nothing, kept forever in every client's state (and in any
+  snapshot of it), and edited as if the ticket existed.
+- **Reproduce.** `delete-ticket.spec.ts`.
+- **Fix.** A mutator can declare the ticket whose parts it needs (`partsOf`); the server loads and
+  locks them after the ticket, in id order, through a new partial expression index
+  (`entities_part_ticket_idx`, built `CONCURRENTLY`; the test checks the planner can use it).
+  `ticket.delete` deletes the parts with the ticket in the same mutation, each published as a `del`;
+  a later adjustment of such a part is rejected with `NOT_FOUND`. A migration deletes the orphans an
+  existing database already has and publishes their deletion through the log head, so clients drop
+  them too. The client and the reference server of the simulation find a ticket's parts in their
+  state.
+- **Alternatives.** A foreign key with `ON DELETE CASCADE`: rows are never deleted (tombstones keep
+  ids taken), and a cascade would not write the change log. Hiding parts of deleted tickets in the
+  UI only: the data stays and keeps diverging from what the user expects.
+- **Commits.** `6bde1c5` (test).
 
 ## Changes to starter tests
 

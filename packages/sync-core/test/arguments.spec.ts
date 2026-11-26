@@ -1,4 +1,4 @@
-import { MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
+import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from '../src/mutators';
 import type { EntityName, MutatorName, Row } from '../src/types';
 
 /**
@@ -36,6 +36,10 @@ class MemoryTx implements MutatorTx {
 
   del(entity: EntityName, id: string) {
     this.rows.delete(`${entity}/${id}`);
+  }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.rows, ticketId);
   }
 }
 

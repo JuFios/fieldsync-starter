@@ -76,4 +76,22 @@ describeWithDb('deleting a ticket', () => {
       { id: 1, status: 'rejected', code: 'NOT_FOUND', message: 'Part no longer exists' },
     ]);
   });
+
+  it('finds the parts of a ticket through their index', async () => {
+    const client = await ctx.db.connect();
+    try {
+      // The test tables are tiny, so a sequential scan would win; forbid it to see the index can serve.
+      await client.query('BEGIN');
+      await client.query('SET LOCAL enable_seqscan = off');
+      const { rows } = await client.query<{ 'QUERY PLAN': string }>(
+        `EXPLAIN SELECT id, data, site_id FROM entities
+          WHERE entity = 'part' AND NOT deleted AND data->>'ticketId' = $1 ORDER BY id FOR UPDATE`,
+        [randomUUID()],
+      );
+      expect(rows.map((r) => r['QUERY PLAN']).join('\n')).toContain('entities_part_ticket_idx');
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
 });

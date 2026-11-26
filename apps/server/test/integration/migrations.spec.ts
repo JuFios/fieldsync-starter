@@ -306,6 +306,7 @@ describeWithDb('database migrations', () => {
         expect.arrayContaining([
           'constraint clients clients_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)',
           'index CREATE INDEX mutation_results_created_idx ON public.mutation_results USING btree (created_at)',
+          "index CREATE INDEX entities_part_ticket_idx ON public.entities USING btree (((data ->> 'ticketId'::text))) WHERE ((entity = 'part'::text) AND (NOT deleted))",
         ]),
       );
     });
@@ -367,11 +368,50 @@ describeWithDb('database migrations', () => {
       expect(await ds.query('SELECT id, version FROM log_head')).toEqual([{ id: 1, version: '0' }]);
     });
 
+    it('delete the parts the original server left behind and publish their deletion', async () => {
+      const db = await starterDatabase();
+      const site = '00000000-0000-4000-8000-0000000000a1';
+      const [kept, orphan, alive] = [
+        '11111111-1111-4111-8111-111111111111',
+        '22222222-2222-4222-8222-222222222222',
+        '33333333-3333-4333-8333-333333333333',
+      ];
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO entities VALUES
+            ('ticket', '${kept}', '${site}', '{"title":"kept"}', false, 1),
+            ('ticket', '44444444-4444-4444-8444-444444444444', '${site}', NULL, true, 2),
+            ('part', '${orphan}', '${site}', '{"ticketId":"44444444-4444-4444-8444-444444444444"}', false, 3),
+            ('part', '${alive}', '${site}', '{"ticketId":"${kept}"}', false, 4);
+          SELECT setval('change_log_version_seq', 4);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const parts = await ds.query<Array<{ id: string; deleted: boolean; version: string }>>(
+        `SELECT id, deleted, version FROM entities WHERE entity = 'part' ORDER BY id`,
+      );
+      const log = await ds.query<Array<{ version: string; entity_id: string; op: string }>>(
+        `SELECT version, entity_id, op FROM change_log ORDER BY version`,
+      );
+      const head = await ds.query<Array<{ version: string }>>('SELECT version FROM log_head');
+      expect({ parts, log, head }).toEqual({
+        parts: [
+          { id: orphan, deleted: true, version: '5' },
+          { id: alive, deleted: false, version: '4' },
+        ],
+        log: [{ version: '5', entity_id: orphan, op: 'del' }],
+        head: [{ version: '5' }],
+      });
+    });
+
     it('revert to the first schema', async () => {
       const db = await emptyDatabase();
       const ds = await dataSource(db, MIGRATIONS);
       await runMigrations(ds);
-      for (let i = 1; i < MIGRATIONS.length; i += 1) await ds.undoLastMigration();
+      // TypeORM 0.3 reverts with the transaction mode it is given and ignores a migration's own
+      // `transaction = false`, which DROP INDEX CONCURRENTLY needs: revert without transactions.
+      for (let i = 1; i < MIGRATIONS.length; i += 1) await ds.undoLastMigration({ transaction: 'none' });
       const reference = await starterDatabase();
       expect(await snapshot(db)).toEqual(await snapshot(reference));
     });

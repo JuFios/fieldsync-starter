@@ -52,15 +52,34 @@ export interface MutatorTx {
    */
   insert(entity: EntityName, id: string, row: Row): void;
   del(entity: EntityName, id: string): void;
+  /**
+   * The live parts of a ticket, ordered by id. Only for a mutator that declares the ticket in
+   * {@link MutatorDef.partsOf}: the executor loads (and on the server locks) them up front.
+   */
+  partsOf(ticketId: string): Row[];
+}
+
+/** The live parts of a ticket in a map of `entity/id` keys to rows, ordered by id. */
+export function partsInState(state: ReadonlyMap<string, Row>, ticketId: string): Row[] {
+  return [...state]
+    .filter(([key, row]) => key.startsWith('part/') && row.ticketId === ticketId)
+    .map(([, row]) => row)
+    .sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
 }
 
 export interface MutatorDef {
   /** Rows the mutator needs to read; the executor loads them before calling apply. */
   reads(args: Record<string, unknown>): Key[];
+  /** A ticket whose parts the mutator needs (`MutatorTx.partsOf`), loaded after the rows of `reads`. */
+  partsOf?(args: Record<string, unknown>): string | undefined;
   apply(tx: MutatorTx, args: Record<string, unknown>): void;
 }
 
-function def<A>(d: { reads(a: A): Key[]; apply(tx: MutatorTx, a: A): void }): MutatorDef {
+function def<A>(d: {
+  reads(a: A): Key[];
+  partsOf?(a: A): string | undefined;
+  apply(tx: MutatorTx, a: A): void;
+}): MutatorDef {
   return d as unknown as MutatorDef;
 }
 
@@ -254,9 +273,12 @@ export const MUTATORS: Record<MutatorName, MutatorDef> = {
 
   'ticket.delete': def<DeleteArgs>({
     reads: (a) => [{ entity: 'ticket', id: a.id }],
+    // A ticket's parts go with it, so no part outlives its ticket (F-31).
+    partsOf: (a) => (typeof a.id === 'string' ? a.id : undefined),
     apply(tx, a) {
       uuids(a, 'id', 'siteId');
       if (!tx.get('ticket', a.id)) return;
+      for (const part of tx.partsOf(a.id)) tx.del('part', String(part.id));
       tx.del('ticket', a.id);
     },
   }),

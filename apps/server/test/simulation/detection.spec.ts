@@ -48,6 +48,7 @@ describeWithDb('the simulation finds the determinism defects when they are put b
             put: (entity, id, row) => tx.put(entity, id, row),
             insert: (entity, id, row) => tx.insert(entity, id, row),
             del: (entity, id) => tx.del(entity, id),
+            partsOf: (ticketId) => tx.partsOf(ticketId),
           },
           args,
         ),

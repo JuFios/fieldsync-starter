@@ -168,6 +168,12 @@ export class MemoryServer implements SimServer {
         buffer.set(`${entity}/${id}`, undefined);
         writes.push({ op: 'del', entity, id });
       },
+      partsOf: (ticketId) =>
+        [...this.entities.values()]
+          .filter((e) => e.entity === 'part' && e.data?.ticketId === ticketId)
+          .map((e) => visible('part', e.id))
+          .filter((row): row is Row => row !== undefined)
+          .sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1)),
     };
     if (!allowed(m.args.siteId)) throw new MutationRejected('FORBIDDEN');
     def.apply(tx, m.args);

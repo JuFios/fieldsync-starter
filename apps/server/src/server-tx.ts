@@ -31,7 +31,15 @@ class BufferedTx implements MutatorTx {
   constructor(
     private readonly loaded: Map<string, Loaded>,
     private readonly time: string,
+    /** Ticket id → ids of its parts, for the ticket the mutator declared in `partsOf`. */
+    private readonly parts: ReadonlyMap<string, readonly string[]> = new Map(),
   ) {}
+
+  partsOf(ticketId: string): Row[] {
+    const ids = this.parts.get(ticketId);
+    if (!ids) throw new Error(`The parts of ticket ${ticketId} were not loaded (declare it in partsOf)`);
+    return ids.map((id) => this.get('part', id)).filter((row): row is Row => row !== undefined);
+  }
 
   now(): string {
     return this.time;
@@ -117,7 +125,24 @@ export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation,
     });
   }
 
-  const tx = new BufferedTx(loaded, at.toISOString());
+  // The parts of a ticket, after the ticket itself (locked above), in id order.
+  const parts = new Map<string, string[]>();
+  const ofTicket = def.partsOf?.(m.args);
+  if (ofTicket !== undefined) {
+    const { rows } = await c.query<{ id: string; data: Row; site_id: string }>(
+      `SELECT id, data, site_id FROM entities
+        WHERE entity = 'part' AND NOT deleted AND data->>'ticketId' = $1
+        ORDER BY id FOR UPDATE`,
+      [ofTicket],
+    );
+    parts.set(
+      ofTicket,
+      rows.map((r) => r.id),
+    );
+    for (const r of rows) loaded.set(`part/${r.id}`, { row: r.data, siteId: r.site_id });
+  }
+
+  const tx = new BufferedTx(loaded, at.toISOString(), parts);
   def.apply(tx, m.args);
 
   // The last write to each row is the one that counts.

@@ -4,6 +4,7 @@ import {
   MUTATORS,
   MutationRejected,
   mutatorNamed,
+  partsInState,
   ticketEdit,
   type MutatorTx,
 } from '../src/mutators';
@@ -39,6 +40,10 @@ class FakeTx implements MutatorTx {
 
   del(entity: EntityName, id: string) {
     this.rows.delete(`${entity}/${id}`);
+  }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.rows, ticketId);
   }
 }
 
@@ -306,5 +311,26 @@ describe('ticketEdit', () => {
 
   it('is undefined when nothing changed', () => {
     expect(ticketEdit(t, seen, seen)).toBeUndefined();
+  });
+});
+
+describe('ticket.delete', () => {
+  it('deletes the ticket together with its parts, and only its parts', () => {
+    const OTHER = '44444444-4444-4444-8444-444444444444';
+    const tx = new FakeTx([
+      ['ticket', TICKET, ticket('open')],
+      ['part', PART, { id: PART, ticketId: TICKET, siteId: SITE, name: 'Seal', quantity: 1 }],
+      [
+        'part',
+        OTHER,
+        { id: OTHER, ticketId: '55555555-5555-4555-8555-555555555555', siteId: SITE, name: 'Valve', quantity: 1 },
+      ],
+    ]);
+    MUTATORS['ticket.delete'].apply(tx, { id: TICKET, siteId: SITE });
+    expect([...tx.rows.keys()]).toEqual([`part/${OTHER}`]);
+  });
+
+  it('declares the ticket whose parts it needs', () => {
+    expect(MUTATORS['ticket.delete'].partsOf?.({ id: TICKET, siteId: SITE })).toBe(TICKET);
   });
 });

@@ -1,5 +1,5 @@
 import { fc, test } from '@fast-check/jest';
-import { MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
+import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from '../src/mutators';
 import type { EntityName, MutatorName, Row, TicketStatus } from '../src/types';
 
 /**
@@ -53,6 +53,10 @@ class RecordingTx implements MutatorTx {
   del(entity: EntityName, id: string): void {
     this.rows.delete(`${entity}/${id}`);
     this.writes.push(['del', entity, id]);
+  }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.rows, ticketId);
   }
 }
 

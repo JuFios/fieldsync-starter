@@ -1,5 +1,5 @@
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
-import { MUTATORS, MutationRejected, type MutatorTx } from './mutators';
+import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
 import type { Transport } from './transport';
 import {
@@ -74,6 +74,10 @@ class MapTx implements MutatorTx {
 
   del(entity: EntityName, id: string): void {
     this.state.delete(`${entity}/${id}`);
+  }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.state, ticketId);
   }
 }
 
