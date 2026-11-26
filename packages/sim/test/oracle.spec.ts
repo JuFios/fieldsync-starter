@@ -1,5 +1,6 @@
 import type { Row } from '@fieldsync/sync-core';
 import { canonicalJson, compareWithServer } from '../src/oracle';
+import { convergenceViolations } from '../src/simulation';
 import type { StoredRow } from '../src/types';
 
 const NORTH = 'north';
@@ -77,5 +78,38 @@ describe('canonicalJson', () => {
   it('writes undefined as JSON does: null in an array and at the top level', () => {
     expect(canonicalJson([undefined, 1])).toBe('[null,1]');
     expect(canonicalJson(undefined)).toBe('null');
+  });
+});
+
+describe('convergenceViolations', () => {
+  it('reports only foreign-site-rows when foreign rows are the whole difference', () => {
+    const divergence = compareWithServer(server, new Set([NORTH]), client([...northRows(), ['ticket/t2', {}]]));
+    if (!divergence) throw new Error('expected a divergence');
+    expect(convergenceViolations('c0', divergence).map((v) => v.signature)).toEqual(['foreign-site-rows']);
+  });
+
+  it('reports a divergence in the own sites even when the client also holds foreign rows', () => {
+    // A known defect that leaks foreign rows (tolerated by some profiles) must not hide a lost row.
+    const divergence = compareWithServer(
+      server,
+      new Set([NORTH]),
+      client([
+        ['part/p1', { quantity: 2, siteId: NORTH, id: 'p1' }],
+        ['ticket/t2', {}],
+      ]),
+    );
+    if (!divergence) throw new Error('expected a divergence');
+    const violations = convergenceViolations('c0', divergence);
+    expect(violations.map((v) => v.signature)).toEqual(['foreign-site-rows', 'divergence']);
+    expect(violations.map((v) => ('client' in v ? v.detail : undefined))).toEqual([
+      { missing: [], unexpected: ['ticket/t2'], foreign: ['ticket/t2'], different: [] },
+      { missing: ['ticket/t1'], unexpected: [], foreign: [], different: [] },
+    ]);
+  });
+
+  it('reports a divergence alone when no row is foreign', () => {
+    const divergence = compareWithServer(server, new Set([NORTH]), client([]));
+    if (!divergence) throw new Error('expected a divergence');
+    expect(convergenceViolations('c0', divergence).map((v) => v.signature)).toEqual(['divergence']);
   });
 });
