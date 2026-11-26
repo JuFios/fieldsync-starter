@@ -16,4 +16,23 @@ describeWithDb('mutations the server rejects', () => {
       results: [{ id: 1, status: 'rejected', code: 'NOT_FOUND', message: 'Part no longer exists' }],
     });
   });
+
+  it('rejects a mutation whose message holds client text that reads like a connection error', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const ticket = randomUUID();
+    const to = 'Connection terminated unexpectedly';
+    const mutations = [
+      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'Pump', description: '' } },
+      { id: 2, name: 'ticket.setStatus', args: { id: ticket, siteId: site, from: 'open', to } },
+      { id: 3, name: 'ticket.setStatus', args: { id: ticket, siteId: site, from: 'open', to: 'in_progress' } },
+    ];
+    const res = await ctx.api.post<PushResponse>('/sync/push', { clientId: randomUUID(), mutations }, tech.token);
+    expect(res.status).toBe(201);
+    expect(res.body.results.map((r) => [r.id, r.status, r.status === 'rejected' ? r.code : undefined])).toEqual([
+      [1, 'applied', undefined],
+      [2, 'rejected', 'INVALID_TRANSITION'],
+      [3, 'applied', undefined],
+    ]);
+  });
 });

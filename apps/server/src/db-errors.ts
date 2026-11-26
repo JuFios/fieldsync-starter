@@ -1,4 +1,5 @@
 import { HttpStatus } from '@nestjs/common';
+import { MutationRejected } from '@fieldsync/sync-core';
 import { ProblemException } from './problem';
 
 /**
@@ -12,7 +13,16 @@ const TRANSIENT_CLASSES = new Set(['08', '40', '53', '57']);
 const TRANSIENT_CODES = new Set(['55P03', '25P03']);
 /** Errors of the network or of a connection the pool already lost, which carry no SQLSTATE. */
 const TRANSIENT_NODE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EHOSTUNREACH']);
-const TRANSIENT_MESSAGES = /Connection terminated|connection error|Client has encountered a connection error/i;
+/**
+ * The whole message of node-postgres errors for a connection that broke, which carry no code.
+ * Matched whole, never as a substring: other messages can embed text a client sent.
+ */
+const TRANSIENT_MESSAGES = new Set([
+  'Connection terminated',
+  'Connection terminated unexpectedly',
+  'Connection terminated due to connection timeout',
+  'Client has encountered a connection error and is not queryable',
+]);
 
 /** Seconds a client should wait before retrying after a transient failure (the Retry-After header). */
 export const RETRY_AFTER_SECONDS = 1;
@@ -30,9 +40,11 @@ function chain(err: unknown): unknown[] {
 
 /**
  * Whether running the same work again can succeed: the database was busy or unreachable, not wrong
- * about the data. Looks at the error, TypeORM's `driverError` and the `cause` chain.
+ * about the data. Looks at the error, TypeORM's `driverError` and the `cause` chain. A mutator's
+ * rejection is final whatever its message says.
  */
 export function isTransient(err: unknown): boolean {
+  if (err instanceof MutationRejected) return false;
   return chain(err).some((e) => {
     const { code, message } = e as { code?: unknown; message?: unknown };
     if (typeof code === 'string') {
@@ -41,7 +53,7 @@ export function isTransient(err: unknown): boolean {
       }
       if (TRANSIENT_NODE_CODES.has(code)) return true;
     }
-    return typeof message === 'string' && TRANSIENT_MESSAGES.test(message);
+    return code === undefined && typeof message === 'string' && TRANSIENT_MESSAGES.has(message);
   });
 }
 

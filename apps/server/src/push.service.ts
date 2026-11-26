@@ -105,10 +105,12 @@ export class PushService {
       entries = await c.savepoint(() => applyMutation(c, user, m, at));
       result = { id: m.id, status: 'applied' };
     } catch (err) {
-      if (isTransient(err)) throw err;
       if (err instanceof MutationRejected) {
         // The rejection is recorded like an application: the mutation is final and the next follows.
+        // Checked first: its message may hold text the client sent, which must not make it transient.
         result = rejected(m.id, err);
+      } else if (isTransient(err)) {
+        throw err;
       } else {
         // The same mutation would fail the same way on every retry (a defect of the mutator or of the
         // data, not of the moment): it is rejected, so the queue behind it moves on.

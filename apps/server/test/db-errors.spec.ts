@@ -1,3 +1,4 @@
+import { MutationRejected } from '@fieldsync/sync-core';
 import { QueryFailedError } from 'typeorm';
 import { isTransient } from '../src/db-errors';
 
@@ -40,7 +41,10 @@ describe('isTransient', () => {
     ['a string'],
     [null],
     [Object.assign(new Error('x'), { code: 'ERR_X' })],
-  ])('treats anything else as not transient: %s', (err) => {
+    [new MutationRejected('INVALID_TRANSITION', 'open -> Connection terminated is not allowed')],
+    [new MutationRejected('BAD_ARGS', 'Connection terminated')],
+    [new TypeError("Cannot read properties of undefined (reading 'Connection terminated unexpectedly')")],
+  ])('treats anything else as not transient, whatever text the message embeds: %s', (err) => {
     expect(isTransient(err)).toBe(false);
   });
 });
