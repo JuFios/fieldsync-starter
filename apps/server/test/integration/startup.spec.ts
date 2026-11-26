@@ -108,15 +108,22 @@ describeWithDb('server startup', () => {
     const server = await startApp((await database()).url, { GC_INTERVAL_MS: '1000' });
     const scheduler = server.app.get(SchedulerRegistry);
     const collect = jest.spyOn(server.app.get(GcService), 'collect');
+    let runs: number;
     try {
       expect(scheduler.getIntervals()).toEqual([GC_INTERVAL_NAME]);
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
-      expect(collect).toHaveBeenCalledTimes(1);
+      // The interval started during init, before the spy: wait for a run instead of timing one.
+      const deadline = Date.now() + 5_000;
+      while (collect.mock.calls.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(collect).toHaveBeenCalled();
     } finally {
       await server.close();
+      runs = collect.mock.calls.length;
     }
     expect(scheduler.getIntervals()).toEqual([]);
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
-    expect(collect).toHaveBeenCalledTimes(1);
+    // Longer than one period: a timer that survived the close would have run again.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(collect).toHaveBeenCalledTimes(runs);
   });
 });
