@@ -2,7 +2,8 @@ import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
-import { Db } from '../../src/db';
+import { Db, SavepointRollbackError } from '../../src/db';
+import { isTransient } from '../../src/db-errors';
 import { mockConfig } from './support';
 
 /**
@@ -185,12 +186,19 @@ describe('Db', () => {
         ]);
       });
 
-      it('throws the failure to roll back to the savepoint, with the original error as its cause', async () => {
+      it('throws the failure to roll back to the savepoint as the cause, keeping the original error', async () => {
         const failure = new Error('rejected');
-        runner.rollbackTransaction.mockRejectedValueOnce(new Error('connection terminated'));
+        const lost = new Error('Connection terminated unexpectedly');
+        runner.rollbackTransaction.mockRejectedValueOnce(lost);
         const caught = await db.tx((sql) => sql.savepoint(() => Promise.reject(failure))).catch((e: unknown) => e);
-        expect(caught).toEqual(new Error('Rollback to savepoint failed after "rejected": connection terminated'));
-        expect((caught as Error).cause).toBe(failure);
+        expect(caught).toBeInstanceOf(SavepointRollbackError);
+        expect(caught).toMatchObject({
+          message: 'Rollback to savepoint failed after "rejected": Connection terminated unexpectedly',
+          cause: lost,
+          original: failure,
+        });
+        // A lost connection while rolling back is a moment's failure, not the mutation's.
+        expect(isTransient(caught)).toBe(true);
         expect(runner.release).toHaveBeenCalled();
       });
     });

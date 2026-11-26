@@ -34,9 +34,25 @@ export interface TxSql extends Sql {
    * Runs `fn` inside a savepoint of the transaction: releases it when `fn` resolves; when `fn` throws,
    * rolls back to it (undoing `fn`'s statements and releasing the locks they took, PostgreSQL
    * 13.3.2) and rethrows, leaving the transaction usable. If rolling back to the savepoint fails
-   * (the connection is gone), that failure is thrown, with `fn`'s error as its cause.
+   * (the connection is gone), a {@link SavepointRollbackError} is thrown instead.
    */
   savepoint<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * Rolling back to a savepoint failed. Its `cause` is that failure (typically a lost connection, so
+ * the transient-error check sees it); `original` is the error that made the rollback necessary.
+ */
+export class SavepointRollbackError extends Error {
+  constructor(
+    readonly original: unknown,
+    rollbackError: unknown,
+  ) {
+    super(`Rollback to savepoint failed after "${messageOf(original)}": ${messageOf(rollbackError)}`, {
+      cause: rollbackError,
+    });
+    this.name = 'SavepointRollbackError';
+  }
 }
 
 async function run<T>(runner: QueryRunner, sql: string, params?: unknown[]): Promise<SqlResult<T>> {
@@ -60,9 +76,7 @@ async function savepoint<T>(runner: QueryRunner, fn: () => Promise<T>): Promise<
     try {
       await runner.rollbackTransaction();
     } catch (rollbackErr) {
-      throw new Error(`Rollback to savepoint failed after "${messageOf(err)}": ${messageOf(rollbackErr)}`, {
-        cause: err,
-      });
+      throw new SavepointRollbackError(err, rollbackErr);
     }
     throw err;
   }
