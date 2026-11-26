@@ -2,8 +2,8 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { CommanderError } from '@commander-js/extra-typings';
-import type { CheckReport, Signature } from '@fieldsync/sim';
-import { EXIT, parseCliOptions, type CliOptions, type CliProfile } from './cli-options';
+import { EXIT, parseCliOptions, type CliOptions } from './cli-options';
+import { formatProfileSummary, formatProgress, type ProfileSummary } from './cli-report';
 
 async function version(): Promise<string> {
   const manifest = JSON.parse(await readFile(resolve(__dirname, '../../../package.json'), 'utf8')) as {
@@ -12,14 +12,9 @@ async function version(): Promise<string> {
   return manifest.version;
 }
 
-interface ProfileSummary {
-  profile: CliProfile;
-  ms: number;
-  report: CheckReport;
-}
-
 /**
- * Runs every chosen profile. The engine, the server and the database driver are loaded only here,
+ * Runs every chosen profile and prints each profile's summary as soon as it is done, so a later
+ * failure or Ctrl+C never loses the results of finished profiles. The engine, the server and the database driver are loaded only here,
  * after the options are valid, so `--help`, `--version` and option errors start fast.
  */
 async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSummary[]> {
@@ -59,7 +54,10 @@ async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSum
           if (options.trace && (options.runs === 1 || result.violations.length > 0)) {
             console.log(`Trace of ${name} seed ${options.seed} run ${index}:\n${result.trace.join('\n')}\n`);
           }
-          if ((index + 1) % 50 === 0) console.error(`  ${name}: ${index + 1}/${options.runs} runs`);
+          const done = index + 1;
+          if (done % 50 === 0 || done === options.runs) {
+            console.error(formatProgress(name, done, options.runs, Date.now() - started));
+          }
         },
       });
       if (report.failure) {
@@ -68,7 +66,9 @@ async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSum
         }
         console.log(formatFailure(report.failure), '\n');
       }
-      summaries.push({ profile: name, ms: Date.now() - started, report });
+      const summary: ProfileSummary = { profile: name, ms: Date.now() - started, report };
+      summaries.push(summary);
+      console.log(formatProfileSummary(summary, PROFILES[name].allowed));
     }
   } finally {
     await server?.close();
@@ -79,38 +79,6 @@ async function run(options: CliOptions, signal: AbortSignal): Promise<ProfileSum
 
 /** A problem with the environment the user can fix, reported like an invalid option. */
 class UsageProblem extends Error {}
-
-function printSummary(summaries: ProfileSummary[], allowed: (profile: CliProfile) => readonly Signature[]): void {
-  console.log('Summary');
-  for (const { profile, ms, report } of summaries) {
-    const runs = report.results.length;
-    const clean = report.results.filter((r) => r.violations.length === 0).length;
-    console.log(
-      `  ${profile}: seed ${report.seed}, ${runs} runs in ${(ms / 1000).toFixed(1)} s ` +
-        `(${(ms / Math.max(runs, 1)).toFixed(0)} ms/run), ${clean} without violations` +
-        `${report.failure ? `, stopped at path ${report.failure.path} by an unexpected violation` : ''}`,
-    );
-    const bySignature = new Map<Signature, number[]>();
-    report.results.forEach((r, path) => {
-      for (const signature of new Set(r.violations.map((v) => v.signature))) {
-        bySignature.set(signature, [...(bySignature.get(signature) ?? []), path]);
-      }
-    });
-    for (const [signature, paths] of bySignature) {
-      const label = allowed(profile).includes(signature) ? 'known defect' : 'UNEXPECTED';
-      const shown = paths.slice(0, 10).join(', ') + (paths.length > 10 ? `, +${paths.length - 10}` : '');
-      console.log(`    ${signature} (${label}): ${paths.length} runs, paths ${shown}`);
-    }
-    const totals: Record<string, number> = {};
-    for (const r of report.results) {
-      for (const [key, value] of Object.entries(r.stats)) totals[key] = (totals[key] ?? 0) + value;
-    }
-    const averages = Object.entries(totals)
-      .map(([key, total]) => `${key}=${(total / Math.max(runs, 1)).toFixed(2)}`)
-      .sort();
-    console.log(`    per run: ${averages.join(' ')}`);
-  }
-}
 
 async function main(argv: readonly string[]): Promise<number> {
   let options: CliOptions;
@@ -139,8 +107,6 @@ async function main(argv: readonly string[]): Promise<number> {
   } finally {
     process.off('SIGINT', onSigint);
   }
-  const { PROFILES } = await import('@fieldsync/sim');
-  printSummary(summaries, (profile) => PROFILES[profile].allowed);
   if (controller.signal.aborted) return EXIT.interrupted;
   return summaries.some((s) => s.report.failure) ? EXIT.violations : EXIT.ok;
 }
