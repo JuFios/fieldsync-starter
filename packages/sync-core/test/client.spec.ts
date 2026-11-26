@@ -125,6 +125,17 @@ describe('SyncClient', () => {
     expect(client.rows('ticket').map((t) => t.id)).toEqual([id]);
   });
 
+  it('keeps the timestamps of an optimistic ticket stable while it waits for the server', () => {
+    jest.useFakeTimers({ now: new Date('2030-01-01T00:00:00.000Z') });
+    const client = makeClient();
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Leaking valve', description: '' });
+    const before = client.rows('ticket')[0];
+    jest.setSystemTime(new Date('2030-01-01T00:10:00.000Z'));
+    const after = client.rows('ticket')[0];
+    expect(after).toEqual(before);
+    expect(before.createdAt).toBe('2030-01-01T00:00:00.000Z');
+  });
+
   it('numbers local mutations sequentially', async () => {
     const transport = new OfflineTransport();
     const client = makeClient(transport);
