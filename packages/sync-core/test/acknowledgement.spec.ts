@@ -82,4 +82,33 @@ describe('acknowledged mutations', () => {
       c.dispose();
     }
   });
+
+  it('stay visible after a duplicate answer without a version, until a pull completes', async () => {
+    // A copy answered after the server's results were collected carries no version.
+    const transport = new ScriptedTransport();
+    transport.push = (req: PushRequest) =>
+      Promise.resolve({
+        results: req.mutations.map((m) => ({ id: m.id, status: 'duplicate' as const })),
+        lastMutationId: req.mutations.at(-1)?.id ?? 0,
+      });
+    const c = client(transport);
+    try {
+      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.sync();
+      expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
+        pending: 1,
+        titles: ['Mine'],
+      });
+      transport.pulls = [
+        () => Promise.resolve({ changes: [ticketChange(3)], nextCursor: 3, hasMore: false, lastMutationId: 1 }),
+      ];
+      await c.sync();
+      expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
+        pending: 0,
+        titles: ['Mine'],
+      });
+    } finally {
+      c.dispose();
+    }
+  });
 });

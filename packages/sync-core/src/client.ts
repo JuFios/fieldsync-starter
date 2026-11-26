@@ -39,6 +39,12 @@ interface Queued {
    * so an interrupted pull never takes the user's change out of the view (F-30). It is not sent again.
    */
   appliedAt?: number;
+  /**
+   * Set when the server answered a copy of the mutation as a duplicate without a version (its
+   * result was collected): the change's version is unknown, so the mutation stays in the view until
+   * a pull completes, and is not sent again.
+   */
+  awaitingPull?: true;
 }
 
 const utf8 = new TextEncoder();
@@ -260,7 +266,7 @@ export class SyncClient {
     const batch: Mutation[] = [];
     let bytes = this.envelopeBytes();
     for (const q of this.pending) {
-      if (q.appliedAt !== undefined) continue;
+      if (q.appliedAt !== undefined || q.awaitingPull) continue;
       // A comma separates every mutation after the first.
       const added = q.bytes + (batch.length > 0 ? 1 : 0);
       if (batch.length === MAX_PUSH_MUTATIONS || bytes + added > MAX_PUSH_BODY_BYTES) break;
@@ -272,7 +278,7 @@ export class SyncClient {
 
   /** Mutations the server has not answered yet. */
   private unsent(): Queued[] {
-    return this.pending.filter((q) => q.appliedAt === undefined);
+    return this.pending.filter((q) => q.appliedAt === undefined && !q.awaitingPull);
   }
 
   private async push(): Promise<void> {
@@ -291,6 +297,8 @@ export class SyncClient {
           ...(r.details === undefined ? {} : { details: r.details }),
         });
         done.add(r.id);
+      } else if (r.version === undefined && r.status === 'duplicate') {
+        queued.awaitingPull = true;
       } else if (r.version === undefined || r.version <= this.cursor) {
         // Nothing to wait for: the mutation changed nothing, or the client has its change already.
         done.add(r.id);
@@ -324,6 +332,7 @@ export class SyncClient {
       this.acknowledge(resp.lastMutationId);
       this.pending = this.pending.filter((q) => {
         if (q.appliedAt !== undefined) return q.appliedAt > this.cursor;
+        if (q.awaitingPull) return resp.hasMore;
         // A mutation whose answer was lost: the last page comes from the same snapshot as the
         // client's last applied id, so every change of those mutations is in the pages read.
         return resp.hasMore || q.mutation.id > resp.lastMutationId;
