@@ -141,6 +141,7 @@ errors.
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
+| `JSON_BODY_LIMIT_BYTES` | `2097152` | 1048576–67108864 | Largest JSON request body. Never below the 1 MiB the client puts in one push (`MAX_PUSH_BODY_BYTES`), so its batches are not refused for their size |
 | `API_DOCS_ENABLED` | `false` | `true`, `false` | Serve the OpenAPI description at `/docs-json` and Swagger UI at `/docs`, without a token. Off by default so the API surface is not published by accident |
 
 In Docker compose every service has a memory and CPU limit (Postgres 2 CPUs and 1 GiB, the Node
@@ -355,6 +356,8 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-22 | 7 | Queued mutations keep a live reference to the caller's arguments | Fixed |
 | F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Open (known defect) |
 | F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
+| F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
+| F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -694,6 +697,50 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   deleted part's) is rejected with `ID_CONFLICT`. Retried pushes are deduplicated by mutation id, so
   the early return was not needed for idempotency.
 - **Commits.** `dec7ec0` (test), `dfe8082` (fix).
+
+### F-28: a batch of long mutations is refused with 413 on every retry (category 3)
+
+- **What.** The client put up to 100 mutations in one push whatever their size, and the server kept
+  Express's default JSON body limit of 100 KB. Ten tickets with a 5000-character description are
+  already more than that.
+- **Why it is dangerous.** The server refuses the whole body with 413 before any mutation runs; the
+  client retries the same batch forever, so everything queued behind it never reaches the server
+  (the same poison effect as F-23, for valid mutations).
+- **Reproduce.** `body-limit.spec.ts`, "accepts a push body as large as the client sends", and
+  `push-batches.spec.ts`, "splits a queue of long mutations into bodies the server accepts, in order".
+- **Fix.** The protocol fixes the largest push body (`MAX_PUSH_BODY_BYTES`, 1 MiB of UTF-8 JSON, in
+  `sync-core`). The client splits its queue into bodies of at most 100 mutations and that many
+  bytes, and `mutate` refuses a single mutation that could never fit (a `TypeError`, like an
+  unsendable value in F-22). The server's JSON limit is `JSON_BODY_LIMIT_BYTES` (2 MiB by default,
+  never below the protocol's 1 MiB), set with `app.useBodyParser` as the NestJS documentation
+  describes; a larger body is still a 413 and applies nothing.
+- **Alternatives.** Only raising the server limit: the largest valid batch is about 3 MB (control
+  characters take six bytes each in JSON), and any fixed limit can be exceeded by a long enough
+  queue. Only fewer mutations per batch: the count does not bound the bytes. Skipping a mutation
+  the server refuses for its size: it would be lost although it is valid.
+- **Commits.** `acf00e3` (test).
+
+### F-29: unvalidated pull parameters and client ids (other)
+
+- **What.** Pull read `cursor` and `limit` with `Number(x) || 0`: `cursor=abc` became 0, a full
+  resync from the start of the log, and `-5`, `1e3` or a repeated parameter were accepted too;
+  `cursor=1.5`, `limit=1.5` and values beyond `bigint` reached Postgres and failed with 500. Push and
+  pull took any string as the client id, so one with a NUL character (which Postgres cannot store)
+  failed with 500.
+- **Why it is dangerous.** The server must not trust its input (task, section 4): a malformed
+  request silently changes what the client receives, or turns into a server error that hides the
+  client's bug.
+- **Reproduce.** `request-validation.spec.ts`.
+- **Fix.** `PushRequestDto` and `PullQueryDto` are checked by the global `ValidationPipe`: decimal
+  integers only (the same conversion as the settings, so `1e3` and `""` are refused), cursors and
+  mutation ids up to 2^53 − 1 (the integers JSON numbers carry exactly), a page of 1 to 500 changes,
+  and UUID client ids, which is what every client generates. Anything else is a 400. The mutator
+  arguments are not part of the DTO check: they reach the mutator untouched and are validated there,
+  in the code the client runs too, so one bad argument rejects only its own mutation.
+- **Alternatives.** `ParseIntPipe` per parameter: it checks the digits but no range, and has no
+  answer for the client id. `enableImplicitConversion`: turns `""` into 0 and `1e3` into 1000.
+  Clamping an out-of-range `limit` instead of refusing it: hides the client's mistake.
+- **Commits.** `0432efb` (test), `6b19648` (fix).
 
 ## Changes to starter tests
 

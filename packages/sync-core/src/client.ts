@@ -2,7 +2,14 @@ import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
 import type { Transport } from './transport';
-import type { EntityName, Mutation, MutatorName, Row } from './types';
+import {
+  MAX_PUSH_BODY_BYTES,
+  MAX_PUSH_MUTATIONS,
+  type EntityName,
+  type Mutation,
+  type MutatorName,
+  type Row,
+} from './types';
 
 export type SyncStatus = 'idle' | 'syncing' | 'offline';
 
@@ -15,6 +22,15 @@ export interface Rejection {
 interface Queued {
   mutation: Mutation;
   queuedAt: string;
+  /** UTF-8 bytes of the mutation's JSON, for splitting the queue into push bodies. */
+  bytes: number;
+}
+
+const utf8 = new TextEncoder();
+
+/** UTF-8 bytes of a value's JSON; the same in Node and browsers. */
+function jsonBytes(value: unknown): number {
+  return utf8.encode(JSON.stringify(value)).length;
 }
 
 export interface SyncClientOptions {
@@ -139,7 +155,11 @@ export class SyncClient {
       name,
       args: wireArgs(args),
     };
-    this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString() });
+    const bytes = jsonBytes(mutation);
+    if (this.envelopeBytes() + bytes > MAX_PUSH_BODY_BYTES) {
+      throw new TypeError(`A mutation may take at most ${MAX_PUSH_BODY_BYTES} bytes of JSON in a push`);
+    }
+    this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString(), bytes });
     this.emit();
     void this.sync();
   }
@@ -185,9 +205,32 @@ export class SyncClient {
     }
   }
 
+  /** Bytes of a push body with no mutations. */
+  private envelopeBytes(): number {
+    return jsonBytes({ clientId: this.clientId, mutations: [] });
+  }
+
+  /**
+   * The head of the queue that fits in one push: at most {@link MAX_PUSH_MUTATIONS} mutations and
+   * {@link MAX_PUSH_BODY_BYTES} bytes. `mutate` refuses a mutation that does not fit on its own, so
+   * the batch is never empty while the queue is not.
+   */
+  private nextBatch(): Mutation[] {
+    const batch: Mutation[] = [];
+    let bytes = this.envelopeBytes();
+    for (const q of this.pending) {
+      // A comma separates every mutation after the first.
+      const added = q.bytes + (batch.length > 0 ? 1 : 0);
+      if (batch.length === MAX_PUSH_MUTATIONS || bytes + added > MAX_PUSH_BODY_BYTES) break;
+      batch.push(q.mutation);
+      bytes += added;
+    }
+    return batch;
+  }
+
   private async push(): Promise<void> {
     if (this.pending.length === 0) return;
-    const batch = this.pending.slice(0, 100).map((q) => q.mutation);
+    const batch = this.nextBatch();
     const resp = await this.transport.push({ clientId: this.clientId, mutations: batch });
     const handled = new Set(resp.results.map((r) => r.id));
     for (const r of resp.results) {

@@ -64,3 +64,17 @@ describe('push batches', () => {
     }
   });
 });
+
+describe('mutate', () => {
+  it('refuses a mutation that cannot fit in one push, queueing nothing', () => {
+    const transport = new RecordingTransport();
+    const client = new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+    try {
+      const args = { id: ticketId(1), siteId: SITE, title: 'T', description: '', notes: 'x'.repeat(1_048_576) };
+      expect(() => client.mutate('ticket.create', args)).toThrow(TypeError);
+      expect(client.pendingCount).toBe(0);
+    } finally {
+      client.dispose();
+    }
+  });
+});

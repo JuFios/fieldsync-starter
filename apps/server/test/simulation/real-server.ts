@@ -1,5 +1,6 @@
 import { Catch, HttpException, type ArgumentsHost, type INestApplication } from '@nestjs/common';
 import { BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow } from '@fieldsync/sim';
 import type { EntityName, Row } from '@fieldsync/sync-core';
@@ -90,7 +91,9 @@ export class RealServer implements SimServer {
       .overrideProvider(Clock)
       .useValue(clock)
       .compile();
-    const app = configureApp(moduleRef.createNestApplication({ logger: false, abortOnError: false }));
+    const app = configureApp(
+      moduleRef.createNestApplication<NestExpressApplication>({ logger: false, abortOnError: false }),
+    );
     // The filter is created before the server object, so it reaches the server through this holder.
     const holder: { server?: RealServer } = {};
     const sink = (error: ServerError) => holder.server?.errors.push(error);
@@ -98,7 +101,7 @@ export class RealServer implements SimServer {
     // The binding's own client is the only one, and it keeps one connection alive between requests.
     // Without this, Node closes that connection after keepAliveTimeout of idleness, and a request sent
     // as it closes fails with ECONNRESET. 0 disables the timeout (Node's http.Server documentation).
-    (app.getHttpServer() as Server).keepAliveTimeout = 0;
+    app.getHttpServer().keepAliveTimeout = 0;
     try {
       // Listening once keeps the server under our control: supertest binds a server that is not
       // listening to a new ephemeral port for every request and closes it afterwards.
@@ -109,7 +112,7 @@ export class RealServer implements SimServer {
     }
     const db = new Pool({ connectionString: databaseUrl, max: 2, application_name: 'fieldsync-sim' });
     db.on('error', () => undefined);
-    const server = new RealServer(app, app.getHttpServer() as Server, clock, db);
+    const server = new RealServer(app, app.getHttpServer(), clock, db);
     holder.server = server;
     return server;
   }

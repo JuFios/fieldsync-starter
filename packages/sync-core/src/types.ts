@@ -20,6 +20,16 @@ export interface MutationResult {
   error?: string;
 }
 
+/**
+ * The most bytes (UTF-8 JSON) one push body may have. The client splits its queue into bodies of at
+ * most this size and refuses a single mutation that would not fit; the server accepts at least this
+ * much (its JSON body limit can only be configured higher).
+ */
+export const MAX_PUSH_BODY_BYTES = 1_048_576;
+
+/** The most mutations one push may carry. */
+export const MAX_PUSH_MUTATIONS = 100;
+
 export interface PushRequest {
   clientId: string;
   mutations: Mutation[];

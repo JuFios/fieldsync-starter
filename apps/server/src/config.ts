@@ -1,3 +1,4 @@
+import { MAX_PUSH_BODY_BYTES } from '@fieldsync/sync-core';
 import { ConfigService } from '@nestjs/config';
 import { Expose, plainToInstance, Transform, type TransformFnParams } from 'class-transformer';
 import { IsBoolean, IsDefined, IsString, Matches, validateSync, type ValidationArguments } from 'class-validator';
@@ -74,6 +75,14 @@ export class EnvironmentVariables {
   @Expose()
   @IntegerIn(1_000, MAX_TIMER_MS)
   GC_INTERVAL_MS = 3_600_000;
+
+  /**
+   * Largest JSON request body, in bytes. At least what the client puts in one push, so a batch the
+   * client sends is never refused for its size; at most 64 MiB.
+   */
+  @Expose()
+  @IntegerIn(MAX_PUSH_BODY_BYTES, 67_108_864)
+  JSON_BODY_LIMIT_BYTES = 2_097_152;
 
   /** Serve the OpenAPI description and Swagger UI at /docs. */
   @Expose()

@@ -30,4 +30,24 @@ describeWithDb('push body size', () => {
       applied: mutations.length,
     });
   });
+
+  describe('with a configured limit', () => {
+    const limited = useIntegration({ JSON_BODY_LIMIT_BYTES: String(MAX_PUSH_BODY_BYTES) });
+
+    it('refuses a larger body with 413 without applying any of it', async () => {
+      const site = await limited.fixtures.site();
+      const tech = await limited.fixtures.technician(site);
+      const id = randomUUID();
+      const mutations: Mutation[] = [
+        {
+          id: 1,
+          name: 'ticket.create',
+          args: { id, siteId: site, title: 'T', description: 'x'.repeat(MAX_PUSH_BODY_BYTES) },
+        },
+      ];
+      const res = await limited.api.post('/sync/push', { clientId: randomUUID(), mutations }, tech.token);
+      const { rows } = await limited.db.query(`SELECT 1 FROM entities WHERE id = $1`, [id]);
+      expect({ status: res.status, stored: rows.length }).toEqual({ status: 413, stored: 0 });
+    });
+  });
 });

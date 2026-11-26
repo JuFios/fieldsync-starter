@@ -14,10 +14,8 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { MAX_PUSH_MUTATIONS } from '@fieldsync/sync-core';
 import { IntegerIn } from './validation';
-
-/** Most mutations in one push; the client sends larger queues in several batches. */
-export const MAX_PUSH_MUTATIONS = 100;
 
 /** Most changes one pull returns. */
 export const MAX_PULL_LIMIT = 500;
