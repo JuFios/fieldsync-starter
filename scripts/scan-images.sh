@@ -7,8 +7,7 @@
 # the trivy-action tags were rewritten to point at credential-stealing code, GHSA-69fq-xp46-6x23).
 # Only the findings are listed (`--table-mode detailed`): the summary table would add a row for
 # every package of the image, most of them without findings. Each image is handed over as a
-# `docker save` archive, mounted read-only, so the scanner gets no
-# access to the Docker daemon.
+# `docker save` archive, mounted read-only, so the scanner gets no access to the Docker daemon.
 #
 # Usage: scripts/scan-images.sh IMAGE...   (env: TRIVY_SEVERITY, default HIGH,CRITICAL)
 set -euo pipefail
@@ -30,10 +29,11 @@ for image in "$@"; do
   archive="$work/image.tar"
   docker save --output "$archive" "$image"
   echo "== $image ($SEVERITY)"
-  docker run --rm \
+  # As the calling user, so the cache it writes can be removed afterwards (as root it could not).
+  docker run --rm --user "$(id -u):$(id -g)" \
     -v "$archive:/scan/image.tar:ro" \
-    -v "$work/cache:/root/.cache/trivy" \
-    "$TRIVY_IMAGE" image --input /scan/image.tar --scanners vuln --severity "$SEVERITY" \
+    -v "$work/cache:/cache" \
+    "$TRIVY_IMAGE" image --cache-dir /cache --input /scan/image.tar --scanners vuln --severity "$SEVERITY" \
     --format table --table-mode detailed --exit-code 0 --no-progress
   rm -f "$archive"
 done
