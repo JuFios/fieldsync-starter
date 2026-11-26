@@ -18,15 +18,9 @@ module.exports = {
   overrides: [
     {
       files: ['**/*.ts', '**/*.tsx', 'e2e/**/*.mjs'],
-      parserOptions: {
-        project: [
-          './packages/*/tsconfig.json',
-          './apps/server/tsconfig.json',
-          './apps/web/tsconfig.json',
-          './e2e/tsconfig.json',
-        ],
-        tsconfigRootDir: __dirname,
-      },
+      // Each file is typed by its nearest tsconfig.json (typescript-eslint's project service), so
+      // lint sees the same compiler options as tsc for that workspace.
+      parserOptions: { projectService: true, tsconfigRootDir: __dirname },
       extends: ['plugin:@typescript-eslint/recommended-type-checked'],
       rules: {
         // Type-only imports are erased; Nest's dependency injection metadata is taken into account.

@@ -39,6 +39,7 @@ describe('runKnownDefect', () => {
   it('fails when the body throws a non-error value', async () => {
     await expect(
       runKnownDefect(DEFECT, () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the case under test is a non-Error throw
         throw 'not an error';
       }),
     ).rejects.toBe('not an error');

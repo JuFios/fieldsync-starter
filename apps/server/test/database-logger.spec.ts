@@ -7,7 +7,7 @@ function capture() {
     warn: (m: string) => lines.push(['warn', m]),
     error: (m: string) => lines.push(['error', m]),
   };
-  return { lines, logger: new SafeTypeOrmLogger(sink as never) };
+  return { lines, logger: new SafeTypeOrmLogger(sink) };
 }
 
 const QUERY = `SELECT id, role

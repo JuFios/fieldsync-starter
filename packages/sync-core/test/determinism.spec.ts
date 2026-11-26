@@ -199,7 +199,7 @@ const stateArb = fc
         quantity: p.quantity,
       });
     }
-    return rows as ReadonlyMap<string, Row>;
+    return rows;
   });
 
 const mutationArb = fc.record({ name: fc.constantFrom(...NAMES), args: argsArb, state: stateArb });
