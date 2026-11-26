@@ -149,8 +149,11 @@ jobs:
       # Report only: known vulnerabilities of the kept runtime versions must not turn CI red, and
       # neither may the scanner itself (a vulnerability database download that fails or is rate
       # limited). A failed scan shows as a warning on the step; the report is in the job summary.
+      # `shell: bash` runs with pipefail (the default shell does not), so a failed scan is not
+      # hidden behind tee's exit code.
       - name: Vulnerability report (Trivy)
         continue-on-error: true
+        shell: bash
         # A hung database download must end the step, not the whole job (job timeout: 20 min).
         timeout-minutes: 8
         run: |
