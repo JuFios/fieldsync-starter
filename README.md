@@ -128,7 +128,9 @@ Invalid configuration:
 
 Values come from the environment, then from `.env` in the working directory (`apps/server/.env`
 for `npm start -w @fieldsync/server`) when present; the environment wins. Blank values count as
-unset. `npm run migrate` reads the same variables with the same rules. `DATABASE_URL` is a secret: it is never logged or echoed in
+unset. `npm run migrate` reads the same variables with the same rules. Only the variables in the
+table are taken from `.env`; anything else there (for example libpq's `PG*` defaults) does not
+reach the process, so connection settings belong in `DATABASE_URL`. `DATABASE_URL` is a secret: it is never logged or echoed in
 errors.
 
 | Server variable | Default | Valid values | Meaning |

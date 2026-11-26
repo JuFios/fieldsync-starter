@@ -198,4 +198,22 @@ describe('configModule', () => {
       process.env = saved;
     }
   });
+
+  it('reads only the settings from .env: other entries, PG* included, do not reach the process', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fs-env-'));
+    const cwd = process.cwd();
+    const saved = { ...process.env };
+    try {
+      writeFileSync(join(dir, '.env'), `DATABASE_URL=${SECRET_URL}\nPGSSLMODE=require\n`);
+      process.chdir(dir);
+      delete process.env.DATABASE_URL;
+      delete process.env.PGSSLMODE;
+      await configFrom();
+      expect(process.env.PGSSLMODE).toBeUndefined();
+    } finally {
+      process.chdir(cwd);
+      process.env = saved;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

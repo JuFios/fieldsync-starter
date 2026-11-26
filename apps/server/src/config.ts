@@ -73,7 +73,8 @@ export class EnvironmentVariables {
   /**
    * Postgres connection string. Secret: never logged or echoed in errors. Only the scheme is
    * checked: the rest follows libpq rules that pg implements (Unix sockets as `?host=/dir`,
-   * defaults from PG* variables), and an unreachable database is reported when the server connects.
+   * defaults from PG* variables of the real environment; `.env` supplies only the settings declared
+   * here), and an unreachable database is reported when the server connects.
    */
   @Expose()
   @Transform(({ value }: TransformFnParams) => present(value))
