@@ -146,3 +146,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build images, check them and start the stack
         run: scripts/docker-smoke.sh
+      # Report only: known vulnerabilities of the kept runtime versions must not turn CI red. The
+      # report is in the job summary.
+      - name: Vulnerability report (Trivy)
+        run: |
+          {
+            echo '## Image vulnerabilities (HIGH, CRITICAL)'
+            echo '```'
+            scripts/scan-images.sh fieldsync-smoke-server fieldsync-smoke-web
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
