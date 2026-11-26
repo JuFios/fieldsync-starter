@@ -136,6 +136,27 @@ describe('SyncClient', () => {
     expect(before.createdAt).toBe('2030-01-01T00:00:00.000Z');
   });
 
+  it('queues the arguments as they were when mutate was called', () => {
+    const client = makeClient();
+    const args = { id: ticketId(), siteId: SITE, title: 'Typed by the user', description: '' };
+    client.mutate('ticket.create', args);
+    args.title = 'Changed by the caller afterwards';
+    expect(client.rows('ticket').map((t) => t.title)).toEqual(['Typed by the user']);
+  });
+
+  it('refuses arguments that cannot be sent instead of blocking the queue behind them', async () => {
+    const server = new FakeServer();
+    const client = makeClient(server.transport());
+    const unsendable = { id: ticketId(), siteId: SITE, title: 'Big', description: '', estimate: 10n };
+    expect(() => client.mutate('ticket.create', unsendable)).toThrow(TypeError);
+    expect(client.pendingCount).toBe(0);
+
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Next', description: '' });
+    await client.sync();
+    expect(client.status).toBe('idle');
+    expect(server.applied.map((m) => m.title)).toEqual(['Next']);
+  });
+
   it('numbers local mutations sequentially', async () => {
     const transport = new OfflineTransport();
     const client = makeClient(transport);
