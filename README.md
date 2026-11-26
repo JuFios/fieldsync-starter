@@ -126,6 +126,11 @@ Invalid configuration:
   - GC_INTERVAL_MS must be an integer from 1000 to 2147483647 (got "1h")
 ```
 
+The three database timeouts are sent as session settings when each connection of the server's pool
+opens (node-postgres connection parameters), not set for the whole database: PostgreSQL advises
+against `lock_timeout` and `statement_timeout` in `postgresql.conf`, and `npm run migrate` uses its
+own connections without them.
+
 Values come from the environment, then from `.env` in the working directory (`apps/server/.env`
 for `npm start -w @fieldsync/server`) when present; the environment wins. Blank values count as
 unset. `npm run migrate` reads the same variables with the same rules. Only the variables in the
@@ -138,6 +143,9 @@ errors.
 | `PORT` | `3001` | 1–65535 | HTTP port of the API |
 | `DATABASE_URL` | required | A `postgres://` or `postgresql://` connection string (libpq rules, e.g. `?host=/var/run/postgresql` for a Unix socket) | Database connection; every connection setting, TLS included (`sslmode`, ...), belongs in it |
 | `DB_POOL_MAX` | `20` | 1–1000 | Maximum connections in the server's pool |
+| `DB_LOCK_TIMEOUT_MS` | `2000` | 1–600000 | Longest wait for one lock on a server connection (`lock_timeout`). A writer that waits longer, for example behind a transaction that hangs while holding the change log's head, gets a 503 with `Retry-After` and retries |
+| `DB_STATEMENT_TIMEOUT_MS` | `15000` | 1–3600000 | Longest run of one statement on a server connection (`statement_timeout`); a page of the log or a mutation takes milliseconds |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `10000` | 1–3600000 | Postgres ends a server session that idles inside a transaction this long (`idle_in_transaction_session_timeout`), rolling it back and freeing its locks |
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |

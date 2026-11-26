@@ -66,6 +66,28 @@ export class EnvironmentVariables {
   @IsBoolean({ message: withValue('must be "true" or "false"') })
   SEED_DEMO = false;
 
+  /**
+   * Longest wait for a row lock, per lock (PostgreSQL lock_timeout), on the server's connections. A
+   * transaction that hangs while holding the change log's head must not stop every writer: they get
+   * a 503 and retry instead of waiting.
+   */
+  @Expose()
+  @IntegerIn(1, 600_000)
+  DB_LOCK_TIMEOUT_MS = 2_000;
+
+  /** Longest run of one statement on the server's connections (PostgreSQL statement_timeout). */
+  @Expose()
+  @IntegerIn(1, 3_600_000)
+  DB_STATEMENT_TIMEOUT_MS = 15_000;
+
+  /**
+   * A session of the server that idles inside a transaction this long is ended by Postgres, which
+   * rolls the transaction back and frees its locks (idle_in_transaction_session_timeout).
+   */
+  @Expose()
+  @IntegerIn(1, 3_600_000)
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS = 10_000;
+
   /** Change-log entries older than this are removed by the GC. */
   @Expose()
   @IntegerIn(1, 2_147_483_647)

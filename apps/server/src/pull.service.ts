@@ -3,6 +3,7 @@ import type { Change, PullResponse } from '@fieldsync/sync-core';
 import { accessibleSites } from './access';
 import type { AuthUser } from './auth';
 import { Db, type TxSql } from './db';
+import { isTransient, retryLater } from './db-errors';
 
 interface LogRow {
   version: string;
@@ -26,10 +27,11 @@ export class PullService {
    * rows again; `hasMore` is true exactly when changes after the page exist in the snapshot.
    */
   pull(user: AuthUser, cursor: number, limit: number, clientId?: string): Promise<PullResponse> {
-    return this.db.tx((c) => this.page(c, user, cursor, limit, clientId), {
-      isolation: 'REPEATABLE READ',
-      readOnly: true,
-    });
+    return this.db
+      .tx((c) => this.page(c, user, cursor, limit, clientId), { isolation: 'REPEATABLE READ', readOnly: true })
+      .catch((err: unknown) => {
+        throw isTransient(err) ? retryLater() : err;
+      });
   }
 
   private async page(

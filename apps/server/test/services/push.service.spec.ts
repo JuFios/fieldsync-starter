@@ -234,11 +234,37 @@ describe('PushService', () => {
       });
     });
 
+    it('answers a transient failure with 503 and Retry-After, keeping the earlier mutations', async () => {
+      apply
+        .mockResolvedValueOnce([ENTRY])
+        .mockRejectedValueOnce(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }));
+      const run = push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2)] });
+      await expect(run).rejects.toBeInstanceOf(ProblemException);
+      await expect(run).rejects.toMatchObject({ code: 'TRANSIENT', retryAfterSeconds: 1 });
+      expect(tables.last).toBe(1);
+    });
+
+    it('rejects a mutation whose mutator fails with a defect as INTERNAL and goes on', async () => {
+      const error = jest.spyOn(Reflect.get(push, 'logger') as { error: (...a: unknown[]) => void }, 'error');
+      error.mockImplementation(() => undefined);
+      apply.mockRejectedValueOnce(new TypeError('x is not a function')).mockResolvedValueOnce([ENTRY]);
+      const res = await push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2)] });
+      expect(res.results).toEqual([
+        { id: 1, status: 'rejected', code: 'INTERNAL', message: 'The server could not apply this mutation' },
+        { id: 2, status: 'applied', version: 1 },
+      ]);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(res)).not.toContain('not a function');
+    });
+
     it('stops at a mutation whose transaction fails, keeping the earlier ones, and notifies nobody for it', async () => {
-      apply.mockResolvedValueOnce([ENTRY]).mockRejectedValueOnce(new Error('deadlock detected'));
+      // An error outside the mutator (here: the database answer of the last statement) fails the push.
+      finish
+        .mockImplementationOnce((_c, r: MutationRecord) => Promise.resolve(tables.finish(r)))
+        .mockRejectedValueOnce(new Error('server bug'));
       await expect(
         push.push(USER, { clientId: CLIENT, mutations: [mutation(1), mutation(2), mutation(3)] }),
-      ).rejects.toThrow('deadlock detected');
+      ).rejects.toThrow('server bug');
       expect(notify).toHaveBeenCalledTimes(1);
       expect(apply).toHaveBeenCalledTimes(2);
     });

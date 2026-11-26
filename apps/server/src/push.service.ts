@@ -1,4 +1,4 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
   MutationRejected,
   type MutationResult,
@@ -9,6 +9,7 @@ import {
 import type { AuthUser } from './auth';
 import { Clock } from './clock';
 import { Db, type TxSql } from './db';
+import { isTransient, retryLater } from './db-errors';
 import { ProblemException } from './problem';
 import { applyMutation, finishMutation, type LogEntry } from './server-tx';
 import { StreamService } from './stream.service';
@@ -40,6 +41,8 @@ function rejected(id: number, rejection: Rejection): MutationResult {
 
 @Injectable()
 export class PushService {
+  private readonly logger = new Logger(PushService.name);
+
   constructor(
     private readonly db: Db,
     private readonly streams: StreamService,
@@ -54,7 +57,13 @@ export class PushService {
   async push(user: AuthUser, req: { clientId: string; mutations: ReceivedMutation[] }): Promise<PushResponse> {
     const results: MutationResult[] = [];
     for (const m of req.mutations) {
-      const { result, touched } = await this.db.tx((c) => this.applyOne(c, user, req.clientId, m));
+      // A transient failure is a 503: this mutation was not applied, the ones before it were, and
+      // the client's retry gets those answered as duplicates.
+      const { result, touched } = await this.db
+        .tx((c) => this.applyOne(c, user, req.clientId, m))
+        .catch((err: unknown) => {
+          throw isTransient(err) ? retryLater() : err;
+        });
       if (touched.length > 0) this.streams.notify(touched);
       results.push(result);
     }
@@ -96,9 +105,19 @@ export class PushService {
       entries = await c.savepoint(() => applyMutation(c, user, m, at));
       result = { id: m.id, status: 'applied' };
     } catch (err) {
-      if (!(err instanceof MutationRejected)) throw err;
-      // The rejection is recorded like an application: the mutation is final and the next follows.
-      result = rejected(m.id, err);
+      if (isTransient(err)) throw err;
+      if (err instanceof MutationRejected) {
+        // The rejection is recorded like an application: the mutation is final and the next follows.
+        result = rejected(m.id, err);
+      } else {
+        // The same mutation would fail the same way on every retry (a defect of the mutator or of the
+        // data, not of the moment): it is rejected, so the queue behind it moves on.
+        this.logger.error(
+          `Mutation ${m.id} (${m.name}) of client ${clientId} failed`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        result = rejected(m.id, { code: 'INTERNAL', message: 'The server could not apply this mutation' });
+      }
     }
     // Last: one statement records the outcome and appends the changes; the change log's ordering
     // lock is held from here to the commit only.

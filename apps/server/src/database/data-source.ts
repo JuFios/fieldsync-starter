@@ -12,6 +12,12 @@ export interface DataSourceSettings {
   applicationName: string;
   /** Overrides the migration list (tests). */
   migrations?: Array<new () => unknown>;
+  /** Timeouts of every connection of the pool, in ms (node-postgres connection parameters). */
+  sessionSettings?: {
+    lock_timeout: number;
+    statement_timeout: number;
+    idle_in_transaction_session_timeout: number;
+  };
 }
 
 /**
@@ -37,6 +43,7 @@ export function dataSourceOptions(settings: DataSourceSettings): DataSourceOptio
     // which CREATE INDEX CONCURRENTLY requires.
     migrationsTransactionMode: 'each',
     logger: new SafeTypeOrmLogger(logger),
+    ...(settings.sessionSettings ? { extra: { ...settings.sessionSettings } } : {}),
     logging: ['error', 'warn', 'migration'],
   };
 }

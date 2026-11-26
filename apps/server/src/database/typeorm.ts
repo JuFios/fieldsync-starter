@@ -17,6 +17,14 @@ export function typeOrmOptions(applicationName: string, poolSize?: number): Type
         url: config.get('DATABASE_URL', { infer: true }),
         poolSize: poolSize ?? config.get('DB_POOL_MAX', { infer: true }),
         applicationName,
+        // Session settings of every server connection, sent when it connects (node-postgres
+        // connection parameters). PostgreSQL advises against setting them in postgresql.conf for
+        // all sessions; the migration command uses its own connections without them.
+        sessionSettings: {
+          lock_timeout: config.get('DB_LOCK_TIMEOUT_MS', { infer: true }),
+          statement_timeout: config.get('DB_STATEMENT_TIMEOUT_MS', { infer: true }),
+          idle_in_transaction_session_timeout: config.get('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', { infer: true }),
+        },
       }),
       toRetry: () => false,
     }),
