@@ -60,7 +60,15 @@ describeWithDb('push throughput', () => {
       p95Ms: Number(percentile(sorted, 95).toFixed(1)),
       p99Ms: Number(percentile(sorted, 99).toFixed(1)),
     };
-    process.stdout.write(`BENCH ${JSON.stringify(report)}\n`);
+    // The log head is one row updated by every mutation: its updates should stay HOT (in-page,
+    // no index update). Statistics reach pg_stat_user_tables within a second of the writers idling.
+    await new Promise((r) => setTimeout(r, 1_500));
+    const stats = await ctx.db.query<{ upd: string; hot: string }>(
+      `SELECT n_tup_upd AS upd, n_tup_hot_upd AS hot FROM pg_stat_user_tables WHERE relname = 'log_head'`,
+    );
+    const head = stats.rows[0];
+    const logHeadHotUpdates = head && Number(head.upd) > 0 ? Number(head.hot) / Number(head.upd) : null;
+    process.stdout.write(`BENCH ${JSON.stringify({ ...report, logHeadHotUpdates })}\n`);
 
     const { rows } = await ctx.db.query<{ n: string; distinct: string }>(
       `SELECT count(*) AS n, count(DISTINCT version) AS distinct FROM change_log`,
