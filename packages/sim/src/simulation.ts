@@ -302,6 +302,8 @@ export class SimSystem {
         requestTimeoutMs: profile.requestTimeoutMs,
         // The jitter of retries, reproducible: the same sequence for this client in every run.
         random: mulberry32(index + 1),
+        // The notification stream is modelled by `sync` steps (see README, Simulation).
+        live: false,
       });
       return { name, user, client };
     });

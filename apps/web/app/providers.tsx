@@ -26,11 +26,10 @@ export function Providers({ children }: { children: ReactNode }) {
     if (!token) return;
     // The original client's id and last mutation id move from localStorage into the database.
     void IdbSyncStorage.open(DATABASE, { legacy: localStorageLegacy(localStorage) }).then((storage) => {
+      // The client keeps the notification stream open itself, with the token in a header.
       const c = new SyncClient({ transport: new HttpTransport(API, token), storage });
       setClient(c);
       void c.sync();
-      const es = new EventSource(`${API}/sync/stream?token=${encodeURIComponent(token)}`);
-      es.addEventListener('poke', () => void c.sync());
     });
   }, [token]);
 

@@ -1,3 +1,4 @@
+import { createParser } from 'eventsource-parser';
 import {
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
@@ -51,6 +52,28 @@ async function errorOf(what: string, res: Response): Promise<TransportError> {
 /** The problem code of a pull or snapshot whose cursor is below the floor of the change log (410). */
 export const RESET_REQUIRED = 'RESET_REQUIRED';
 
+/**
+ * An event of the notification stream (`GET /sync/stream`): `ready` first, with the heartbeat
+ * interval; `poke` when a site of the user changed (pull then); `heartbeat` while nothing happens.
+ */
+export type StreamEvent = { type: 'ready'; heartbeatMs: number } | { type: 'poke' } | { type: 'heartbeat' };
+
+/** A stream event from its SSE name and data; undefined for anything else (ignored, as browsers do). */
+export function streamEventOf(name: string | undefined, data: string): StreamEvent | undefined {
+  if (name === 'poke') return { type: 'poke' };
+  if (name === 'heartbeat') return { type: 'heartbeat' };
+  if (name !== 'ready') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  const ms =
+    parsed !== null && typeof parsed === 'object' ? (parsed as { heartbeatMs?: unknown }).heartbeatMs : undefined;
+  return typeof ms === 'number' && Number.isSafeInteger(ms) && ms > 0 ? { type: 'ready', heartbeatMs: ms } : undefined;
+}
+
 /** Options of one request; `signal` aborts it (the client aborts its requests when it is disposed). */
 export interface RequestOptions {
   signal?: AbortSignal;
@@ -61,6 +84,12 @@ export interface Transport {
   pull(cursor: number, clientId: string, limit?: number, init?: RequestOptions): Promise<PullResponse>;
   /** One page of a snapshot of the live state (see {@link SnapshotPage}). */
   snapshot(req: SnapshotRequest, init?: RequestOptions): Promise<SnapshotPage>;
+  /**
+   * Opens the notification stream and calls `onEvent` for each event until the stream ends (then it
+   * resolves) or fails (then it rejects, with a TransportError for an error answer). Optional: a
+   * client without it learns of changes only when it syncs.
+   */
+  stream?(onEvent: (event: StreamEvent) => void, init?: RequestOptions): Promise<void>;
 }
 
 const ENTITIES: readonly EntityName[] = ['ticket', 'part'];
@@ -131,6 +160,40 @@ export class HttpTransport implements Transport {
     });
     if (!res.ok) throw await errorOf('pull', res);
     return (await res.json()) as PullResponse;
+  }
+
+  /**
+   * The stream over `fetch`, so that it carries the same headers as every other request (the bearer
+   * token, never in the URL, and the protocol version: browsers' EventSource can send neither); the
+   * body is parsed with `eventsource-parser`. Reconnecting is the client's job (see `SyncClient`).
+   */
+  async stream(onEvent: (event: StreamEvent) => void, init: RequestOptions = {}): Promise<void> {
+    const res = await this.fetchImpl(`${this.baseUrl}/sync/stream`, {
+      ...signalOf(init),
+      cache: 'no-store',
+      headers: { ...this.headers(), accept: 'text/event-stream' },
+    });
+    if (!res.ok) throw await errorOf('stream', res);
+    if (!/^text\/event-stream/.test(res.headers.get('content-type') ?? '') || !res.body) {
+      throw new TransportError(res.status, 'BAD_RESPONSE', 'stream failed: not an event stream');
+    }
+    const parser = createParser({
+      onEvent: (message) => {
+        const event = streamEventOf(message.event, message.data);
+        if (event) onEvent(event);
+      },
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        parser.feed(decoder.decode(value, { stream: true }));
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   async snapshot(req: SnapshotRequest, init: RequestOptions = {}): Promise<SnapshotPage> {

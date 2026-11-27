@@ -131,7 +131,23 @@ export interface SyncClientOptions {
   backoff?: BackoffPolicy;
   /** Random numbers in [0, 1) for the jitter of retries; defaults to `Math.random`. */
   random?: () => number;
+  /**
+   * Keep the notification stream open (if the transport has one) and sync on every poke; on by
+   * default. Off, the client syncs only when asked to.
+   */
+  live?: boolean;
 }
+
+/** The stream was silent for three heartbeat intervals: the connection is taken for dead. */
+class StreamSilent extends Error {
+  constructor() {
+    super('The notification stream went silent');
+    this.name = 'StreamSilent';
+  }
+}
+
+/** Heartbeat intervals of silence after which the stream is taken for dead and reopened. */
+const SILENT_HEARTBEATS = 3;
 
 class MapTx implements MutatorTx {
   constructor(
@@ -210,6 +226,9 @@ export class SyncClient {
   /** Failed syncs in a row: the exponent of the next retry delay. */
   private failures = 0;
   private readonly initialClientId: string | undefined;
+  private readonly live: boolean;
+  /** The stream's watchdog and reconnect delay, cleared on dispose. */
+  private readonly streamTimers = new Set<TimerHandle>();
   private id = '';
   private base = new Map<string, Row>();
   private cursor: Version = asVersion(0);
@@ -252,7 +271,10 @@ export class SyncClient {
     this.backoff = opts.backoff ?? DEFAULT_BACKOFF;
     this.random = opts.random ?? Math.random;
     this.initialClientId = opts.clientId;
-    this.ready = this.load();
+    this.live = opts.live ?? true;
+    this.ready = this.load().then(() => {
+      if (this.live && !this.broken && this.transport.stream) void this.runStream();
+    });
   }
 
   /** The client id the server knows this client by ('' until `ready`). */
@@ -402,6 +424,8 @@ export class SyncClient {
     this.disposed = true;
     this.life.abort();
     if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
+    for (const timer of this.streamTimers) this.clock.clearTimeout(timer);
+    this.streamTimers.clear();
     this.listeners.clear();
   }
 
@@ -437,6 +461,83 @@ export class SyncClient {
       if (timer !== undefined) this.clock.clearTimeout(timer);
       this.life.signal.removeEventListener('abort', onDispose);
     }
+  }
+
+  /**
+   * Keeps the notification stream open while the client lives. Every time it opens (`ready`) the
+   * client syncs, which fetches what it missed while it was closed; every poke syncs again. A stream
+   * silent for {@link SILENT_HEARTBEATS} heartbeat intervals (a dead connection a proxy keeps) is
+   * aborted. Whatever ends it, it is reopened after a backoff delay, which restarts once a stream
+   * opens. An answer telling the client to update stops it: retrying cannot help.
+   */
+  private async runStream(): Promise<void> {
+    const stream = this.transport.stream?.bind(this.transport);
+    if (!stream) return;
+    let failures = 0;
+    while (!this.disposed) {
+      const controller = new AbortController();
+      const onDispose = () => controller.abort();
+      this.life.signal.addEventListener('abort', onDispose, { once: true });
+      // Until `ready` says how often heartbeats come, the stream gets a request's time to open.
+      let silenceMs = this.requestTimeoutMs;
+      let watchdog: TimerHandle | undefined;
+      let silent = false;
+      const arm = () => {
+        if (watchdog) this.untrack(watchdog);
+        if (!Number.isFinite(silenceMs)) return;
+        watchdog = this.track(() => {
+          silent = true;
+          controller.abort();
+        }, silenceMs);
+      };
+      arm();
+      let failure: unknown;
+      try {
+        await stream(
+          (event) => {
+            if (event.type === 'ready') {
+              silenceMs = SILENT_HEARTBEATS * event.heartbeatMs;
+              failures = 0;
+              void this.sync();
+            } else if (event.type === 'poke') {
+              void this.sync();
+            }
+            arm();
+          },
+          { signal: controller.signal },
+        );
+      } catch (err) {
+        // An answer of the server says more than the silence that may have aborted the stream meanwhile.
+        failure = silent && !(err instanceof TransportError) ? new StreamSilent() : err;
+      } finally {
+        if (watchdog) this.untrack(watchdog);
+        this.life.signal.removeEventListener('abort', onDispose);
+      }
+      if (this.disposed) return;
+      if (failure instanceof TransportError && failure.code === 'CLIENT_UPDATE_REQUIRED') return;
+      const retryAfterMs = failure instanceof TransportError ? (failure.retryAfterSeconds ?? 0) * 1000 : 0;
+      const delay = backoffDelay(failures, this.backoff, this.random, retryAfterMs);
+      failures += 1;
+      await new Promise<void>((resolve) => {
+        this.track(resolve, delay);
+        this.life.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    }
+  }
+
+  /** A timer of the stream, cleared on dispose. */
+  private track(callback: () => void, ms: number): TimerHandle {
+    const handle = this.clock.setTimeout(() => {
+      this.streamTimers.delete(handle);
+      callback();
+    }, ms);
+    this.streamTimers.add(handle);
+    return handle;
+  }
+
+  private untrack(handle: TimerHandle): void {
+    this.clock.clearTimeout(handle);
+    this.streamTimers.delete(handle);
   }
 
   /**

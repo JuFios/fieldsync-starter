@@ -22,6 +22,8 @@ export class SyncClients {
       clientId: randomUUID(),
       transport: new HttpTransport(await this.url(), user.token),
       storage: new MemoryStorage(),
+      // Tests decide when a client syncs; a notification stream would sync it at other times.
+      live: false,
     });
     this.clients.push(client);
     return client;

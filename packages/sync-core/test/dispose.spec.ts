@@ -28,7 +28,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
 /** A client that goes away (its page closes, or the user changes) stops all its work (F-37). */
 describe('a disposed client', () => {
-  it('aborts the request it has in flight', async () => {
+  it('aborts every request it has in flight', async () => {
     const signals: Array<AbortSignal | undefined> = [];
     const fetchImpl: typeof fetch = (_input, init) => {
       signals.push(init?.signal ?? undefined);
@@ -41,11 +41,12 @@ describe('a disposed client', () => {
     });
     await client.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'A', description: '' });
     await settle();
-    expect(signals).toHaveLength(1);
+    // The push, and the notification stream the client keeps open.
+    expect(signals).toHaveLength(2);
 
     client.dispose();
 
-    expect(signals[0]?.aborted).toBe(true);
+    expect(signals.map((signal) => signal?.aborted)).toEqual([true, true]);
   });
 
   it('writes nothing once disposed, even when an answer arrives afterwards', async () => {
