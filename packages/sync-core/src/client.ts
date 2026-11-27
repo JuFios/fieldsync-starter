@@ -666,7 +666,13 @@ export class SyncClient {
     this.emit();
   }
 
+  /**
+   * Pulls the log page by page up to the head of the first page's snapshot, and no further: under
+   * writes faster than a page per request `hasMore` stays true for good, and a sync that waited for
+   * it would never end, nor push again (N-1). What came after is the next sync's.
+   */
   private async pull(): Promise<void> {
+    let target: Version | undefined;
     for (;;) {
       const from = this.cursor;
       const resp = await this.request((init) => this.transport.pull(from, this.id, PAGE_SIZE, init));
@@ -689,7 +695,8 @@ export class SyncClient {
       this.cursor = resp.nextCursor;
       this.apply(settled);
       this.emit();
-      if (!resp.hasMore) break;
+      target ??= resp.head;
+      if (!resp.hasMore || this.cursor >= target) break;
     }
   }
 
@@ -734,9 +741,9 @@ export class SyncClient {
   }
 
   /**
-   * Reads every page of a snapshot and then the change log from its watermark into a separate map,
-   * and only then makes it the base, with the cursor and the pending mutations settled by the last
-   * pull page. Rows of a page may already hold changes after the watermark; the log replays them in
+   * Reads every page of a snapshot and then the change log from its watermark up to the highest head
+   * of the pages into a separate map, and only then makes it the base, with the cursor and the pending
+   * mutations settled by the last pull page. Rows of a page may already hold changes after the watermark; the log replays them in
    * commit order, so the staged state ends as the server's, and nothing in between ever reaches the
    * view. The queue is kept: the view is the new base with the remaining pending mutations applied on
    * top (a rebase). An interruption leaves the previous state in place; the next sync starts over.
@@ -745,7 +752,10 @@ export class SyncClient {
     const staged = new Map<string, Row>();
     let page = await this.request((init) => this.transport.snapshot({ limit: PAGE_SIZE }, init));
     const { watermark } = page;
+    // The point of consistency: no row read holds a change after it (SnapshotPage.head).
+    let consistentAt = page.head;
     for (;;) {
+      if (page.head > consistentAt) consistentAt = page.head;
       for (const row of page.rows) staged.set(`${row.entity}/${row.id}`, row.data);
       if (page.next === null) break;
       const after = page.next;
@@ -758,7 +768,10 @@ export class SyncClient {
       last = await this.request((init) => this.transport.pull(from, this.id, PAGE_SIZE, init));
       applyChanges(staged, last.changes);
       cursor = last.nextCursor;
-    } while (last.hasMore);
+      // Once the log is read up to the point of consistency the staged rows are one state of the
+      // server: installed now, however fast others write meanwhile (waiting for a page without more
+      // changes never ends under constant writes, №2). The rest comes with the next pulls.
+    } while (last.hasMore && cursor < consistentAt);
     const settled = this.settled(last, cursor);
     await this.commit({
       base: { replace: true, put: [...staged] },
