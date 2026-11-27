@@ -8,7 +8,7 @@ import { Pool } from 'pg';
 
 /**
  * The notification stream over real HTTP connections: subscribers go away with their connection
- * (F-35) and an idle stream carries heartbeats (F-35).
+ * (F-35), an idle stream carries heartbeats (F-35), and shutdown is not held up by open streams (F-36).
  */
 describeWithDb('GET /sync/stream', () => {
   let database: TestDatabase;
@@ -77,5 +77,22 @@ describeWithDb('GET /sync/stream', () => {
         await server.close();
       }
     });
+  });
+
+  describe('shutdown', () => {
+    it('lets the application close while a stream is open, and ends the stream', async () => {
+      const server = await startApp(database.url);
+      const port = await listenOnLoopback(server.app);
+      const stream = await openStream(port, auth());
+      let closed = false;
+      const closing = server.close().then(() => (closed = true));
+      try {
+        expect(await eventually(() => closed, 5_000)).toBe(true);
+        await stream.ended;
+      } finally {
+        stream.close();
+        await closing;
+      }
+    }, 15_000);
   });
 });
