@@ -5,12 +5,18 @@ import { Client } from 'pg';
 import { DataSource, type MigrationInterface, type QueryRunner } from 'typeorm';
 import { createDataSource, MIGRATIONS_TABLE } from '../../src/database/data-source';
 import { MIGRATIONS } from '../../src/database/migrations';
+import { InitialSchema1795564800000 } from '../../src/database/migrations/1795564800000-initial-schema';
 import { MIGRATION_LOCK_KEY, pendingMigrations, runMigrations } from '../../src/database/migrator';
 import { createTestDatabase, type TestDatabase } from '../support/database';
 import { describeWithDb } from '../support/integration';
 
 const STARTER_SCHEMA = readFileSync(join(__dirname, '../support/starter-schema.sql'), 'utf8');
 const INITIAL = 'InitialSchema1795564800000';
+/**
+ * The first migration alone: the tests of the migration mechanism (locking, transactions) and of
+ * adopting the original database run on it; the later migrations have tests of their own below.
+ */
+const BASELINE = [InitialSchema1795564800000];
 
 class SlowTable9999999999998 implements MigrationInterface {
   name = 'SlowTable9999999999998';
@@ -81,7 +87,12 @@ describeWithDb('database migrations', () => {
     migrations?: Array<new () => unknown>,
     poolSize = 3,
   ): Promise<DataSource> {
-    const ds = createDataSource({ url: db.url, poolSize, applicationName: 'fieldsync-test', migrations });
+    const ds = createDataSource({
+      url: db.url,
+      poolSize,
+      applicationName: 'fieldsync-test',
+      migrations: migrations ?? BASELINE,
+    });
     sources.push(ds);
     await ds.initialize();
     return ds;
@@ -171,7 +182,7 @@ describeWithDb('database migrations', () => {
 
   it('runs a migration that must not run inside a transaction', async () => {
     const db = await emptyDatabase();
-    const ds = await dataSource(db, [...MIGRATIONS, ConcurrentIndex9999999999999]);
+    const ds = await dataSource(db, [...BASELINE, ConcurrentIndex9999999999999]);
 
     expect(await runMigrations(ds)).toEqual([INITIAL, 'ConcurrentIndex9999999999999']);
 
@@ -183,7 +194,7 @@ describeWithDb('database migrations', () => {
 
   it('applies each migration once when several runs start at the same time', async () => {
     const db = await emptyDatabase();
-    const migrations = [...MIGRATIONS, SlowTable9999999999998];
+    const migrations = [...BASELINE, SlowTable9999999999998];
     const runs = await Promise.all([1, 2, 3].map(async () => runMigrations(await dataSource(db, migrations))));
 
     expect(runs.flat().sort()).toEqual([INITIAL, 'SlowTable9999999999998'].sort());
@@ -241,7 +252,7 @@ describeWithDb('database migrations', () => {
       url: db.url,
       poolSize: 3,
       applicationName: 'fieldsync-test',
-      migrations: [...MIGRATIONS, LongTable9999999999997],
+      migrations: [...BASELINE, LongTable9999999999997],
     });
     const ds = new DataSource({ ...base.options, extra: { options: '-c idle_session_timeout=0' } });
     sources.push(ds);
@@ -258,7 +269,7 @@ describeWithDb('database migrations', () => {
 
   it('reports the migrations as applied, and the lost lock, when the lock connection drops while they run', async () => {
     const db = await emptyDatabase();
-    const ds = await dataSource(db, [...MIGRATIONS, SlowTable9999999999998]);
+    const ds = await dataSource(db, [...BASELINE, SlowTable9999999999998]);
     let run: Promise<string[]> = Promise.resolve([]);
     const warnings = await lockWarnings(async () => {
       run = runMigrations(ds);
@@ -281,5 +292,180 @@ describeWithDb('database migrations', () => {
 
     await expect(run).resolves.toEqual([INITIAL, 'SlowTable9999999999998']);
     expect(warnings).toEqual([expect.stringContaining('The migration lock was lost during the run')]);
+  });
+
+  describe('later migrations', () => {
+    const ALL = MIGRATIONS.map((m) => m.name);
+
+    it('apply in order on an empty database and leave nothing pending', async () => {
+      const db = await emptyDatabase();
+      const ds = await dataSource(db, MIGRATIONS);
+      expect(await runMigrations(ds)).toEqual(ALL);
+      expect(await pendingMigrations(ds)).toEqual([]);
+      expect(await snapshot(db)).toEqual(
+        expect.arrayContaining([
+          'constraint clients clients_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)',
+          'index CREATE INDEX mutation_results_created_idx ON public.mutation_results USING btree (created_at)',
+          "index CREATE INDEX entities_part_ticket_idx ON public.entities USING btree (((data ->> 'ticketId'::text))) WHERE ((entity = 'part'::text) AND (NOT deleted))",
+        ]),
+      );
+    });
+
+    it('apply on top of a database the original server created, keeping its data', async () => {
+      const db = await starterDatabase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO users VALUES ('00000000-0000-4000-8000-000000000002', 'Tom', 'technician', 'tech-a-token');
+          INSERT INTO clients VALUES ('0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', '00000000-0000-4000-8000-000000000002', 7);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      expect(await runMigrations(ds)).toEqual(ALL);
+      const clients = await sql(
+        db,
+        async (c) =>
+          (
+            await c.query<{ client_id: string; last_mutation_id: string }>(
+              'SELECT client_id, last_mutation_id FROM clients',
+            )
+          ).rows,
+      );
+      expect(clients).toEqual([{ client_id: '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', last_mutation_id: '7' }]);
+    });
+
+    it('start the log head after the last version the original sequence handed out', async () => {
+      const db = await starterDatabase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO change_log (site_id, entity, entity_id, op) VALUES
+            ('00000000-0000-4000-8000-0000000000a1', 'ticket', '11111111-1111-4111-8111-111111111111', 'put'),
+            ('00000000-0000-4000-8000-0000000000a1', 'ticket', '11111111-1111-4111-8111-111111111111', 'put'),
+            ('00000000-0000-4000-8000-0000000000a1', 'ticket', '11111111-1111-4111-8111-111111111111', 'del');
+          -- The newest row is gone (a GC run, or a rolled-back insert), but a client may hold it as its cursor.
+          DELETE FROM change_log WHERE version = 3;
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const head = await ds.query<Array<{ version: string }>>('SELECT version FROM log_head');
+      // A version must now be given: nothing in the log hands one out by itself any more.
+      const withoutVersion = await ds
+        .query(`INSERT INTO change_log (site_id, entity, entity_id, op) VALUES ($1, 'ticket', $2, 'put')`, [
+          '00000000-0000-4000-8000-0000000000a1',
+          '11111111-1111-4111-8111-111111111111',
+        ])
+        .then(
+          () => 'inserted',
+          (e: { driverError?: { code?: string } }) => e.driverError?.code,
+        );
+      expect({ head, withoutVersion }).toEqual({ head: [{ version: '3' }], withoutVersion: '23502' });
+    });
+
+    it('start the log head at 0 on an empty log', async () => {
+      const db = await emptyDatabase();
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      expect(await ds.query('SELECT id, version FROM log_head')).toEqual([{ id: 1, version: '0' }]);
+    });
+
+    it('delete the parts the original server left behind and publish their deletion', async () => {
+      const db = await starterDatabase();
+      const site = '00000000-0000-4000-8000-0000000000a1';
+      const [kept, orphan, alive] = [
+        '11111111-1111-4111-8111-111111111111',
+        '22222222-2222-4222-8222-222222222222',
+        '33333333-3333-4333-8333-333333333333',
+      ];
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO entities VALUES
+            ('ticket', '${kept}', '${site}', '{"title":"kept"}', false, 1),
+            ('ticket', '44444444-4444-4444-8444-444444444444', '${site}', NULL, true, 2),
+            ('part', '${orphan}', '${site}', '{"ticketId":"44444444-4444-4444-8444-444444444444"}', false, 3),
+            ('part', '${alive}', '${site}', '{"ticketId":"${kept}"}', false, 4);
+          SELECT setval('change_log_version_seq', 4);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const parts = await ds.query<Array<{ id: string; deleted: boolean; version: string }>>(
+        `SELECT id, deleted, version FROM entities WHERE entity = 'part' ORDER BY id`,
+      );
+      const log = await ds.query<Array<{ version: string; entity_id: string; op: string }>>(
+        `SELECT version, entity_id, op FROM change_log ORDER BY version`,
+      );
+      const head = await ds.query<Array<{ version: string }>>('SELECT version FROM log_head');
+      expect({ parts, log, head }).toEqual({
+        parts: [
+          { id: orphan, deleted: true, version: '5' },
+          { id: alive, deleted: false, version: '4' },
+        ],
+        log: [{ version: '5', entity_id: orphan, op: 'del' }],
+        head: [{ version: '5' }],
+      });
+    });
+
+    it('store the ids inside tickets and parts in lower case, keep their parts and publish them', async () => {
+      const db = await starterDatabase();
+      const site = '00000000-0000-4000-8000-0000000000a1';
+      const ticket = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const part = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const up = (id: string) => id.toUpperCase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO entities VALUES
+            ('ticket', '${ticket}', '${site}', '{"id":"${up(ticket)}","siteId":"${up(site)}","title":"kept"}', false, 1),
+            ('part', '${part}', '${site}',
+             '{"id":"${up(part)}","ticketId":"${up(ticket)}","siteId":"${site}","name":"Seal"}', false, 2);
+          SELECT setval('change_log_version_seq', 2);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const ticketData = { id: ticket, siteId: site, title: 'kept' };
+      const partData = { id: part, ticketId: ticket, siteId: site, name: 'Seal' };
+      expect({
+        rows: await ds.query(`SELECT entity, deleted, data, version FROM entities ORDER BY entity`),
+        log: await ds.query(`SELECT version, entity, op, data FROM change_log ORDER BY version`),
+      }).toEqual({
+        rows: [
+          { entity: 'part', deleted: false, data: partData, version: '3' },
+          { entity: 'ticket', deleted: false, data: ticketData, version: '4' },
+        ],
+        log: [
+          { version: '3', entity: 'part', op: 'put', data: partData },
+          { version: '4', entity: 'ticket', op: 'put', data: ticketData },
+        ],
+      });
+    });
+
+    it('store client ids as uuid and drop clients whose id is not one', async () => {
+      const db = await starterDatabase();
+      await sql(db, (c) =>
+        c.query(`
+          INSERT INTO users VALUES ('00000000-0000-4000-8000-000000000002', 'Tom', 'technician', 'tech-a-token');
+          INSERT INTO clients VALUES
+            ('0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', '00000000-0000-4000-8000-000000000002', 7),
+            ('client-1', '00000000-0000-4000-8000-000000000002', 3);
+        `),
+      );
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      const rows = await ds.query<Array<{ client_id: string; type: string }>>(
+        `SELECT client_id, pg_typeof(client_id)::text AS type FROM clients`,
+      );
+      expect(rows).toEqual([{ client_id: '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b', type: 'uuid' }]);
+    });
+
+    it('revert to the first schema', async () => {
+      const db = await emptyDatabase();
+      const ds = await dataSource(db, MIGRATIONS);
+      await runMigrations(ds);
+      // TypeORM 0.3 reverts with the transaction mode it is given and ignores a migration's own
+      // `transaction = false`, which DROP INDEX CONCURRENTLY needs: revert without transactions.
+      for (let i = 1; i < MIGRATIONS.length; i += 1) await ds.undoLastMigration({ transaction: 'none' });
+      const reference = await starterDatabase();
+      expect(await snapshot(db)).toEqual(await snapshot(reference));
+    });
   });
 });

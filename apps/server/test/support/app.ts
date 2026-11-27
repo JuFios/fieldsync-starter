@@ -1,4 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import { configureApp } from '../../src/app.factory';
 import { AppModule } from '../../src/app.module';
@@ -26,7 +27,9 @@ export async function startApp(databaseUrl: string, env: Record<string, string> 
     imports: [await AppModule.forRoot({ ...TEST_ENV, ...env, DATABASE_URL: databaseUrl })],
   }).compile();
   // abortOnError: false makes Nest reject instead of aborting the Jest worker on a bootstrap error.
-  const app = configureApp(moduleRef.createNestApplication({ logger: false, abortOnError: false }));
+  const app = configureApp(
+    moduleRef.createNestApplication<NestExpressApplication>({ logger: false, abortOnError: false }),
+  );
   try {
     await app.init();
   } catch (err) {

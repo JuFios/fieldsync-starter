@@ -1,24 +1,11 @@
+import { MAX_PUSH_BODY_BYTES } from '@fieldsync/sync-core';
 import { ConfigService } from '@nestjs/config';
 import { Expose, plainToInstance, Transform, type TransformFnParams } from 'class-transformer';
-import {
-  IsBoolean,
-  IsDefined,
-  IsInt,
-  IsString,
-  Matches,
-  Max,
-  Min,
-  validateSync,
-  type ValidationArguments,
-} from 'class-validator';
+import { IsBoolean, IsDefined, IsString, Matches, validateSync, type ValidationArguments } from 'class-validator';
+import { IntegerIn as IntegerBetween, trimmed } from './validation';
 
 /** Largest delay setInterval accepts; larger values silently become 1 ms. */
 const MAX_TIMER_MS = 2_147_483_647;
-
-/** Environment values arrive as strings, possibly padded with spaces. */
-function present(value: unknown): unknown {
-  return typeof value === 'string' ? value.trim() : value;
-}
 
 /** A blank value counts as unset, so the setting gets its default. */
 function isBlank(value: unknown): boolean {
@@ -30,33 +17,16 @@ function withValue(text: string): (args: ValidationArguments) => string {
   return (args) => `${args.property} ${text} (got "${String(args.value)}")`;
 }
 
-/**
- * Converts decimal integer strings only. Anything else ("1h", "1e4", "0x10", "2.5") is left as it
- * is and fails `@IsInt`, unlike `enableImplicitConversion`, which would turn "1e4" into 10000 and
- * "" into 0.
- */
-const ToInteger = () =>
-  Transform(({ value }: TransformFnParams) => {
-    const v = present(value);
-    return typeof v === 'string' && /^-?\d+$/.test(v) ? Number(v) : v;
-  });
-
 /** Accepts exactly "true" or "false". */
 const ToBoolean = () =>
   Transform(({ value }: TransformFnParams) => {
-    const v = present(value);
+    const v = trimmed(value);
     return v === 'true' ? true : v === 'false' ? false : v;
   });
 
-/** `@IsInt`, `@Min` and `@Max` with one message, so a bad value is reported once. */
+/** An integer setting; the message names the variable and its value (settings are never secrets here). */
 function IntegerIn(min: number, max: number): PropertyDecorator {
-  const message = withValue(`must be an integer from ${min} to ${max}`);
-  return (target, key) => {
-    ToInteger()(target, key);
-    IsInt({ message })(target, key);
-    Min(min, { message })(target, key);
-    Max(max, { message })(target, key);
-  };
+  return IntegerBetween(min, max, { message: withValue(`must be an integer from ${min} to ${max}`) });
 }
 
 /**
@@ -77,7 +47,7 @@ export class EnvironmentVariables {
    * here), and an unreachable database is reported when the server connects.
    */
   @Expose()
-  @Transform(({ value }: TransformFnParams) => present(value))
+  @Transform(({ value }: TransformFnParams) => trimmed(value))
   @IsDefined({ message: '$property is required (a postgres:// connection string)' })
   @IsString({ message: '$property must be a postgres:// or postgresql:// connection string (value not shown)' })
   @Matches(/^postgres(?:ql)?:\/\//i, {
@@ -96,6 +66,28 @@ export class EnvironmentVariables {
   @IsBoolean({ message: withValue('must be "true" or "false"') })
   SEED_DEMO = false;
 
+  /**
+   * Longest wait for a row lock, per lock (PostgreSQL lock_timeout), on the server's connections. A
+   * transaction that hangs while holding the change log's head must not stop every writer: they get
+   * a 503 and retry instead of waiting.
+   */
+  @Expose()
+  @IntegerIn(1, 600_000)
+  DB_LOCK_TIMEOUT_MS = 2_000;
+
+  /** Longest run of one statement on the server's connections (PostgreSQL statement_timeout). */
+  @Expose()
+  @IntegerIn(1, 3_600_000)
+  DB_STATEMENT_TIMEOUT_MS = 15_000;
+
+  /**
+   * A session of the server that idles inside a transaction this long is ended by Postgres, which
+   * rolls the transaction back and frees its locks (idle_in_transaction_session_timeout).
+   */
+  @Expose()
+  @IntegerIn(1, 3_600_000)
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS = 10_000;
+
   /** Change-log entries older than this are removed by the GC. */
   @Expose()
   @IntegerIn(1, 2_147_483_647)
@@ -105,6 +97,14 @@ export class EnvironmentVariables {
   @Expose()
   @IntegerIn(1_000, MAX_TIMER_MS)
   GC_INTERVAL_MS = 3_600_000;
+
+  /**
+   * Largest JSON request body, in bytes. At least what the client puts in one push, so a batch the
+   * client sends is never refused for its size; at most 64 MiB.
+   */
+  @Expose()
+  @IntegerIn(MAX_PUSH_BODY_BYTES, 67_108_864)
+  JSON_BODY_LIMIT_BYTES = 2_097_152;
 
   /** Serve the OpenAPI description and Swagger UI at /docs. */
   @Expose()

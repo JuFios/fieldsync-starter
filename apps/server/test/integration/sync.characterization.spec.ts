@@ -98,7 +98,11 @@ describeWithDb('sync API (characterization)', () => {
 
       const pushed = await push(tech, clientId, [create(1, site, 'Broken pump')]);
       expect(pushed.status).toBe(201);
-      expect(pushed.body).toEqual({ results: [{ id: 1, status: 'applied' }], lastMutationId: 1 });
+      // The version of the mutation's last change was added to the result with the commit-ordered log.
+      expect(pushed.body).toEqual({
+        results: [{ id: 1, status: 'applied', version: expect.any(Number) }],
+        lastMutationId: 1,
+      });
 
       const pulled = await pull(tech, 0, { clientId });
       expect(pulled.status).toBe(200);
@@ -125,11 +129,16 @@ describeWithDb('sync API (characterization)', () => {
 
       const again = await push(tech, clientId, [create(1, site, 'Once')]);
       expect(again.status).toBe(201);
-      expect(again.body).toEqual({ results: [{ id: 1, status: 'duplicate' }], lastMutationId: 1 });
+      expect(again.body).toEqual({
+        results: [{ id: 1, status: 'duplicate', version: expect.any(Number) }],
+        lastMutationId: 1,
+      });
       expect(await logSize()).toBe(before);
     });
 
-    it('rejects a mutation id that skips ahead with 400', async () => {
+    // Changed with the protocol work: a gap is a conflict with the server's state (409, with the id
+    // it expects), not a malformed request (it was 400).
+    it('rejects a mutation id that skips ahead with 409 and the expected id', async () => {
       const site = await ctx.fixtures.site();
       const tech = await ctx.fixtures.technician(site);
       const clientId = randomUUID();
@@ -137,7 +146,8 @@ describeWithDb('sync API (characterization)', () => {
       const before = await logSize();
 
       const res = await push(tech, clientId, [create(3, site, 'Third')]);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'MUTATION_OUT_OF_ORDER', details: { expected: 2 } });
       expect(await logSize()).toBe(before);
     });
 
@@ -204,7 +214,7 @@ describeWithDb('sync API (characterization)', () => {
       const ticket = await createTicket(tech, clientId, 1, site, 'To delete');
 
       const res = await push(tech, clientId, [{ id: 2, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
-      expect(res.body.results).toEqual([{ id: 2, status: 'applied' }]);
+      expect(res.body.results).toEqual([{ id: 2, status: 'applied', version: expect.any(Number) }]);
 
       const del = (await initialPull(tech)).filter((c) => c.id === ticket).at(-1);
       expect(del).toMatchObject({ op: 'del', data: null, siteId: site, entity: 'ticket' });
@@ -214,7 +224,9 @@ describeWithDb('sync API (characterization)', () => {
       expect(rows).toEqual([{ deleted: true, data: null }]);
     });
 
-    it('leaves no trace of a mutation that the mutator rejects', async () => {
+    // Changed with F-23: the rejection used to fail the push with 500 and leave the client's last
+    // mutation id at 1, so the client retried it forever; now it is answered and recorded as handled.
+    it('leaves no trace of a mutation that the mutator rejects, and records it as handled', async () => {
       const site = await ctx.fixtures.site();
       const tech = await ctx.fixtures.technician(site);
       const clientId = randomUUID();
@@ -222,7 +234,7 @@ describeWithDb('sync API (characterization)', () => {
       const before = await logSize();
       const part = randomUUID();
 
-      await push(tech, clientId, [
+      const res = await push(tech, clientId, [
         {
           id: 2,
           name: 'part.add',
@@ -230,6 +242,13 @@ describeWithDb('sync API (characterization)', () => {
         },
       ]);
 
+      expect({ status: res.status, body: res.body }).toEqual({
+        status: 201,
+        body: {
+          results: [{ id: 2, status: 'rejected', code: 'NOT_FOUND', message: 'Ticket no longer exists' }],
+          lastMutationId: 2,
+        },
+      });
       expect(await logSize()).toBe(before);
       const parts = await ctx.db.query(`SELECT 1 FROM entities WHERE entity = 'part' AND id = $1`, [part]);
       expect(parts.rowCount).toBe(0);
@@ -237,7 +256,7 @@ describeWithDb('sync API (characterization)', () => {
         `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
         [clientId],
       );
-      expect(Number(client.rows[0].last_mutation_id)).toBe(1);
+      expect(Number(client.rows[0].last_mutation_id)).toBe(2);
     });
 
     it('pages through the log by limit', async () => {
@@ -271,8 +290,10 @@ describeWithDb('sync API (characterization)', () => {
       const site = await ctx.fixtures.site();
       const insert = (age: string) =>
         ctx.db.query<{ version: string }>(
-          `INSERT INTO change_log (site_id, entity, entity_id, op, data, created_at)
-           VALUES ($1, 'ticket', $2, 'put', '{}', now() - $3::interval) RETURNING version`,
+          // Versions come from the log head, as the server takes them.
+          `WITH head AS (UPDATE log_head SET version = version + 1 WHERE id = 1 RETURNING version)
+           INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
+           SELECT head.version, $1, 'ticket', $2, 'put', '{}', now() - $3::interval FROM head RETURNING version`,
           [site, randomUUID(), age],
         );
       const old = [await insert('8 days'), await insert('30 days')].map((r) => r.rows[0].version);

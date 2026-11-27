@@ -1,5 +1,6 @@
 import { Catch, HttpException, type ArgumentsHost, type INestApplication } from '@nestjs/common';
-import { BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
+import { HttpAdapterHost } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow } from '@fieldsync/sim';
 import type { EntityName, Row } from '@fieldsync/sync-core';
@@ -7,11 +8,12 @@ import { Agent, type Server } from 'node:http';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { configureApp } from '../../src/app.factory';
+import { ProblemFilter } from '../../src/problem';
 import { AppModule } from '../../src/app.module';
 import { Clock } from '../../src/clock';
 
 /** The application's own tables, in an order TRUNCATE accepts (it truncates them all at once anyway). */
-const TABLES = ['clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
+const TABLES = ['mutation_results', 'clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
 
 /** The supertest method for an HTTP method of the sync client (it sends GET and POST only). */
 function methodOf(method: string): 'get' | 'post' {
@@ -33,12 +35,12 @@ class SimulatedClock extends Clock {
 
 /** Records the class and code of every exception a request raises, then answers like Nest does. */
 @Catch()
-class RecordingExceptionFilter extends BaseExceptionFilter {
+class RecordingExceptionFilter extends ProblemFilter {
   constructor(
-    adapter: HttpAdapterHost['httpAdapter'],
+    adapterHost: HttpAdapterHost,
     private readonly sink: (error: ServerError) => void,
   ) {
-    super(adapter);
+    super(adapterHost);
   }
 
   override catch(exception: unknown, host: ArgumentsHost): void {
@@ -55,14 +57,15 @@ class RecordingExceptionFilter extends BaseExceptionFilter {
 /**
  * The real server on a real database, as a {@link SimServer}: the production AppModule with only the
  * Clock replaced and the production app settings, called over real HTTP through supertest. Data
- * is reset between runs with TRUNCATE ... RESTART IDENTITY, so versions start at 1 for every run and
+ * is reset between runs with TRUNCATE ... RESTART IDENTITY and a zero log head, so versions start at 1 for every run and
  * the physical row order is the same in every run of a seed.
  */
 export class RealServer implements SimServer {
   private errors: ServerError[] = [];
 
   private constructor(
-    private readonly app: INestApplication,
+    /** The application, for tests of the binding itself. */
+    readonly app: INestApplication,
     /** The application's HTTP server, for tests of the binding itself. */
     readonly httpServer: Server,
     private readonly clock: SimulatedClock,
@@ -90,15 +93,17 @@ export class RealServer implements SimServer {
       .overrideProvider(Clock)
       .useValue(clock)
       .compile();
-    const app = configureApp(moduleRef.createNestApplication({ logger: false, abortOnError: false }));
+    const app = configureApp(
+      moduleRef.createNestApplication<NestExpressApplication>({ logger: false, abortOnError: false }),
+    );
     // The filter is created before the server object, so it reaches the server through this holder.
     const holder: { server?: RealServer } = {};
     const sink = (error: ServerError) => holder.server?.errors.push(error);
-    app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost).httpAdapter, sink));
+    app.useGlobalFilters(new RecordingExceptionFilter(app.get(HttpAdapterHost), sink));
     // The binding's own client is the only one, and it keeps one connection alive between requests.
     // Without this, Node closes that connection after keepAliveTimeout of idleness, and a request sent
     // as it closes fails with ECONNRESET. 0 disables the timeout (Node's http.Server documentation).
-    (app.getHttpServer() as Server).keepAliveTimeout = 0;
+    app.getHttpServer().keepAliveTimeout = 0;
     try {
       // Listening once keeps the server under our control: supertest binds a server that is not
       // listening to a new ephemeral port for every request and closes it afterwards.
@@ -109,7 +114,7 @@ export class RealServer implements SimServer {
     }
     const db = new Pool({ connectionString: databaseUrl, max: 2, application_name: 'fieldsync-sim' });
     db.on('error', () => undefined);
-    const server = new RealServer(app, app.getHttpServer() as Server, clock, db);
+    const server = new RealServer(app, app.getHttpServer(), clock, db);
     holder.server = server;
     return server;
   }
@@ -118,6 +123,7 @@ export class RealServer implements SimServer {
     this.clock.source = now;
     this.errors = [];
     await this.db.query(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY`);
+    await this.db.query('UPDATE log_head SET version = 0');
     for (const site of fixtures.sites) {
       await this.db.query('INSERT INTO sites (id, name) VALUES ($1, $2)', [site.id, site.name]);
     }

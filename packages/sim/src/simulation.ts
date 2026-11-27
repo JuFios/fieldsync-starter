@@ -4,7 +4,14 @@ import fc from 'fast-check';
 import { SimClock } from './clock';
 import type { LinkState, NetworkEvent, RequestFault, ResponseFault } from './network';
 import { SimNetwork } from './network';
-import { canonicalJson, compareWithServer, type Divergence } from './oracle';
+import {
+  canonicalJson,
+  compareWithServer,
+  lostEdits,
+  ticketFieldWrite,
+  type Divergence,
+  type TicketFieldWrite,
+} from './oracle';
 import type { ActionKind, Profile, Signature } from './profiles';
 import { accessibleSites, buildFixtures, generateAction, simUuid, type Action, type ActionParams } from './scenario';
 import type { Fixtures, SimServer, SimUser } from './types';
@@ -27,7 +34,9 @@ export type Step =
 export type Violation =
   | { signature: 'divergence' | 'foreign-site-rows'; client: string; detail: Divergence }
   | { signature: 'rejected-mutation-500' | 'stuck-request' | 'livelock'; clients: string[]; detail: string }
-  | { signature: 'client-error'; detail: string };
+  | { signature: 'client-error'; detail: string }
+  | { signature: 'unexpected-rejection'; clients: string[]; detail: string }
+  | { signature: 'lost-edit'; detail: string[] };
 
 export interface RunResult {
   profile: string;
@@ -90,14 +99,54 @@ function describeEvent(event: NetworkEvent): string {
   }
 }
 
-/** How many mutations a successful push answer reports as rejected. */
-function rejectedResults(status: number, body: string): number {
-  if (status < 200 || status >= 300) return 0;
+/** The rejection codes of the mutations a successful push answer reports as rejected. */
+function rejectedCodes(status: number, body: string): string[] {
+  if (status < 200 || status >= 300) return [];
   try {
-    const parsed = JSON.parse(body) as { results?: Array<{ status?: unknown }> };
-    return Array.isArray(parsed.results) ? parsed.results.filter((r) => r.status === 'rejected').length : 0;
+    const parsed = JSON.parse(body) as { results?: Array<{ status?: unknown; code?: unknown }> };
+    if (!Array.isArray(parsed.results)) return [];
+    return parsed.results.filter((r) => r.status === 'rejected').map((r) => String(r.code));
   } catch {
-    return 0;
+    return [];
+  }
+}
+
+/** The mutations a push request carries, by id, and the client that sent them. */
+interface SentPush {
+  clientId: string;
+  mutations: Map<number, { name: string; args: Record<string, unknown> }>;
+}
+
+function sentPush(body: string | undefined): SentPush | undefined {
+  try {
+    const parsed = JSON.parse(body ?? '') as {
+      clientId?: unknown;
+      mutations?: Array<{ id?: unknown; name?: unknown; args?: unknown }>;
+    };
+    if (typeof parsed.clientId !== 'string' || !Array.isArray(parsed.mutations)) return undefined;
+    const mutations = new Map<number, { name: string; args: Record<string, unknown> }>();
+    for (const m of parsed.mutations) {
+      if (typeof m.id === 'number' && typeof m.name === 'string' && typeof m.args === 'object' && m.args !== null) {
+        mutations.set(m.id, { name: m.name, args: m.args as Record<string, unknown> });
+      }
+    }
+    return { clientId: parsed.clientId, mutations };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The id and status of every mutation a successful push answer reports. */
+function pushResults(status: number, body: string): Array<{ id: number; status: string }> {
+  if (status < 200 || status >= 300) return [];
+  try {
+    const parsed = JSON.parse(body) as { results?: Array<{ id?: unknown; status?: unknown }> };
+    if (!Array.isArray(parsed.results)) return [];
+    return parsed.results.flatMap((r) =>
+      typeof r.id === 'number' && typeof r.status === 'string' ? [{ id: r.id, status: r.status }] : [],
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -182,7 +231,17 @@ export class SimSystem {
   private readonly network: SimNetwork;
   private readonly clock = new SimClock(START);
   private readonly pushPaths = new Map<number, boolean>();
+  /** The push requests sent, by exchange, to know what an answer's mutation ids stand for. */
+  private readonly sentPushes = new Map<number, SentPush>();
+  /** Writes to ticket text fields, in the order the server applied them (it handles one request at a time). */
+  private readonly fieldWrites: TicketFieldWrite[] = [];
+  /** `clientId/mutationId` of every mutation answered as applied or duplicate. */
+  private readonly answered = new Set<string>();
+  /** Tickets written by a mutation whose first answer was lost, so its place in the order is unknown. */
+  private readonly unorderedTickets = new Set<string>();
   private readonly lastPushErrors = new Map<string, string[]>();
+  /** Every rejection with a code the profile does not expect. */
+  private readonly unexpectedRejections: Array<{ client: string; code: string }> = [];
   private readonly lastWriter = new Map<string, string>();
   private ids = 0;
   private steps = 0;
@@ -385,7 +444,16 @@ export class SimSystem {
       }
       checked = drained.filter((c) => !behind.includes(c));
     }
+    if (this.unexpectedRejections.length > 0) {
+      violations.push({
+        signature: 'unexpected-rejection',
+        clients: [...new Set(this.unexpectedRejections.map((r) => r.client))],
+        detail: this.unexpectedRejections.map((r) => `${r.client}: ${r.code}`).join(', '),
+      });
+    }
     const rows = await this.server.liveRows();
+    const lost = lostEdits(rows, this.fieldWrites, this.unorderedTickets);
+    if (lost.length > 0) violations.push({ signature: 'lost-edit', detail: lost });
     for (const sim of checked) {
       const view = guard(() => sim.client.view());
       const divergence = compareWithServer(rows, accessibleSites(sim.user, this.fixtures), view);
@@ -493,12 +561,35 @@ export class SimSystem {
     throw new Error(`the clients did not settle within ${MAX_SETTLE_TURNS} turns`);
   }
 
+  /**
+   * Records what the applied mutations of one push answer wrote into ticket text fields. A mutation
+   * whose first answer is `duplicate` was applied by a request whose answer was lost, at a place in
+   * the order that is unknown, so the tickets it writes are left out of the lost-edit check.
+   */
+  private recordApplied(sent: SentPush, results: ReadonlyArray<{ id: number; status: string }>): void {
+    for (const r of results) {
+      if (r.status !== 'applied' && r.status !== 'duplicate') continue;
+      const key = `${sent.clientId}/${r.id}`;
+      if (this.answered.has(key)) continue;
+      this.answered.add(key);
+      const m = sent.mutations.get(r.id);
+      const write = m && ticketFieldWrite(m.name, m.args);
+      if (!write) continue;
+      if (r.status === 'applied') this.fieldWrites.push(write);
+      else this.unorderedTickets.add(write.ticket);
+    }
+  }
+
   private onNetwork(event: NetworkEvent): void {
     this.trace.push(describeEvent(event));
     switch (event.kind) {
       case 'sent':
         this.stats.add('exchanges');
         this.pushPaths.set(event.exchange, event.path.startsWith('/sync/push'));
+        if (event.path.startsWith('/sync/push')) {
+          const sent = sentPush(event.body);
+          if (sent) this.sentPushes.set(event.exchange, sent);
+        }
         break;
       case 'delivered':
       case 'redelivered': {
@@ -508,7 +599,17 @@ export class SimSystem {
         // A rejection either fails the request (a recorded MutationRejected) or is reported per mutation.
         this.stats.add('serverRejections', errors.filter((e) => e.startsWith('MutationRejected')).length);
         if (this.pushPaths.get(event.exchange)) {
-          for (const r of event.responses) this.stats.add('serverRejections', rejectedResults(r.status, r.body));
+          for (const r of event.responses) {
+            const codes = rejectedCodes(r.status, r.body);
+            this.stats.add('serverRejections', codes.length);
+            for (const code of codes) {
+              if (!(this.profile.rejectionCodes as readonly string[]).includes(code)) {
+                this.unexpectedRejections.push({ client: event.client, code });
+              }
+            }
+          }
+          const sent = this.sentPushes.get(event.exchange);
+          for (const r of event.responses) if (sent) this.recordApplied(sent, pushResults(r.status, r.body));
           if (event.kind === 'delivered') this.lastPushErrors.set(event.client, errors);
         }
         break;

@@ -14,10 +14,13 @@ export function describeViolation(v: Violation): string {
       return `${label} at ${v.client}:${list('missing', d.missing)}${list('unexpected', d.unexpected)}${list('foreign', d.foreign)}${list('different', d.different)}`;
     }
     case 'rejected-mutation-500':
+    case 'unexpected-rejection':
     case 'stuck-request':
     case 'livelock':
     case 'client-error':
       return `${label}: ${v.detail}`;
+    case 'lost-edit':
+      return `${label}: ${v.detail.slice(0, 5).join('; ')}${v.detail.length > 5 ? `; +${v.detail.length - 5}` : ''}`;
   }
 }
 

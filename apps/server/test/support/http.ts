@@ -25,7 +25,8 @@ export class Api {
     // Serialized here, so every value (null, strings, arrays) is sent as JSON, as a client would.
     if (opts.body !== undefined) req = req.set('content-type', 'application/json').send(JSON.stringify(opts.body));
     const res = await req;
-    const json = res.headers['content-type']?.includes('application/json') && res.text;
+    // application/json and application/problem+json (error answers).
+    const json = /^application\/(problem\+)?json/.test(res.headers['content-type'] ?? '') && res.text;
     return { status: res.status, headers: res.headers, body: (json ? JSON.parse(res.text) : res.text) as T };
   }
 

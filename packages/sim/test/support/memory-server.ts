@@ -23,7 +23,11 @@ export type Defect =
   /** Every push answers 503 without doing anything. */
   | 'push-unavailable'
   /** Pulled tickets carry the status "constructor", which no mutator accepts as a state. */
-  | 'corrupt-status';
+  | 'corrupt-status'
+  /** Rejects every edit of a ticket with INTERNAL instead of applying it. */
+  | 'internal-rejection'
+  /** An edit that leaves the description out empties it (like the original `ticket.update`). */
+  | 'blank-unsent-description';
 
 interface Entity {
   entity: EntityName;
@@ -114,14 +118,21 @@ export class MemoryServer implements SimServer {
       }
       if (m.id !== last + 1) return json(400, { message: `Out-of-order mutation ${m.id}` });
       try {
-        this.apply(user, m);
+        if (this.defects.has('internal-rejection') && m.name === 'ticket.update') {
+          throw new MutationRejected('INTERNAL', 'The server could not apply this mutation');
+        }
+        const blanks =
+          this.defects.has('blank-unsent-description') &&
+          m.name === 'ticket.update' &&
+          m.args.description === undefined;
+        this.apply(user, blanks ? { ...m, args: { ...m.args, description: '' } } : m);
         results.push({ id: m.id, status: 'applied' });
       } catch (err) {
         if (!(err instanceof MutationRejected)) throw err;
         if (this.defects.has('rejection-500')) {
           return json(500, { message: 'Internal server error' }, [{ name: 'MutationRejected', code: err.code }]);
         }
-        results.push({ id: m.id, status: 'rejected', error: `${err.code}: ${err.message}` });
+        results.push({ id: m.id, status: 'rejected', code: err.code, message: err.message, details: err.details });
       }
       this.lastMutation.set(body.clientId, m.id);
     }
@@ -163,6 +174,12 @@ export class MemoryServer implements SimServer {
         buffer.set(`${entity}/${id}`, undefined);
         writes.push({ op: 'del', entity, id });
       },
+      partsOf: (ticketId) =>
+        [...this.entities.values()]
+          .filter((e) => e.entity === 'part' && e.data?.ticketId === ticketId)
+          .map((e) => visible('part', e.id))
+          .filter((row): row is Row => row !== undefined)
+          .sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1)),
     };
     if (!allowed(m.args.siteId)) throw new MutationRejected('FORBIDDEN');
     def.apply(tx, m.args);

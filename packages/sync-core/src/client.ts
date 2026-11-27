@@ -1,20 +1,57 @@
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
-import { MUTATORS, MutationRejected, type MutatorTx } from './mutators';
+import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
-import type { Transport } from './transport';
-import type { EntityName, Mutation, MutatorName, Row } from './types';
+import { TransportError, type Transport } from './transport';
+import {
+  MAX_PUSH_BODY_BYTES,
+  MAX_PUSH_MUTATIONS,
+  type EntityName,
+  type Mutation,
+  type MutatorName,
+  type Rejection,
+  type Row,
+} from './types';
 
 export type SyncStatus = 'idle' | 'syncing' | 'offline';
 
-export interface Rejection {
+/** Why the last sync failed: the server's problem code, or NETWORK when no answer arrived. */
+export interface SyncError {
+  /** 0 when no answer arrived. */
+  status: number;
+  code: string;
+  details?: Readonly<Record<string, unknown>>;
+}
+
+/** A mutation the server refused, with its reason; the client keeps it for the user to see. */
+export interface RejectedMutation extends Rejection {
   mutation: Mutation;
-  error: string;
 }
 
 /** A mutation waiting for the server, with the time it was queued (its optimistic timestamp). */
 interface Queued {
   mutation: Mutation;
   queuedAt: string;
+  /** UTF-8 bytes of the mutation's JSON, for splitting the queue into push bodies. */
+  bytes: number;
+  /**
+   * Set once the server applied the mutation: the change-log version of its last change. The
+   * mutation stays in the queue, and in the optimistic view, until the cursor reaches this version,
+   * so an interrupted pull never takes the user's change out of the view (F-30). It is not sent again.
+   */
+  appliedAt?: number;
+  /**
+   * Set when the server answered a copy of the mutation as a duplicate without a version (its
+   * result was collected): the change's version is unknown, so the mutation stays in the view until
+   * a pull completes, and is not sent again.
+   */
+  awaitingPull?: true;
+}
+
+const utf8 = new TextEncoder();
+
+/** UTF-8 bytes of a value's JSON; the same in Node and browsers. */
+function jsonBytes(value: unknown): number {
+  return utf8.encode(JSON.stringify(value)).length;
 }
 
 export interface SyncClientOptions {
@@ -52,6 +89,10 @@ class MapTx implements MutatorTx {
   del(entity: EntityName, id: string): void {
     this.state.delete(`${entity}/${id}`);
   }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.state, ticketId);
+  }
 }
 
 function applyLocally(state: Map<string, Row>, m: Mutation, time: string): void {
@@ -85,13 +126,19 @@ export class SyncClient {
   private base = new Map<string, Row>();
   private cursor = 0;
   private lastMutationId = 0;
+  /**
+   * The id the next mutation gets. Ids only grow, whatever the server answers: deriving them from
+   * the last applied id and the queue length reused an id once a mutation left the queue (F-09).
+   */
+  private nextMutationId = 1;
   private pending: Queued[] = [];
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
-  private rejected: Rejection[] = [];
+  private rejected: RejectedMutation[] = [];
+  private lastError: SyncError | undefined;
   private changeCount = 0;
   private retryTimer?: TimerHandle;
-  private inFlight?: Promise<void>;
+  private inFlight: Promise<void> | undefined;
   private disposed = false;
 
   constructor(opts: SyncClientOptions) {
@@ -103,6 +150,7 @@ export class SyncClient {
     if (saved) {
       this.cursor = saved.cursor;
       this.lastMutationId = saved.lastMutationId;
+      this.nextMutationId = saved.lastMutationId + 1;
       this.base = new Map(Object.entries(saved.base));
     }
   }
@@ -115,8 +163,17 @@ export class SyncClient {
     return this.pending.length;
   }
 
-  get rejections(): readonly Rejection[] {
+  get rejections(): readonly RejectedMutation[] {
     return this.rejected;
+  }
+
+  /**
+   * Why the last sync failed, until one succeeds. A `MUTATION_OUT_OF_ORDER` (409) means the server
+   * misses mutations this client no longer has (its queue was lost): retrying cannot help, the
+   * client's state has to be reloaded.
+   */
+  get syncError(): SyncError | undefined {
+    return this.lastError;
   }
 
   /** Increases on every state change; usable as a cheap snapshot id for UI bindings. */
@@ -135,11 +192,16 @@ export class SyncClient {
    */
   mutate(name: MutatorName, args: Record<string, unknown>): void {
     const mutation: Mutation = {
-      id: this.lastMutationId + this.pending.length + 1,
+      id: this.nextMutationId,
       name,
       args: wireArgs(args),
     };
-    this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString() });
+    const bytes = jsonBytes(mutation);
+    if (this.envelopeBytes() + bytes > MAX_PUSH_BODY_BYTES) {
+      throw new TypeError(`A mutation may take at most ${MAX_PUSH_BODY_BYTES} bytes of JSON in a push`);
+    }
+    this.nextMutationId += 1;
+    this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString(), bytes });
     this.emit();
     void this.sync();
   }
@@ -161,7 +223,7 @@ export class SyncClient {
     if (!this.inFlight) {
       this.inFlight = this.runSync().finally(() => {
         this.inFlight = undefined;
-        if (this.pending.length > 0 && this.currentStatus !== 'offline') void this.sync();
+        if (this.unsent().length > 0 && this.currentStatus !== 'offline') void this.sync();
       });
     }
     return this.inFlight;
@@ -178,27 +240,84 @@ export class SyncClient {
     try {
       await this.push();
       await this.pull();
+      this.lastError = undefined;
       this.setStatus('idle');
-    } catch {
+    } catch (err) {
+      this.lastError =
+        err instanceof TransportError
+          ? { status: err.status, code: err.code, ...(err.details ? { details: err.details } : {}) }
+          : { status: 0, code: 'NETWORK' };
       this.setStatus('offline');
       this.scheduleRetry();
     }
   }
 
+  /** Bytes of a push body with no mutations. */
+  private envelopeBytes(): number {
+    return jsonBytes({ clientId: this.clientId, mutations: [] });
+  }
+
+  /**
+   * The head of the queue that fits in one push: at most {@link MAX_PUSH_MUTATIONS} mutations and
+   * {@link MAX_PUSH_BODY_BYTES} bytes. `mutate` refuses a mutation that does not fit on its own, so
+   * the batch is never empty while the queue is not.
+   */
+  private nextBatch(): Mutation[] {
+    const batch: Mutation[] = [];
+    let bytes = this.envelopeBytes();
+    for (const q of this.pending) {
+      if (q.appliedAt !== undefined || q.awaitingPull) continue;
+      // A comma separates every mutation after the first.
+      const added = q.bytes + (batch.length > 0 ? 1 : 0);
+      if (batch.length === MAX_PUSH_MUTATIONS || bytes + added > MAX_PUSH_BODY_BYTES) break;
+      batch.push(q.mutation);
+      bytes += added;
+    }
+    return batch;
+  }
+
+  /** Mutations the server has not answered yet. */
+  private unsent(): Queued[] {
+    return this.pending.filter((q) => q.appliedAt === undefined && !q.awaitingPull);
+  }
+
   private async push(): Promise<void> {
-    if (this.pending.length === 0) return;
-    const batch = this.pending.slice(0, 100).map((q) => q.mutation);
+    if (this.unsent().length === 0) return;
+    const batch = this.nextBatch();
     const resp = await this.transport.push({ clientId: this.clientId, mutations: batch });
-    const handled = new Set(resp.results.map((r) => r.id));
+    const done = new Set<number>();
     for (const r of resp.results) {
+      const queued = this.pending.find((q) => q.mutation.id === r.id);
+      if (!queued) continue;
       if (r.status === 'rejected') {
-        const mutation = batch.find((m) => m.id === r.id);
-        if (mutation) this.rejected.push({ mutation, error: r.error ?? 'rejected' });
+        this.rejected.push({
+          mutation: queued.mutation,
+          code: r.code,
+          message: r.message,
+          ...(r.details === undefined ? {} : { details: r.details }),
+        });
+        done.add(r.id);
+      } else if (r.version === undefined && r.status === 'duplicate') {
+        queued.awaitingPull = true;
+      } else if (r.version === undefined || r.version <= this.cursor) {
+        // Nothing to wait for: the mutation changed nothing, or the client has its change already.
+        done.add(r.id);
+      } else {
+        queued.appliedAt = r.version;
       }
     }
-    this.pending = this.pending.filter((q) => !handled.has(q.mutation.id));
-    this.lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+    this.pending = this.pending.filter((q) => !done.has(q.mutation.id));
+    this.acknowledge(resp.lastMutationId);
+    // Stored at once, not only after the next pull: after a reload, ids continue after the last one
+    // the server handled, so a new mutation is never answered as a duplicate of an old one.
+    this.persist();
     this.emit();
+  }
+
+  /** The server applied (or rejected) every mutation up to `lastMutationId`. */
+  private acknowledge(lastMutationId: number): void {
+    this.lastMutationId = Math.max(this.lastMutationId, lastMutationId);
+    this.nextMutationId = Math.max(this.nextMutationId, this.lastMutationId + 1);
   }
 
   private async pull(): Promise<void> {
@@ -210,8 +329,14 @@ export class SyncClient {
         else this.base.delete(key);
       }
       this.cursor = resp.nextCursor;
-      this.lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
-      this.pending = this.pending.filter((q) => q.mutation.id > this.lastMutationId);
+      this.acknowledge(resp.lastMutationId);
+      this.pending = this.pending.filter((q) => {
+        if (q.appliedAt !== undefined) return q.appliedAt > this.cursor;
+        if (q.awaitingPull) return resp.hasMore;
+        // A mutation whose answer was lost: the last page comes from the same snapshot as the
+        // client's last applied id, so every change of those mutations is in the pages read.
+        return resp.hasMore || q.mutation.id > resp.lastMutationId;
+      });
       this.persist();
       this.emit();
       if (!resp.hasMore) break;

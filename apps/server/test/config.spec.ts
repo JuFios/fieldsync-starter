@@ -25,9 +25,13 @@ describe('validate', () => {
       PORT: 3001,
       DATABASE_URL: SECRET_URL,
       DB_POOL_MAX: 20,
+      DB_LOCK_TIMEOUT_MS: 2_000,
+      DB_STATEMENT_TIMEOUT_MS: 15_000,
+      DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: 10_000,
       SEED_DEMO: false,
       CHANGELOG_RETENTION_SECONDS: 604_800,
       GC_INTERVAL_MS: 3_600_000,
+      JSON_BODY_LIMIT_BYTES: 2_097_152,
       API_DOCS_ENABLED: false,
     });
   });
@@ -41,6 +45,7 @@ describe('validate', () => {
         SEED_DEMO: 'true',
         CHANGELOG_RETENTION_SECONDS: '60',
         GC_INTERVAL_MS: '1000',
+        JSON_BODY_LIMIT_BYTES: '1048576',
         API_DOCS_ENABLED: 'true',
       }),
     ).toMatchObject({
@@ -50,6 +55,7 @@ describe('validate', () => {
       SEED_DEMO: true,
       CHANGELOG_RETENTION_SECONDS: 60,
       GC_INTERVAL_MS: 1000,
+      JSON_BODY_LIMIT_BYTES: 1_048_576,
       API_DOCS_ENABLED: true,
     });
   });
@@ -70,6 +76,13 @@ describe('validate', () => {
     ['GC_INTERVAL_MS', '999'],
     ['GC_INTERVAL_MS', '2147483648'],
     ['GC_INTERVAL_MS', '1e4'],
+    // Below what the client sends in one push, so its batches would be refused for their size.
+    ['JSON_BODY_LIMIT_BYTES', '1048575'],
+    ['JSON_BODY_LIMIT_BYTES', '67108865'],
+    ['JSON_BODY_LIMIT_BYTES', '2mb'],
+    ['DB_LOCK_TIMEOUT_MS', '0'],
+    ['DB_STATEMENT_TIMEOUT_MS', '2s'],
+    ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '-1'],
     ['PORT', '0'],
     ['PORT', '65536'],
     ['PORT', '30O1'],

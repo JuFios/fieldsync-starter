@@ -4,6 +4,7 @@ import { precondition } from '@fieldsync/test-kit';
 import type { Socket } from 'node:net';
 import { Pool } from 'pg';
 import { createTestDatabase, hasDatabase, type TestDatabase } from '../support/database';
+import { PullService } from '../../src/pull.service';
 import { RealServer } from './real-server';
 
 const describeWithDb = hasDatabase ? describe : describe.skip;
@@ -67,13 +68,31 @@ describeWithDb('the simulation binding of the real server', () => {
 
   it('records the class and code of an exception the server raises, but not of a deliberate HTTP error', async () => {
     await server.reset(fixtures, () => time);
-    const missingPart = { id: 1, name: 'part.adjust', args: { id: randomUUID(), siteId: site, delta: 1 } };
-    const failed = await server.send(push([missingPart]));
-    expect(failed.status).toBe(500);
-    expect(failed.serverErrors).toEqual([{ name: 'MutationRejected', code: 'NOT_FOUND' }]);
+    // A rejection is an answer now, not an exception: a failing service stands in for a server defect.
+    const failure = Object.assign(new TypeError('boom'), { code: 'XX000' });
+    const pull = jest.spyOn(server.app.get(PullService), 'pull').mockRejectedValueOnce(failure);
+    try {
+      const failed = await server.send({
+        method: 'GET',
+        path: '/sync/pull?cursor=0',
+        headers: { authorization: `Bearer ${user.token}` },
+      });
+      expect(failed.status).toBe(500);
+      expect(failed.serverErrors).toEqual([{ name: 'TypeError', code: 'XX000' }]);
+    } finally {
+      pull.mockRestore();
+    }
 
     const unauthorised = await server.send({ method: 'GET', path: '/me', headers: {} });
     expect(unauthorised).toMatchObject({ status: 401, serverErrors: [] });
+  });
+
+  it('answers a rejected mutation with its code and records no server error', async () => {
+    await server.reset(fixtures, () => time);
+    const missingPart = { id: 1, name: 'part.adjust', args: { id: randomUUID(), siteId: site, delta: 1 } };
+    const res = await server.send(push([missingPart]));
+    expect({ status: res.status, serverErrors: res.serverErrors }).toEqual({ status: 201, serverErrors: [] });
+    expect(JSON.parse(res.body)).toMatchObject({ results: [{ id: 1, status: 'rejected', code: 'NOT_FOUND' }] });
   });
 
   it('starts every run from empty tables and version 1', async () => {

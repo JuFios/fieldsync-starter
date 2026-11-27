@@ -1,4 +1,4 @@
-import { MutationRejected, type Mutation } from '@fieldsync/sync-core';
+import { MutationRejected, type ReceivedMutation } from '@fieldsync/sync-core';
 import type { AuthUser } from './auth';
 import type { Sql } from './db';
 
@@ -12,7 +12,7 @@ export async function accessibleSites(q: Sql, user: AuthUser): Promise<string[]>
   return rows.map((r) => r.site_id);
 }
 
-export async function authorize(q: Sql, user: AuthUser, mutation: Mutation): Promise<void> {
+export async function authorize(q: Sql, user: AuthUser, mutation: ReceivedMutation): Promise<void> {
   const sites = await accessibleSites(q, user);
   const siteId = mutation.args.siteId;
   if (typeof siteId !== 'string' || !sites.includes(siteId)) {

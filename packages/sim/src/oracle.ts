@@ -65,3 +65,73 @@ export function compareWithServer(
     different: sorted(different),
   };
 }
+
+/** The ticket fields that edits write one by one; the lost-edit property is checked per field. */
+export const TICKET_TEXT_FIELDS = ['title', 'description'] as const;
+export type TicketTextField = (typeof TICKET_TEXT_FIELDS)[number];
+
+/** The longest description, in UTF-16 code units, as documented for `ticket.create` and `ticket.update`. */
+const DESCRIPTION_MAX = 5000;
+
+/** The description as stored: cut to its limit, and one unit shorter when the cut splits a surrogate pair. */
+function storedDescription(value: string): string {
+  if (value.length <= DESCRIPTION_MAX) return value;
+  const last = value.charCodeAt(DESCRIPTION_MAX - 1);
+  const splitsPair = last >= 0xd800 && last <= 0xdbff;
+  return value.slice(0, splitsPair ? DESCRIPTION_MAX - 1 : DESCRIPTION_MAX);
+}
+
+/** What an applied mutation wrote into the text fields of one ticket. */
+export interface TicketFieldWrite {
+  ticket: string;
+  fields: Partial<Record<TicketTextField, string>>;
+}
+
+/**
+ * The text fields a mutation writes when it is applied, derived from its arguments by the documented
+ * rules rather than by running the mutator: `ticket.create` writes both (a description that is not a
+ * string is empty), `ticket.update` writes only the fields it carries.
+ */
+export function ticketFieldWrite(name: string, args: Readonly<Record<string, unknown>>): TicketFieldWrite | undefined {
+  if (typeof args.id !== 'string') return undefined;
+  const description = typeof args.description === 'string' ? storedDescription(args.description) : undefined;
+  if (name === 'ticket.create') {
+    return { ticket: args.id, fields: { title: String(args.title), description: description ?? '' } };
+  }
+  if (name !== 'ticket.update') return undefined;
+  const fields: Partial<Record<TicketTextField, string>> = {};
+  if (typeof args.title === 'string') fields.title = args.title;
+  if (description !== undefined) fields.description = description;
+  return { ticket: args.id, fields };
+}
+
+/**
+ * The lost-edit property (category 9): every text field of a live ticket holds the value of the last
+ * applied mutation that wrote that field, so an edit of one field never undoes another client's edit
+ * of the other. `writes` are in the order the server applied them; `unordered` names tickets with a
+ * write whose place in that order is unknown (its first answer was lost), which are not checked.
+ * Returns one line per field that holds anything else.
+ */
+export function lostEdits(
+  server: readonly StoredRow[],
+  writes: readonly TicketFieldWrite[],
+  unordered: ReadonlySet<string> = new Set(),
+): string[] {
+  const expected = new Map<string, Partial<Record<TicketTextField, string>>>();
+  for (const w of writes) expected.set(w.ticket, { ...expected.get(w.ticket), ...w.fields });
+  const lost: string[] = [];
+  for (const row of server) {
+    if (row.entity !== 'ticket' || unordered.has(row.id)) continue;
+    const fields = expected.get(row.id);
+    if (!fields) continue;
+    for (const field of TICKET_TEXT_FIELDS) {
+      const value = fields[field];
+      if (value !== undefined && row.data[field] !== value) {
+        lost.push(
+          `ticket/${row.id}.${field}: stored ${canonicalJson(row.data[field])}, last written ${canonicalJson(value)}`,
+        );
+      }
+    }
+  }
+  return lost.sort();
+}

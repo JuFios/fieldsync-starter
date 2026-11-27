@@ -1,17 +1,18 @@
-import { BadRequestException, Body, Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
-  ApiBody,
+  ApiConflictResponse,
+  ApiCreatedResponse,
   ApiInternalServerErrorResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiPayloadTooLargeResponse,
   ApiProduces,
-  ApiQuery,
+  ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import type { PushRequest } from '@fieldsync/sync-core';
 import type { Response } from 'express';
 import { accessibleSites } from './access';
 import type { AuthedRequest } from './auth';
@@ -19,33 +20,12 @@ import { Db } from './db';
 import { PullService } from './pull.service';
 import { PushService } from './push.service';
 import { StreamService } from './stream.service';
-
-function assertPushRequest(body: unknown): asserts body is PushRequest {
-  const b = body as Partial<PushRequest> | null;
-  const valid =
-    b !== null &&
-    typeof b === 'object' &&
-    typeof b.clientId === 'string' &&
-    b.clientId.length > 0 &&
-    b.clientId.length <= 64 &&
-    Array.isArray(b.mutations) &&
-    b.mutations.length <= 100 &&
-    b.mutations.every(
-      (m) =>
-        m !== null &&
-        typeof m === 'object' &&
-        Number.isInteger(m.id) &&
-        m.id > 0 &&
-        typeof m.name === 'string' &&
-        m.args !== null &&
-        typeof m.args === 'object',
-    );
-  if (!valid) throw new BadRequestException('Malformed push request');
-}
+import { ProblemDto, PullQueryDto, PullResponseDto, PushRequestDto, PushResponseDto } from './sync.dto';
 
 @ApiTags('sync')
 @ApiBearerAuth()
-@ApiUnauthorizedResponse({ description: 'Missing or unknown bearer token.' })
+@ApiUnauthorizedResponse({ description: 'Missing or unknown bearer token.', type: ProblemDto })
+@ApiInternalServerErrorResponse({ description: 'An unexpected failure (code INTERNAL).', type: ProblemDto })
 @Controller()
 export class SyncController {
   constructor(
@@ -67,30 +47,38 @@ export class SyncController {
   @Post('sync/push')
   @ApiOperation({
     summary: 'Apply a batch of mutations from one client',
-    description: 'Mutations are applied in order; ids already applied for the client are skipped.',
+    description:
+      'Mutations are applied in order, each in its own transaction, at most once however many copies arrive. ' +
+      'A copy of a handled mutation gets the original result. A rejected mutation is final and does not stop the batch.',
   })
-  @ApiBody({ description: '`{ clientId, mutations: [{ id, name, args }] }`, at most 100 mutations.' })
-  @ApiOkResponse({ description: '`{ results: [{ id, status, code?, message? }] }`, one result per mutation.' })
-  @ApiBadRequestResponse({ description: 'Malformed request, or a mutation id out of order.' })
-  @ApiInternalServerErrorResponse({ description: 'The batch failed while a mutation was applied.' })
-  push(@Req() req: AuthedRequest, @Body() body: unknown) {
-    assertPushRequest(body);
+  @ApiCreatedResponse({ description: 'One result per mutation.', type: PushResponseDto })
+  @ApiBadRequestResponse({ description: 'A malformed body (code BAD_REQUEST, errors per field).', type: ProblemDto })
+  @ApiConflictResponse({
+    description: 'A mutation id skips ahead of the last applied one (MUTATION_OUT_OF_ORDER, details.expected).',
+    type: ProblemDto,
+  })
+  @ApiPayloadTooLargeResponse({ description: 'The body exceeds JSON_BODY_LIMIT_BYTES.', type: ProblemDto })
+  @ApiServiceUnavailableResponse({
+    description: 'A transient database failure (TRANSIENT, Retry-After); the mutations before it were applied.',
+    type: ProblemDto,
+  })
+  push(@Req() req: AuthedRequest, @Body() body: PushRequestDto) {
     return this.pushService.push(req.user, body);
   }
 
   @Get('sync/pull')
-  @ApiOperation({ summary: 'Changes after a cursor, for the sites the user can access' })
-  @ApiQuery({ name: 'cursor', required: false, description: 'Version of the last change received; 0 to start.' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of changes (default 500).' })
-  @ApiQuery({ name: 'clientId', required: false, description: 'Client whose last applied mutation id to return.' })
-  @ApiOkResponse({ description: '`{ changes, nextCursor, hasMore, lastMutationId }`.' })
-  pull(
-    @Req() req: AuthedRequest,
-    @Query('cursor') cursor?: string,
-    @Query('limit') limit?: string,
-    @Query('clientId') clientId?: string,
-  ) {
-    return this.pullService.pull(req.user, Number(cursor ?? 0) || 0, Number(limit ?? 500) || 500, clientId);
+  @ApiOperation({
+    summary: 'Changes after a cursor, for the sites the user can access',
+    description: 'One snapshot: the page, the cursor and lastMutationId are consistent with each other.',
+  })
+  @ApiOkResponse({ type: PullResponseDto })
+  @ApiBadRequestResponse({ description: 'A cursor, limit or client id that is not valid.', type: ProblemDto })
+  @ApiServiceUnavailableResponse({
+    description: 'A transient database failure (TRANSIENT, Retry-After).',
+    type: ProblemDto,
+  })
+  pull(@Req() req: AuthedRequest, @Query() query: PullQueryDto) {
+    return this.pullService.pull(req.user, query.cursor, query.limit, query.clientId);
   }
 
   @Get('sync/stream')

@@ -33,7 +33,12 @@ class RejectingTransport implements Transport {
   push(req: PushRequest): Promise<PushResponse> {
     this.pushedIds.push(req.mutations.map((m) => m.id));
     return Promise.resolve({
-      results: req.mutations.map((m) => ({ id: m.id, status: 'rejected' as const, error: 'NOT_FOUND' })),
+      results: req.mutations.map((m) => ({
+        id: m.id,
+        status: 'rejected' as const,
+        code: 'NOT_FOUND' as const,
+        message: 'Ticket no longer exists',
+      })),
       lastMutationId: 0,
     });
   }
@@ -169,7 +174,7 @@ describe('SyncClient', () => {
     jest.setSystemTime(new Date('2030-01-01T00:10:00.000Z'));
     const after = client.rows('ticket')[0];
     expect(after).toEqual(before);
-    expect(before.createdAt).toBe('2030-01-01T00:00:00.000Z');
+    expect(before?.createdAt).toBe('2030-01-01T00:00:00.000Z');
   });
 
   it('queues the arguments as they were when mutate was called', () => {
@@ -199,7 +204,7 @@ describe('SyncClient', () => {
     const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
     client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
     await client.sync();
-    expect(client.rows('ticket')[0].createdAt).toBe('2030-01-01T00:00:00.000Z');
+    expect(client.rows('ticket')[0]?.createdAt).toBe('2030-01-01T00:00:00.000Z');
     expect(transport.pushedIds).toHaveLength(1);
     expect(clock.pendingTimers).toBe(1);
 
@@ -229,21 +234,47 @@ describe('SyncClient', () => {
     ).toEqual(['A', 'B', 'C']);
   });
 
-  knownDefect(
-    { id: 'F-09', owner: 'sync-protocol', reason: 'mutation ids are derived from lastMutationId + queue length' },
-    'never reuses a mutation id after the server rejects a mutation',
-    async () => {
-      const transport = new RejectingTransport();
-      const client = makeClient(transport);
-      client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
-      await client.sync();
-      client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
-      await client.sync();
-      const [first, second] = transport.pushedIds;
-      precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
-      expect(second).toEqual([2]);
-    },
-  );
+  it('keeps the code, message and details of a rejection and drops the mutation from the queue', async () => {
+    const details = { current: 'done' as const, allowed: ['open' as const] };
+    const transport: Transport = {
+      push: (req) =>
+        Promise.resolve({
+          results: req.mutations.map((m) => ({
+            id: m.id,
+            status: 'rejected' as const,
+            code: 'STATUS_CONFLICT' as const,
+            message: 'Status is now "done"',
+            details,
+          })),
+          lastMutationId: 1,
+        }),
+      pull: () => Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: 1 }),
+    };
+    const client = makeClient(transport);
+    client.mutate('ticket.setStatus', { id: SITE, siteId: SITE, from: 'open', to: 'in_progress' });
+    await client.sync();
+    expect(client.rejections).toEqual([
+      {
+        mutation: expect.objectContaining({ id: 1, name: 'ticket.setStatus' }),
+        code: 'STATUS_CONFLICT',
+        message: 'Status is now "done"',
+        details,
+      },
+    ]);
+    expect(client.pendingCount).toBe(0);
+  });
+
+  it('never reuses a mutation id after the server rejects a mutation', async () => {
+    const transport = new RejectingTransport();
+    const client = makeClient(transport);
+    client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
+    await client.sync();
+    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
+    await client.sync();
+    const [first, second] = transport.pushedIds;
+    precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
+    expect(second).toEqual([2]);
+  });
 
   knownDefect(
     {

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { ALLOWED_TRANSITIONS, type TicketStatus } from '@fieldsync/sync-core';
+import { ALLOWED_TRANSITIONS, ticketEdit, type TicketStatus } from '@fieldsync/sync-core';
 import { useSyncClient, useSyncState } from '../../providers';
 import { StatusBar } from '../../status-bar';
 
@@ -14,12 +14,16 @@ export default function TicketPage() {
   const ticket = client?.view().get(`ticket/${id}`);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  // What the user saw when they started editing: the base of the edit, so that a field someone else
+  // changed meanwhile is reported instead of overwritten.
+  const [seen, setSeen] = useState({ title: '', description: '' });
   const [partName, setPartName] = useState('');
 
   useEffect(() => {
     if (ticket) {
       setTitle(String(ticket.title));
       setDescription(String(ticket.description));
+      setSeen({ title: String(ticket.title), description: String(ticket.description) });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticket?.id]);
@@ -36,6 +40,15 @@ export default function TicketPage() {
   const status = ticket.status as TicketStatus;
   const parts = client.rows('part').filter((p) => p.ticketId === id);
 
+  function save(): void {
+    if (!client) return;
+    const typed = { title, description };
+    const args = ticketEdit({ id, siteId }, seen, typed);
+    if (!args) return;
+    client.mutate('ticket.update', args);
+    setSeen(typed);
+  }
+
   return (
     <>
       <Link href="/">← All tickets</Link>
@@ -47,7 +60,7 @@ export default function TicketPage() {
         <br />
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} cols={50} />
         <br />
-        <button onClick={() => client.mutate('ticket.update', { id, siteId, title, description })}>Save</button>
+        <button onClick={save}>Save</button>
       </section>
 
       <section>
@@ -94,7 +107,7 @@ export default function TicketPage() {
           <ul>
             {client.rejections.map((r) => (
               <li key={r.mutation.id}>
-                {r.mutation.name}: {r.error}
+                {r.mutation.name}: {r.code} — {r.message}
               </li>
             ))}
           </ul>

@@ -1,11 +1,15 @@
-import type { SqlResult } from '../../src/db';
+import type { SqlResult, TxOptions } from '../../src/db';
 
 /** A `Db` double: `query` and `tx` are Jest mocks; `tx` runs its callback with `inTx` as the handle. */
 export function mockDb() {
-  const inTx = { query: jest.fn<Promise<SqlResult<unknown>>, [string, unknown[]?]>() };
+  const inTx = {
+    query: jest.fn<Promise<SqlResult<unknown>>, [string, unknown[]?]>(),
+    /** Runs the callback directly, like a savepoint that is released or rolled back around it. */
+    savepoint: jest.fn(<T>(fn: () => Promise<T>) => fn()),
+  };
   return {
     query: jest.fn<Promise<SqlResult<unknown>>, [string, unknown[]?]>(),
-    tx: jest.fn(<T>(fn: (sql: typeof inTx) => Promise<T>) => fn(inTx)),
+    tx: jest.fn(<T>(fn: (sql: typeof inTx) => Promise<T>, _options?: TxOptions) => fn(inTx)),
     inTx,
   };
 }

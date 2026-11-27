@@ -1,5 +1,5 @@
 import { fc, test } from '@fast-check/jest';
-import { MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
+import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from '../src/mutators';
 import type { EntityName, MutatorName, Row, TicketStatus } from '../src/types';
 
 /**
@@ -53,6 +53,10 @@ class RecordingTx implements MutatorTx {
   del(entity: EntityName, id: string): void {
     this.rows.delete(`${entity}/${id}`);
     this.writes.push(['del', entity, id]);
+  }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.rows, ticketId);
   }
 }
 
@@ -248,4 +252,54 @@ describe('mutator determinism (property-based)', () => {
     );
     expect([...seen].sort()).toEqual(NAMES.flatMap((n) => [`${n}:applied`, `${n}:rejected`]).sort());
   });
+});
+
+/**
+ * Quantity adjustments carry a delta, not a new quantity, so two technicians who adjust the same
+ * part concurrently both count, whichever reaches the server first (task, 3.3.5).
+ */
+describe('part.adjust is commutative (property-based)', () => {
+  const PART = PARTS[0] as string;
+  const SITE = SITES[0] as string;
+  const adjustAll = (start: number, deltas: readonly number[]) => {
+    const tx = new RecordingTx(new Map([[`part/${PART}`, { id: PART, siteId: SITE, quantity: start }]]));
+    const rejected = deltas.filter((delta) => {
+      try {
+        MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta });
+        return false;
+      } catch (err) {
+        if (err instanceof MutationRejected) return true;
+        throw err;
+      }
+    });
+    return { quantity: tx.get('part', PART)?.quantity, rejected: rejected.length };
+  };
+  const deltas = fc.array(fc.integer({ min: -1000, max: 1000 }), { maxLength: 8 });
+
+  test.prop(
+    [
+      fc.integer({ min: 0, max: 10_000 }),
+      deltas.chain((d) => fc.tuple(fc.constant(d), fc.shuffledSubarray(d, { minLength: d.length }))),
+    ],
+    RUNS,
+  )(
+    'any order of the same adjustments ends at the same quantity when none of them is rejected',
+    (start, [inOrder, shuffled]) => {
+      const first = adjustAll(start, inOrder);
+      const second = adjustAll(start, shuffled);
+      fc.pre(first.rejected === 0 && second.rejected === 0);
+      expect(second.quantity).toBe(first.quantity);
+      expect(first.quantity).toBe(start + inOrder.reduce((sum, d) => sum + d, 0));
+    },
+  );
+
+  test.prop([fc.integer({ min: 0, max: 10_000 }), fc.array(fc.integer({ min: 0, max: 1000 }), { maxLength: 8 })], RUNS)(
+    'never rejects an increase, in any order',
+    (start, increases) => {
+      expect(adjustAll(start, increases)).toEqual({
+        quantity: start + increases.reduce((sum, d) => sum + d, 0),
+        rejected: 0,
+      });
+    },
+  );
 });

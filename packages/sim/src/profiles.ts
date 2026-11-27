@@ -1,3 +1,4 @@
+import type { RejectionCode } from '@fieldsync/sync-core';
 import type { LinkState, RequestFault, ResponseFault } from './network';
 import type { Role } from './types';
 
@@ -24,6 +25,8 @@ export type StepKind = (typeof STEP_KINDS)[number];
 export const SIGNATURES = [
   /** A client's queue never drained because the server answered 500 to a mutation it rejected. */
   'rejected-mutation-500',
+  /** The server rejected a mutation with a code none of the profile's actions can cause. */
+  'unexpected-rejection',
   /** A client waits forever on a request that never completes. */
   'stuck-request',
   /** A client never drained its queue for another reason. */
@@ -34,6 +37,8 @@ export const SIGNATURES = [
   'divergence',
   /** The client code threw where it must not (for example while computing its view). */
   'client-error',
+  /** A ticket field does not hold the value of the last applied mutation that wrote it. */
+  'lost-edit',
 ] as const;
 export type Signature = (typeof SIGNATURES)[number];
 
@@ -47,11 +52,6 @@ export interface KnownSignature {
 
 /** Signatures of known defects that later changes fix. Everything else is a failure. */
 export const KNOWN_SIGNATURES: Partial<Record<Signature, KnownSignature>> = {
-  'rejected-mutation-500': {
-    defect: 'F-23',
-    owner: 'sync-protocol',
-    reason: 'a rejected mutation fails the whole push with HTTP 500, so the queue never drains',
-  },
   'foreign-site-rows': {
     defect: 'F-07',
     owner: 'access-control',
@@ -101,11 +101,19 @@ export interface Profile {
   /** Known-defect signatures this profile may produce (see {@link KNOWN_SIGNATURES}). */
   allowed: readonly Signature[];
   /**
+   * Rejection codes the profile's actions can legitimately cause. Any other code, `INTERNAL` above
+   * all, means the client and the server disagree about a mutation the user was allowed to make.
+   */
+  rejectionCodes: readonly RejectionCode[];
+  /**
    * Lower bounds on the average per seed of run statistics (see `RunStats`), so a profile cannot
    * quietly stop exercising what it is meant to. Lowering one needs a reason in the README.
    */
   minimumPerSeed: Readonly<Record<string, number>>;
 }
+
+/** Concurrent edits of one field: the later one is rejected with the current value (3.3.5). */
+const SAME_FIELD_EDITS: readonly RejectionCode[] = ['FIELD_CONFLICT'];
 
 const NO_ACTIONS: Record<ActionKind, number> = {
   'create-ticket': 0,
@@ -168,8 +176,31 @@ const baseline: Profile = {
   invalidText: false,
   maxTickMs: 8_000,
   allowed: [],
+  // Creates, edits and parts of existing tickets: the server applies every one, except an edit of a
+  // field another client changed since the user saw it.
+  rejectionCodes: SAME_FIELD_EDITS,
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, 'action:edit-ticket': 6 },
 };
+
+/**
+ * What the rejectable actions cause: status races (`STATUS_CONFLICT`), statuses an outdated screen
+ * offers (`INVALID_TRANSITION`), edits and parts of deleted tickets (`NOT_FOUND`), adjustments near
+ * zero (`NEGATIVE_QUANTITY`) and text the server must refuse (`BAD_ARGS`).
+ */
+const REJECTABLE: readonly RejectionCode[] = [
+  'STATUS_CONFLICT',
+  'INVALID_TRANSITION',
+  'NOT_FOUND',
+  'NEGATIVE_QUANTITY',
+  'BAD_ARGS',
+  'FIELD_CONFLICT',
+];
+
+/**
+ * While incremental pulls leak other sites' tickets (F-07), a client can edit one of them and the
+ * server refuses it with FORBIDDEN; the access-control change removes this code with the defect.
+ */
+const FOREIGN_TICKET_EDITS: readonly RejectionCode[] = ['FORBIDDEN'];
 
 /** Baseline plus every action that can be rejected: status races, deletes against edits, adjustments near zero. */
 const rejections: Profile = {
@@ -186,7 +217,8 @@ const rejections: Profile = {
     'adjust-part': 6,
   },
   invalidText: true,
-  allowed: ['rejected-mutation-500'],
+  allowed: [],
+  rejectionCodes: REJECTABLE,
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, serverRejections: 1, 'action:change-status': 3 },
 };
 
@@ -209,6 +241,7 @@ const multiSite: Profile = {
     { user: 3, skewMs: 1_000 },
   ],
   allowed: ['foreign-site-rows'],
+  rejectionCodes: [...FOREIGN_TICKET_EDITS, ...SAME_FIELD_EDITS],
   // Users of different sites see fewer of each other's tickets, so fewer rows have several writers.
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, 'action:edit-ticket': 6 },
 };
@@ -221,7 +254,8 @@ const full: Profile = {
   actionWeights: rejections.actionWeights,
   invalidText: true,
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
-  allowed: ['rejected-mutation-500', 'foreign-site-rows', 'stuck-request'],
+  allowed: ['foreign-site-rows', 'stuck-request'],
+  rejectionCodes: [...REJECTABLE, ...FOREIGN_TICKET_EDITS],
   minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
 };
 

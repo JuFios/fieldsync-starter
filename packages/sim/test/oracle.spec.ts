@@ -1,5 +1,5 @@
 import type { Row } from '@fieldsync/sync-core';
-import { canonicalJson, compareWithServer } from '../src/oracle';
+import { canonicalJson, compareWithServer, lostEdits, ticketFieldWrite } from '../src/oracle';
 import { convergenceViolations } from '../src/simulation';
 import type { StoredRow } from '../src/types';
 
@@ -111,5 +111,71 @@ describe('convergenceViolations', () => {
     const divergence = compareWithServer(server, new Set([NORTH]), client([]));
     if (!divergence) throw new Error('expected a divergence');
     expect(convergenceViolations('c0', divergence).map((v) => v.signature)).toEqual(['divergence']);
+  });
+});
+
+describe('ticketFieldWrite', () => {
+  const ID = 't1';
+
+  it('takes both fields from a create, and an empty description when it is not a string', () => {
+    expect(ticketFieldWrite('ticket.create', { id: ID, title: 'Pump', description: 'Leaks' })).toEqual({
+      ticket: ID,
+      fields: { title: 'Pump', description: 'Leaks' },
+    });
+    expect(ticketFieldWrite('ticket.create', { id: ID, title: 'Pump' })?.fields.description).toBe('');
+  });
+
+  it('takes only the fields an update carries', () => {
+    expect(ticketFieldWrite('ticket.update', { id: ID, title: 'Pump 2', base: { title: 'Pump' } })).toEqual({
+      ticket: ID,
+      fields: { title: 'Pump 2' },
+    });
+    expect(ticketFieldWrite('ticket.update', { id: ID, description: '' })?.fields).toEqual({ description: '' });
+  });
+
+  it('cuts a long description to 5000 units, one less when the cut splits a surrogate pair', () => {
+    const plain = 'a'.repeat(5001);
+    expect(ticketFieldWrite('ticket.update', { id: ID, description: plain })?.fields.description).toHaveLength(5000);
+    const emoji = `${'a'.repeat(4999)}😀b`;
+    expect(ticketFieldWrite('ticket.update', { id: ID, description: emoji })?.fields.description).toBe(
+      'a'.repeat(4999),
+    );
+  });
+
+  it('ignores mutations that write no ticket text', () => {
+    expect(ticketFieldWrite('ticket.setStatus', { id: ID, from: 'open', to: 'done' })).toBeUndefined();
+    expect(ticketFieldWrite('part.add', { id: ID, ticketId: ID, name: 'Seal', quantity: 1 })).toBeUndefined();
+  });
+});
+
+describe('lostEdits', () => {
+  const stored = (data: Row): StoredRow => ({ entity: 'ticket', id: 't1', siteId: 's1', data });
+  const writes = [
+    { ticket: 't1', fields: { title: 'Pump', description: 'Leaks' } },
+    { ticket: 't1', fields: { title: 'Main pump' } },
+    { ticket: 't1', fields: { description: 'Leaks badly' } },
+  ];
+
+  it('accepts a ticket whose fields hold the last write of each field', () => {
+    expect(lostEdits([stored({ id: 't1', title: 'Main pump', description: 'Leaks badly' })], writes)).toEqual([]);
+  });
+
+  it('reports a field that an edit of the other field overwrote', () => {
+    expect(lostEdits([stored({ id: 't1', title: 'Main pump', description: '' })], writes)).toEqual([
+      'ticket/t1.description: stored "", last written "Leaks badly"',
+    ]);
+  });
+
+  it('reports a field that holds an older write', () => {
+    expect(lostEdits([stored({ id: 't1', title: 'Pump', description: 'Leaks badly' })], writes)).toEqual([
+      'ticket/t1.title: stored "Pump", last written "Main pump"',
+    ]);
+  });
+
+  it('skips tickets with a write of unknown order, deleted tickets and tickets nobody wrote', () => {
+    const wrong = stored({ id: 't1', title: 'x', description: 'y' });
+    expect(lostEdits([wrong], writes, new Set(['t1']))).toEqual([]);
+    expect(lostEdits([], writes)).toEqual([]);
+    expect(lostEdits([wrong], [])).toEqual([]);
   });
 });

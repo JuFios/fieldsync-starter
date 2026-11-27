@@ -83,6 +83,7 @@ With `API_DOCS_ENABLED=true` the server describes its API at <http://localhost:3
 | `npm run test:unit` | Unit tests of test-kit, sync-core, the simulation engine and the server (every service method, with its collaborators replaced in the Nest testing module) | |
 | `npm run test:integration` | Server tests on a real Postgres | `DATABASE_URL` |
 | `npm run test:sim` | The simulation corpus against the real server on Postgres (see [Simulation](#simulation)) | `DATABASE_URL` |
+| `npm run test:bench` | Push throughput through the change log's head (16 clients, 2000 mutations; `BENCH_CLIENTS`, `BENCH_MUTATIONS`): checks each mutation is applied once and prints mutations/s and latency percentiles; not part of `npm test` | `DATABASE_URL` |
 | `npm run sim -- --help` | Local simulation search over any number of scenarios, with shrinking (see [Simulation](#simulation)) | `DATABASE_URL` |
 | `npm test` | Unit, integration and simulation tests; database suites are skipped (with a notice) without `DATABASE_URL` | |
 | `npm run test:e2e` | Playwright, Chromium, against the production builds | `npm run build`, `DATABASE_URL`, `npx playwright install chromium` once |
@@ -126,6 +127,11 @@ Invalid configuration:
   - GC_INTERVAL_MS must be an integer from 1000 to 2147483647 (got "1h")
 ```
 
+The three database timeouts are sent as session settings when each connection of the server's pool
+opens (node-postgres connection parameters), not set for the whole database: PostgreSQL advises
+against `lock_timeout` and `statement_timeout` in `postgresql.conf`, and `npm run migrate` uses its
+own connections without them.
+
 Values come from the environment, then from `.env` in the working directory (`apps/server/.env`
 for `npm start -w @fieldsync/server`) when present; the environment wins. Blank values count as
 unset. `npm run migrate` reads the same variables with the same rules. Only the variables in the
@@ -138,9 +144,13 @@ errors.
 | `PORT` | `3001` | 1–65535 | HTTP port of the API |
 | `DATABASE_URL` | required | A `postgres://` or `postgresql://` connection string (libpq rules, e.g. `?host=/var/run/postgresql` for a Unix socket) | Database connection; every connection setting, TLS included (`sslmode`, ...), belongs in it |
 | `DB_POOL_MAX` | `20` | 1–1000 | Maximum connections in the server's pool |
+| `DB_LOCK_TIMEOUT_MS` | `2000` | 1–600000 | Longest wait for one lock on a server connection (`lock_timeout`). A writer that waits longer, for example behind a transaction that hangs while holding the change log's head, gets a 503 with `Retry-After` and retries |
+| `DB_STATEMENT_TIMEOUT_MS` | `15000` | 1–3600000 | Longest run of one statement on a server connection (`statement_timeout`); a page of the log or a mutation takes milliseconds |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `10000` | 1–3600000 | Postgres ends a server session that idles inside a transaction this long (`idle_in_transaction_session_timeout`), rolling it back and freeing its locks |
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
+| `JSON_BODY_LIMIT_BYTES` | `2097152` | 1048576–67108864 | Largest JSON request body. Never below the 1 MiB the client puts in one push (`MAX_PUSH_BODY_BYTES`), so its batches are not refused for their size |
 | `API_DOCS_ENABLED` | `false` | `true`, `false` | Serve the OpenAPI description at `/docs-json` and Swagger UI at `/docs`, without a token. Off by default so the API surface is not published by accident |
 
 In Docker compose every service has a memory and CPU limit (Postgres 2 CPUs and 1 GiB, the Node
@@ -237,8 +247,10 @@ covered by tests.
 
 Authentication is a global guard (`APP_GUARD`): every route requires a bearer token unless it is
 marked `@Public()` (only `/health`), so a new route cannot be left open by omission. A global
-`ValidationPipe` (`APP_PIPE`, `whitelist`, `transform`) validates DTO-typed parameters (the sync
-endpoints do not declare DTOs yet, and their input passes through unchanged); both are
+`ValidationPipe` (`APP_PIPE`, `whitelist`, `transform`) validates DTO-typed parameters (`stopAtFirstError`: one
+message per invalid field); the push body and the pull query are DTOs, the arguments of a mutation
+are checked by the shared mutators in `sync-core`. A global filter (`APP_FILTER`) answers every
+error as a problem document (RFC 9457). Both are
 registered in the module, as the NestJS documentation recommends, so in-process test applications
 get them too. Which sites a user may read or write is decided per row from the database, inside the
 services, not by a route guard.
@@ -276,7 +288,7 @@ small enough to read.
    real Postgres in the same process, with the network, time and the order of events under the
    control of the test: each run is a sequence of steps generated from a seed.
 
-**Decision: option 3** (decision D-11 of the plan), built on the documented tools of
+**Decision: option 3**, built on the documented tools of
 [fast-check](https://fast-check.dev/docs/advanced/model-based-testing/) rather than an engine of
 our own. Everything except the network and the clock is the code that ships, and every source of
 nondeterminism is controlled:
@@ -321,13 +333,132 @@ Protocol correctness (3.3.1), offline-first client (3.3.3), partial replication 
 semantics (3.3.5), change-log lifecycle (3.3.6), schema evolution (3.3.7) and SSE authentication
 are recorded with the changes that implement them.
 
+### Protocol correctness (3.3.1)
+
+**Context.** The original server gave a change its version from a `bigserial` when the row was
+inserted, not when the transaction committed. A transaction that started first and committed last
+published a version below the cursor of a reader that had already passed it, and the change was
+never delivered (F-25). It read the client's last mutation id outside the mutation's transaction
+and without a lock, so parallel copies of one mutation were all applied (F-26). A rejected mutation
+failed the whole push with 500, and the client retried it forever (F-23). The task asks for
+delivery of every change in an order that does not depend on the order of commits, idempotent
+application under any number of retries and parallel requests, and a rejection that does not block
+the queue and tells the client why.
+
+**Options for the order of changes.**
+
+1. Keep the sequence and let readers stop below the oldest transaction still in progress
+   (`pg_snapshot_xmin`, or a column with the writer's transaction id): writers stay parallel, but
+   every pull has to work out a safe horizon, a long transaction holds back delivery for everyone,
+   and the versions still have gaps.
+2. A one-row counter (`log_head`) that every writing transaction increments as its last
+   statement, holding the row lock until it commits: versions are assigned in commit order and
+   without gaps, readers need nothing special.
+3. An advisory lock around every writing transaction: the same order, but writers serialize for
+   their whole duration, not only for the last statement.
+4. A separate sequencer (logical decoding or an outbox read by one process) that numbers committed
+   changes: correct and parallel, but another moving part and a delay between commit and delivery.
+
+**Decision: option 2.** A transaction locks the client's row, then the entity rows it reads and
+writes (by key, a ticket before its parts), and increments `log_head` in the same statement that
+appends to the change log, stamps the entities and records the result, so the head is held only
+from that statement to the commit. A deadlock is not possible with one lock order, and the stress
+test with 16 clients on three tickets sees none. Cost, measured by `npm run test:bench`
+(16 clients, 2000 one-mutation pushes, local Postgres 16): about 660 mutations/s against about
+890/s for the original server (76 %), p95 latency about 49 ms against about 25 ms; 99 % of the
+head's updates are HOT. The accepted threshold for this benchmark is at least 70 % of the
+original throughput and a p95 of at most 50 ms on the same machine; CI runs it for correctness only,
+since timings on shared runners vary too much to assert. The load test of the observability work
+measures it with 200 clients.
+
+**Idempotency.** Each mutation is its own transaction. It locks the client's row (`SELECT … FOR
+UPDATE`, after an `INSERT … ON CONFLICT DO NOTHING` for a new client), so parallel copies of one
+mutation queue up and the second sees the first one's result. `mutation_results` keeps the outcome
+of every mutation: a copy of an applied one is answered `duplicate` with the version of its change,
+a copy of a rejected one with the same rejection; only the client's owner gets these outcomes
+(F-33). Results are deleted with the change log they
+refer to (the same retention), after which such a client needs a reset anyway. Client ids are
+UUIDs. Push stays `READ COMMITTED`: under `REPEATABLE READ` two copies of a new client's first
+mutation fail with 40001 on the `ON CONFLICT` insert.
+
+**Rejections.** The mutator runs inside a savepoint. A `MutationRejected` rolls back to it, and the
+rejection (`code`, `message`, `details`) is recorded like an application: the client's last
+mutation id moves on and the mutations behind it are applied. Any other error of the mutator would
+fail the same way on every retry, so it is rejected as `INTERNAL` and logged with its stack. Errors
+of the moment (SQLSTATE classes 08, 40, 53, 57, and 55P03, 25P03) apply nothing and answer 503 with
+`Retry-After`. A gap in the mutation ids answers 409 `MUTATION_OUT_OF_ORDER` with the id expected.
+Every error answer is a problem document (RFC 9457) with a stable `code`, which the client keeps as
+`syncError`. Timeouts for locks, statements and idle transactions (`DB_LOCK_TIMEOUT_MS`,
+`DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`) keep a stuck transaction that holds
+the head from stopping every writer: they get 503 and recover when Postgres ends it.
+
+**Pull.** One `REPEATABLE READ READ ONLY` transaction reads the head, then at most `limit` changes
+with versions up to the head, and the client's last mutation id, all from one snapshot. Pages are cut
+by version, independently of the site filter; without more changes the cursor moves to the head.
+The client drops pending mutations that the server has applied only once it has caught up
+(`hasMore` false), and keeps an applied mutation in its view until it has pulled the change it made
+(the version in the push answer), so nothing flickers away in between (F-30).
+
+**Evidence.** `commit-order.spec.ts` (two real connections commit out of order; a stress test with
+writers and readers checks that no reader skips a change), `duplicates.spec.ts` (parallel and
+retried copies), `pull-snapshot.spec.ts`, `stuck-transactions.spec.ts`, `process-crash.spec.ts`
+(the server process is killed with SIGKILL in the middle of a mutation: no trace is left, and the
+mutation applies when sent again), `lock-order.spec.ts`, and the simulation.
+
+**Remaining limitations.** Writes are serialized on the head for the last statement of each
+mutation, which bounds write throughput per database. A 409 needs the client to reset its queue,
+which comes with the log lifecycle work (3.3.6); until then the client reports it as `syncError`
+and keeps retrying with its usual delay. After the retention period a copy of a rejected mutation is answered `duplicate` without
+its reason.
+
+### Merge semantics (3.3.5)
+
+**Context.** `ticket.update` always wrote both the title and the description, so of two offline
+edits of different fields the second sync undid the first (F-27). `ticket.delete` left the
+ticket's parts behind (F-31). Quantity adjustments and status changes were already relative to the
+stored row (a delta, a `from` status), but a conflict was reported as a bare code. The task asks
+that edits of different fields do not overwrite each other, that quantity changes commute, and that
+a conflicting status change is rejected with an explanation the user can act on.
+
+**Options for edits.**
+
+1. Last writer wins for the whole row (the original behaviour): loses edits.
+2. Last writer wins per field: different fields merge, but of two edits of one field one is lost
+   without anybody being told.
+3. A version per ticket (optimistic locking): nothing is lost, but edits of different fields
+   conflict as well.
+4. Per-field patch with the value the user saw (`base`): different fields merge; an edit of a field
+   someone else changed since is rejected with both values.
+5. Merging text (operational transform, CRDT): out of scope (task, section 9).
+
+**Decision: option 4.** An edit carries only the fields the user changed and, for each, the value
+on the user's screen (`ticketEdit()` in `sync-core`, used by the ticket page and the simulation).
+The server applies it if the stored value is still that one, or already the one typed; otherwise it
+rejects with `FIELD_CONFLICT` and, per field, `current` and `yours`. An edit without `base` (queued
+by the original client) writes its fields, last write in server order winning. Quantity changes
+are deltas, so concurrent adjustments both count in any order, and only one that would take the
+quantity below zero is rejected (`NEGATIVE_QUANTITY` with the stored quantity and the delta). A
+status change names the status it starts from: `STATUS_CONFLICT` carries the current status and the
+transitions it allows, `INVALID_TRANSITION` the allowed ones. Deleting a ticket deletes its parts in
+the same transaction (locked ticket first, then the parts by id), so a concurrent part edit is
+rejected as `NOT_FOUND`.
+
+**Evidence.** `mutators.spec.ts` (the whole transition table, patches, conflicts, the cascade),
+`determinism.spec.ts` (adjustments commute), `merge.spec.ts` and `delete-ticket.spec.ts` on
+Postgres, and the simulation's "no lost edits" property.
+
+**Remaining limitations.** The UI shows a rejection's code and message in the existing list;
+acting on it (keeping one of the two values, retrying a status change) is part of the frontend work
+(3.3.9). Two edits of one field always conflict, even when they could be merged as text.
+
 ## Found issues
 
-Each issue has an id, the category from the task (1 delivery order and completeness, 2 retried and
-parallel pushes, 3 rejection in the middle of the queue, 4 authenticity and access, 5 change-log
-lifecycle, 6 resources not released, 7 determinism across environments, 8 client data loss,
-9 merging concurrent edits, 10 tests that pass regardless of the behaviour they name; "other" for
-everything else), a test that reproduces it, and the commits that reproduce and fix it.
+Each issue has an id (in the order the issues were found), the category from the task (1 delivery
+order and completeness, 2 retried and parallel pushes, 3 rejection in the middle of the queue, 4
+authenticity and access, 5 change-log lifecycle, 6 resources not released, 7 determinism across
+environments, 8 client data loss, 9 merging concurrent edits, 10 tests that pass regardless of the
+behaviour they name; "other" for everything else), a test that reproduces it, and the commits that
+reproduce and fix it.
 
 | Id | Category | Issue | Status |
 |---|---|---|---|
@@ -339,10 +470,10 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-06 | 10 | `it.todo` tests named behaviour nothing checked | Fixed |
 | F-07 | 4 | Incremental pull returns other sites' changes | Open (known defect) |
 | F-08 | 4 | Write access is checked against the `siteId` the client sends | Open (known defect) |
-| F-09 | 2 | Client reuses a mutation id after a rejection | Open (known defect) |
+| F-09 | 2 | Client reuses a mutation id after a rejection | Fixed |
 | F-10 | 8 | Pending mutations are lost on reload | Open (known defect) |
 | F-11 | 8 | Two tabs sharing a `clientId` lose each other's mutations | Open (known defect) |
-| F-12 | 3 | Mutator names from `Object.prototype` crash the push | Open (known defect) |
+| F-12 | 3 | Mutator names from `Object.prototype` crash the push | Fixed |
 | F-13 | 6 | A request that never answers blocks syncing forever | Open (known defect) |
 | F-14 | other | A failed rollback replaces the original error | Fixed |
 | F-15 | other | A dropped database connection crashes the server | Fixed |
@@ -353,8 +484,17 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-20 | 7 | Mutators stamp rows with the clock of whatever environment runs them | Fixed |
 | F-21 | 7 | Mutators accept arguments the server cannot store | Fixed |
 | F-22 | 7 | Queued mutations keep a live reference to the caller's arguments | Fixed |
-| F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Open (known defect) |
+| F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Fixed |
 | F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
+| F-25 | 1 | A change that commits after a later one is never delivered | Fixed |
+| F-26 | 2 | Parallel copies of one mutation are applied several times; a retried rejection loses its reason | Fixed |
+| F-27 | 9 | An edit of one ticket field overwrites another client's edit of the other field | Fixed |
+| F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
+| F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
+| F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
+| F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
+| F-32 | 8 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
+| F-33 | 4 | A client id is not bound to its user: another user can push under it and take the owner's next mutation id | Open (known defect) |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -466,8 +606,17 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   mutation gets the rejected id.
 - **Why it is dangerous.** The server treats the new mutation as a duplicate and drops it.
 - **Reproduce.** `client.spec.ts`, "never reuses a mutation id after the server rejects a
-  mutation" (known defect).
-- **Fix.** Not fixed yet; owned by the protocol change. **Commits.** `1a3c31e` (test).
+  mutation".
+- **Fix.** Ids come from a counter that only grows: each `mutate` takes the next one, and an answer
+  of the server can only move the counter past its last applied id, never back. The server now
+  advances its last mutation id for a rejected mutation too (F-23), so both sides agree on which
+  ids are used. Within one page load the counter is exact; across reloads it restarts after the
+  stored last applied id, which is safe only once the queue itself survives a reload (F-10).
+- **Alternatives.** Keeping the formula and relying on the server advancing its id on rejection:
+  any answer that removes a mutation from the queue before the id catches up (a lost response, a
+  future server) would reuse an id again. Random ids per mutation: the server could no longer tell
+  a gap from a duplicate, and ordering would need another field.
+- **Commits.** `1a3c31e` (test), `9df3a24` (fix).
 
 ### F-10: pending mutations are lost on reload (category 8)
 
@@ -492,8 +641,15 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 - **Why it is dangerous.** The whole push answers 500, so the client retries the same batch
   forever; even with rejections handled, such a mutation would be reported as an internal error
   rather than `UNKNOWN_MUTATOR`.
-- **Reproduce.** `mutator-lookup.spec.ts` (known defect).
-- **Fix.** Not fixed yet; owned by the protocol change. **Commits.** `791bd98` (test).
+- **Reproduce.** `mutator-lookup.spec.ts`.
+- **Fix.** `mutatorNamed(name)` in `sync-core` counts only the table's own entries
+  (`Object.hasOwn`), with `isMutatorName` as a type guard; the server rejects any other name with
+  `UNKNOWN_MUTATOR`. The push body's DTO accepts any name up to 64 characters, so an unknown name
+  rejects its own mutation, not the batch.
+- **Alternatives.** A `Map` of mutators: the same safety, but the table is also the typed
+  `Record<MutatorName, MutatorDef>` the client uses. `Object.create(null)` for the table: hides the
+  problem in one object instead of fixing the lookup.
+- **Commits.** `791bd98` (test), `009d032` (fix).
 
 ### F-13: a request that never answers blocks syncing forever (category 6)
 
@@ -677,10 +833,25 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 - **Why it is dangerous.** The client never learns the reason and retries the same batch forever;
   every mutation queued after the rejected one is blocked (a poison mutation).
 - **Reproduce.** `rejections.spec.ts` and `client-ids.spec.ts` ("tells the client that a create
-  was rejected with ID_CONFLICT"), both known defects; in the simulation, the signature
-  `rejected-mutation-500` in the `rejections` and `full` profiles (see [Simulation](#simulation)).
-- **Fix.** Not fixed yet; owned by the protocol change. **Commits.** `34047d5` (test), `5120e40`
-  (`ID_CONFLICT` test), `c0e1b7d` (simulation corpus).
+  was rejected with ID_CONFLICT"), known defects until the fix; in the simulation, the signature
+  `rejected-mutation-500` in the `rejections` and `full` profiles, which no longer tolerate it (see
+  [Simulation](#simulation)).
+- **Fix.** Each mutation's transaction runs the mutator inside a savepoint. A rejection rolls back
+  to it, which undoes the mutator's writes and the locks they took, and the same transaction then
+  advances the client's last mutation id, exactly as an application does: the rejected mutation is
+  final, and the ones after it are applied. The answer names the reason:
+  `{ id, status: 'rejected', code, message, details? }` (codes and details in
+  [3.3.5](#merge-semantics-335)), and the client drops the mutation from its queue and keeps the
+  rejection for the user. The characterization test "leaves no trace of a mutation that the mutator
+  rejects" changed with this fix: it pinned the 500 behaviour (last mutation id left at 1) and now
+  expects the rejection in the answer and the id advanced. In the simulation, rejections are checked
+  by code: a profile may only see the codes its actions can cause (`unexpected-rejection`).
+- **Alternatives.** Rolling back the whole batch: one bad mutation would still block every other
+  one. A transaction per mutation without a savepoint, recording the rejection in a second
+  transaction: between the two, a retried copy of the mutation could run again. Answering 4xx for
+  the batch: the client could not tell which mutation was refused.
+- **Commits.** `34047d5` (test), `5120e40` (`ID_CONFLICT` test), `c0e1b7d` (simulation corpus),
+  `3c0b884` (rejection format), `78ef268` (savepoints), `0abb406` (fix).
 
 ### F-24: adding a part under a taken id is reported as applied (other)
 
@@ -695,6 +866,215 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   the early return was not needed for idempotency.
 - **Commits.** `dec7ec0` (test), `dfe8082` (fix).
 
+### F-25: a change that commits after a later one is never delivered (category 1)
+
+- **What.** A change-log version came from the `bigserial` sequence when the row was inserted, not
+  when its transaction committed. A transaction that took version 5 and committed after the one
+  that took 6 was invisible to a pull that ran in between; that pull answered `nextCursor = 6`, and
+  the next pull asked for versions after 6.
+- **Why it is dangerous.** The change is never delivered to that client: it silently diverges from
+  the server until it reloads everything. Any two concurrent pushes can cause it.
+- **Reproduce.** `commit-order.spec.ts`, "delivers a change that commits after a change with a later
+  position in the log": the test's own connection holds an uncommitted row with the id a ticket
+  create is about to insert, so the create waits inside its transaction after taking its version
+  while a second create commits; no hook in the server.
+- **Fix.** Versions come from a one-row table, `log_head` (decision record
+  [3.3.1](#protocol-correctness-331)). Appending to the change log is the last statement of every
+  writing transaction: one statement takes the next versions from the head (locking its row until
+  the transaction ends), inserts the log rows and stamps the changed entities. Every writer holds
+  the head from that statement to its commit, so versions are assigned and become visible in commit
+  order and without gaps; a reader can never see version 6 before 5. All other locks (the client's
+  row, the entity rows in key order) are taken before, so the head is held only for the end of the
+  transaction. The migration starts the head after the last version the sequence handed out (rows of
+  rolled-back inserts or the newest rows removed by the GC may have taken one, and a client may hold
+  it as its cursor) and drops the sequence. Also covered by a stress test: 16 writers and 4 readers
+  paging with small pages, every reader sees every version exactly once and in order.
+- **Alternatives.** See the decision record: an advisory lock with the sequence, a commit-time
+  watermark with `xid8` (`pg_snapshot_xmin`), or keeping the sequence and making readers stop below
+  the oldest running writer.
+- **Commits.** `4f9f4d9` (test), `4dd4f9e` (fix).
+
+### F-26: parallel copies of one mutation are applied several times (category 2)
+
+- **What.** `PushService` read the client's last applied mutation id with a separate query, outside
+  the transaction that applied the mutation and without a lock. Copies of one push that arrive at
+  the same time all read the same id and all apply the mutation. A copy that arrived after a
+  rejection was answered `duplicate`, without the reason.
+- **Why it is dangerous.** Retries are normal for an offline-first client (a lost answer, a flaky
+  network delivering a request twice): of 50 copies of `part.adjust (+1)` pushed at once about 20
+  were applied, so the quantity grew by 20. A client whose first answer was lost never learns why
+  its mutation was refused.
+- **Reproduce.** `duplicates.spec.ts`: 50 parallel copies in each of 100 rounds, overlapping
+  batches of one client, parallel and retried copies of a rejected mutation.
+- **Fix.** The mutation's transaction first locks the client's row (`SELECT … FOR UPDATE`, creating
+  it on the first push) and reads the last applied id there, so copies and different mutations of
+  one client run one after another and each sees what the previous one committed. The mutator runs
+  in a savepoint taken after the lock (rolling back to it keeps the lock, PostgreSQL 13.3.2). The
+  outcome of every mutation is stored in `mutation_results` in the same transaction; a copy of a
+  handled mutation is answered with it: the rejection with its code and details, or `duplicate`
+  for an applied one. `clients.user_id` now references `users`. Results live as long as the change
+  log (the GC deletes both by the same cutoff); a copy older than that is answered `duplicate`, and
+  its client has to reload anyway.
+- **Alternatives.** A unique key on `(client_id, mutation_id)` alone: it stops the second
+  application only when the insert of the key comes before the mutation's writes, and the loser's
+  answer still has no reason. An advisory lock per client: the same serialisation as the row lock,
+  but outside the data and easy to forget in another code path. Serializable isolation: correct,
+  but a conflict becomes a retry of the whole transaction, and retries are what caused the problem.
+- **Commits.** `e5831da` (test), `9755602` (fix).
+
+### F-27: an edit of one ticket field overwrites another client's edit of the other field (category 9)
+
+- **What.** `ticket.update` always wrote both the title and the description, with the values the
+  user's form held. Two technicians who edit the same ticket offline, one the title and one the
+  description, sync in some order, and the second sync writes back the first one's field as it was
+  before. An edit of one field alone was refused (`title` was required) or emptied the description.
+- **Why it is dangerous.** A confirmed edit is lost silently, on every client and the server. The
+  convergence check cannot see it: every client loses the same edit, so they all still converge.
+- **Reproduce.** `merge.spec.ts`. In the simulation, the property "no lost edits" reports it as
+  `lost-edit` (`detection.spec.ts` puts the original behaviour back).
+- **Fix.** An edit names only the fields the user changed, with `base`: the value each had on the
+  user's screen (`ticketEdit()` in `sync-core` builds it; the ticket page and the simulation use it).
+  Edits of different fields merge. An edit of a field someone else changed since is rejected with
+  `FIELD_CONFLICT`, naming for each such field the value it has now and the one the user typed, so
+  the user can keep either (decision record [3.3.5](#merge-semantics-335)). An edit without `base`
+  writes its fields (the last write in server order wins), so mutations queued by the original
+  client still apply. The simulation's edits change one field or both, and the profiles allow
+  `FIELD_CONFLICT` as a legitimate rejection.
+- **Alternatives.** Last writer wins per field without a base: different fields merge, but of two
+  edits of the same field one disappears without anybody being told, which the task asks to avoid.
+  A version per ticket (optimistic locking of the row): edits of different fields would conflict
+  too. Merging text (operational transform, CRDT): out of scope (task, section 9).
+- **Commits.** `b9d7f5e` (test), `bcff851` (fix), `ec2ef0a` (simulation property).
+
+### F-28: a batch of long mutations is refused with 413 on every retry (category 3)
+
+- **What.** The client put up to 100 mutations in one push whatever their size, and the server kept
+  Express's default JSON body limit of 100 KB. Ten tickets with a 5000-character description are
+  already more than that.
+- **Why it is dangerous.** The server refuses the whole body with 413 before any mutation runs; the
+  client retries the same batch forever, so everything queued behind it never reaches the server
+  (the same poison effect as F-23, for valid mutations).
+- **Reproduce.** `body-limit.spec.ts`, "accepts a push body as large as the client sends", and
+  `push-batches.spec.ts`, "splits a queue of long mutations into bodies the server accepts, in order".
+- **Fix.** The protocol fixes the largest push body (`MAX_PUSH_BODY_BYTES`, 1 MiB of UTF-8 JSON, in
+  `sync-core`). The client splits its queue into bodies of at most 100 mutations and that many
+  bytes, and `mutate` refuses a single mutation that could never fit (a `TypeError`, like an
+  unsendable value in F-22). The server's JSON limit is `JSON_BODY_LIMIT_BYTES` (2 MiB by default,
+  never below the protocol's 1 MiB), set with `app.useBodyParser` as the NestJS documentation
+  describes; a larger body is still a 413 and applies nothing.
+- **Alternatives.** Only raising the server limit: the largest valid batch is about 3 MB (control
+  characters take six bytes each in JSON), and any fixed limit can be exceeded by a long enough
+  queue. Only fewer mutations per batch: the count does not bound the bytes. Skipping a mutation
+  the server refuses for its size: it would be lost although it is valid.
+- **Commits.** `acf00e3` (test), `360a4fe` (fix).
+
+### F-29: unvalidated pull parameters and client ids (other)
+
+- **What.** Pull read `cursor` and `limit` with `Number(x) || 0`: `cursor=abc` became 0, a full
+  resync from the start of the log, and `-5`, `1e3` or a repeated parameter were accepted too;
+  `cursor=1.5`, `limit=1.5` and values beyond `bigint` reached Postgres and failed with 500. Push and
+  pull took any string as the client id, so one with a NUL character (which Postgres cannot store)
+  failed with 500.
+- **Why it is dangerous.** The server must not trust its input (task, section 4): a malformed
+  request silently changes what the client receives, or turns into a server error that hides the
+  client's bug.
+- **Reproduce.** `request-validation.spec.ts`.
+- **Fix.** `PushRequestDto` and `PullQueryDto` are checked by the global `ValidationPipe`: decimal
+  integers only (the same conversion as the settings, so `1e3` and `""` are refused), cursors and
+  mutation ids up to 2^53 − 1 (the integers JSON numbers carry exactly), a page of 1 to 500 changes,
+  and UUID client ids, which is what every client generates. Anything else is a 400. The mutator
+  arguments are not part of the DTO check: they reach the mutator untouched and are validated there,
+  in the code the client runs too, so one bad argument rejects only its own mutation.
+- **Alternatives.** `ParseIntPipe` per parameter: it checks the digits but no range, and has no
+  answer for the client id. `enableImplicitConversion`: turns `""` into 0 and `1e3` into 1000.
+  Clamping an out-of-range `limit` instead of refusing it: hides the client's mistake.
+- **Commits.** `0432efb` (test), `6b19648` (fix).
+
+### F-30: an applied mutation disappears from the view when the sync is interrupted (category 8)
+
+- **What.** The client dropped a mutation from its queue as soon as the push answered that it was
+  applied, and again as soon as any pull page reported a last mutation id covering it, even when
+  the change itself was still on a later page. Its optimistic view is the pulled state plus the
+  queue, so until a later pull delivered the change the user's edit was gone from the screen.
+- **Why it is dangerous.** Interrupted syncs are the normal case for the client (a dropped
+  connection between push and pull, or between two pages): the user sees their change vanish and
+  may enter it again, which creates a real duplicate. Found while making the protocol's
+  acknowledgement exact; category 8 belongs to the offline-client change, but the fix is the
+  acknowledgement itself, so it is made here.
+- **Reproduce.** `acknowledgement.spec.ts`.
+- **Fix.** An applied (or duplicate) result carries the change-log version of the mutation's last
+  change. The client keeps the mutation in its queue, applied optimistically but not sent again,
+  until its cursor reaches that version, and then drops it, so it is never shown twice either. A
+  mutation without a version (it changed nothing) or with a version the cursor already passed is
+  dropped at once. The last mutation id a pull reports removes mutations whose push answer was lost
+  only on the last page (`hasMore` false): that page comes from the same snapshot as the id, and the
+  pages before it held every change up to it.
+- **Alternatives.** Using only the pull's last mutation id on the last page (the plan's first idea):
+  a client that never reaches the end of the log under constant writes would never shorten its
+  queue. Keeping the server's rows of a mutation in the push answer: the answer would grow with the
+  mutation and duplicate what the pull delivers.
+- **Commits.** `ec9fe40` (test), `9ad66be` (fix).
+
+### F-31: deleting a ticket leaves its parts behind (category 9)
+
+- **What.** `ticket.delete` deleted the ticket row only. Its parts stayed live on the server and on
+  every client, and an adjustment of such a part, made by someone who had not seen the deletion
+  yet, was still applied.
+- **Why it is dangerous.** Concurrent edits do not merge into a consistent result: a delete and a
+  part edit leave a part that belongs to nothing, kept forever in every client's state (and in any
+  snapshot of it), and edited as if the ticket existed.
+- **Reproduce.** `delete-ticket.spec.ts`.
+- **Fix.** A mutator can declare the ticket whose parts it needs (`partsOf`); the server loads and
+  locks them after the ticket, in id order, through a new partial expression index
+  (`entities_part_ticket_idx`, built `CONCURRENTLY`; the test checks the planner can use it).
+  `ticket.delete` deletes the parts with the ticket in the same mutation, each published as a `del`;
+  a later adjustment of such a part is rejected with `NOT_FOUND`. A migration deletes the orphans an
+  existing database already has and publishes their deletion through the log head, so clients drop
+  them too. The client and the reference server of the simulation find a ticket's parts in their
+  state. Parts are found by comparing the ticket id as text, so ids are accepted only in lower case
+  (the form Postgres prints and `crypto.randomUUID()` makes); the same migration first stores the
+  ids inside existing tickets and parts (`id`, `siteId`, `ticketId`) in lower case and publishes
+  that, since the original server kept them as the client sent them.
+- **Alternatives.** A foreign key with `ON DELETE CASCADE`: rows are never deleted (tombstones keep
+  ids taken), and a cascade would not write the change log. Hiding parts of deleted tickets in the
+  UI only: the data stays and keeps diverging from what the user expects.
+- **Commits.** `6bde1c5` (test), `5042988` (fix).
+
+### F-32: after a reload, a new mutation reuses an id the server already handled (category 8)
+
+- **What.** The client stored its last applied mutation id only after a completed pull. When a push
+  was applied but the pull after it failed (the network went down) and the page was reloaded, the
+  client started numbering again after the stale stored id. The server answered the next mutation
+  as a duplicate of the old one with that id, and the client dropped it from its queue.
+- **Why it is dangerous.** The user's change is shown as synced, but the server never applies it,
+  and nobody is told. It needs only a lost connection between a push and a pull, and a reload.
+- **Reproduce.** `packages/sync-core/test/reload.spec.ts`.
+- **Fix.** The client stores its state, the last applied id included, right after every push
+  answer, not only after a pull. Ids after a reload continue after the last id the server handled.
+- **Alternatives.** Storing the next id by itself: the same effect, but a second storage format
+  next to the state; the queue that survives a reload (F-10) needs this state stored anyway. Random
+  ids: the server could no longer tell a gap from a duplicate (see F-09).
+- **Commits.** `479a024` (test), `5a998ac` (fix).
+
+### F-33: a client id is not bound to its user (category 4)
+
+The fix belongs to the access-control change; this change adds the known-defect test.
+
+- **What.** The server takes any client id with any token. The `clients` row records the user who
+  pushed first, but nothing checks it. Another user who knows a client id can push mutations under
+  it; the owner's next mutation with the same id is then answered `duplicate` and dropped by the
+  owner's client. Pull also returns the last mutation id of any client id.
+- **Why it is dangerous.** A user can make another user's changes disappear without anyone being
+  told. Client ids are random UUIDs, so this needs one to leak (for example from a log of pull URLs).
+- **Reproduce.** `client-ownership.spec.ts`, "does not let another user's push take the next
+  mutation id of the owner's client" (known defect, owner `access-control`).
+- **What this change does.** Copies of a handled mutation are answered with their stored outcome
+  (rejection details include stored field values) only for the client's owner; anyone else gets a
+  bare `duplicate` (`client-ownership.spec.ts`, "never tells another user the outcome of the owner's
+  mutations").
+- **Planned fix.** Answer 403 for a client id that belongs to another user, in push and pull. The
+  web app then needs one client id per user in a browser (it shares one for every user today).
+
 ## Changes to starter tests
 
 | Starter test | Change | Reason |
@@ -705,6 +1085,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | `packages/sync-core/test/client.spec.ts` two `it.todo` | Real tests, tracked as known defects F-10, F-11 | F-06 |
 | `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Passes an `id`; the fake transaction implements `insert` and `now` | Protocol change of F-19: `ticket.create` requires a client-chosen id and writes through `MutatorTx.insert`; timestamps come from `MutatorTx.now` (F-20) |
 | `packages/sync-core/test/client.spec.ts` "shows a locally created ticket…", "numbers local mutations sequentially" | Every `ticket.create` passes an `id` | Protocol change of F-19 |
+| `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Reads the created row with optional chaining (`created?.status`) | `sync-core` compiles with `noUncheckedIndexedAccess`: an array element may be `undefined`, so the type checker rejects the unguarded access |
 | `packages/sync-core/test/client.spec.ts` (all) | Clients are disposed in `afterEach`, not at the end of the test body: a failing assertion skipped `dispose()`, the client's retry timer stayed alive and Jest never exited | A failing test must fail, not hang |
 | `apps/server/test/access.spec.ts` | Tests renamed to what they check; the fake answers per query; admin and missing-`siteId` cases added | F-04 |
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
@@ -802,6 +1183,15 @@ random) on an emptied database. Then:
   user's own sites) separately as `divergence`, so a tolerated leak never hides a wrong row either. The server's rows are read straight from the
   `entities` table and the accessible sites come from the run's fixtures: neither goes through the
   server's pull path or access checks, so the system is never its own oracle.
+- **No lost edits** (category 9). Every title and description of a live ticket holds the value of
+  the last applied mutation that wrote that field: an edit of one field never undoes another
+  client's edit of the other. The expected value comes from the push requests and answers the
+  network carried, not from the server: the arguments of each mutation answered `applied`, in the
+  order of the answers (the server handles one request at a time), with the documented rules of what
+  `ticket.create` and `ticket.update` write. A ticket written by a mutation whose first answer was
+  lost (it shows up only as `duplicate`) has no known place in that order and is not checked.
+  Convergence alone cannot see such a loss: the client and the server run the same mutators, so
+  both lose the edit the same way.
 - **Determinism.** A seed run twice gives the same traces, byte for byte (compared by SHA-256), and
   replaying one run from its seed and path gives the same trace again. The trace holds only semantic facts:
   steps, requests and answers (status, body digest, the class and code of server-side exceptions),
@@ -811,7 +1201,9 @@ Each violation has a **signature**:
 
 | Signature | Meaning | Known defect |
 |---|---|---|
-| `rejected-mutation-500` | a queue never drained because the server answered 500 to a mutation it rejected | F-23 (protocol change) |
+| `rejected-mutation-500` | a queue never drained because the server answered 500 to a mutation it rejected | — (F-23, fixed) |
+| `unexpected-rejection` | the server rejected a mutation with a code none of the profile's actions can cause | — |
+| `lost-edit` | a ticket field does not hold the last applied write of that field | — |
 | `foreign-site-rows` | a client holds rows of a site its user cannot access | F-07 (access-control change) |
 | `stuck-request` | a client waits forever on a request that never completes | F-13 (offline-client change) |
 | `livelock` | a queue never drained for another reason | — |
@@ -823,9 +1215,9 @@ Each violation has a **signature**:
 | Profile | Sites, users, clients | Actions | Faults | Tolerated signatures |
 |---|---|---|---|---|
 | `baseline` | 1 site, 3 technicians, 4 clients (one technician on two devices) | create, edit, add part, increase quantity: nothing the server can reject | all but `hang` | none: must converge on every seed |
-| `rejections` | as `baseline` | all, including status races, deletes against edits, adjustments near zero, invalid text | all but `hang` | `rejected-mutation-500` |
+| `rejections` | as `baseline` | all, including status races, deletes against edits, adjustments near zero, invalid text | all but `hang` | none; every rejection must carry a code the actions can cause |
 | `multi-site` | 2 sites; a technician of each, one of both, an admin; 4 clients | as `baseline` | all but `hang` | `foreign-site-rows` |
-| `full` | as `multi-site` | as `rejections` | all, `hang` included | `rejected-mutation-500`, `foreign-site-rows`, `stuck-request` |
+| `full` | as `multi-site` | as `rejections` | all, `hang` included | `foreign-site-rows`, `stuck-request` |
 
 A profile may produce only its tolerated signatures; anything else fails. Each tolerated signature
 is a known-defect test in the corpus, so the change that fixes the defect sees "appears fixed - flip
@@ -893,7 +1285,8 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 
 - The engine runs against an in-memory reference server in its own tests (`packages/sim/test`),
   with defects that can be switched on: a row that pull never returns, rejections answered with 500,
-  other sites' rows in incremental pulls, a push that always fails, corrupted rows. Each must be
+  other sites' rows in incremental pulls, a push that always fails, corrupted rows, INTERNAL
+  rejections, an edit that empties the description it leaves out. Each must be
   reported with its signature, a search must stop at the first such run, and the correct server must
   converge on every run of every profile (in `full`, it may only get stuck on hung requests). The
   profile minimums are checked there as averages over 60 runs.
@@ -903,38 +1296,41 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
   trace.
 - Against the real server, putting a determinism defect back into `ticket.create` must fail the
   simulation: an id made up by the mutator (F-19) fails a baseline run, and a wall-clock timestamp
-  (F-20) makes one seed give two different traces (`detection.spec.ts`).
+  (F-20) makes one seed give two different traces, and a `ticket.update` that empties the
+  description an edit leaves out, as the original one did (F-27), is reported as `lost-edit`
+  (`detection.spec.ts`).
 
 ### Results
 
-A local search of 1000 runs per profile from seed 1 (`npm run sim -- --profile <name> --seed 1
---runs 1000`, one process per profile in parallel, about 6.5 minutes in all, fast-check
-4.11.0) found no violation other than the known defects each profile tolerates:
+After the protocol change, a local search of 1000 runs per profile from seed 20261126
+(`npm run sim -- --profile all --seed 20261126 --runs 1000`, about 15 minutes in all, fast-check
+4.11.0) found no violation other than the known defects each profile tolerates. No run shows a
+divergence, a lost edit, an unexpected rejection or `rejected-mutation-500`:
 
-| Profile | Runs without violations | Known-defect runs | First path (replay with `--seed 1 --path N`) | Time per run |
+| Profile | Runs without violations | Known-defect runs | First paths (replay with `--seed 20261126 --path N`) | Time per run |
 |---|---|---|---|---|
-| `baseline` | 1000 / 1000 | — | — | 196 ms |
-| `rejections` | 297 / 1000 | `rejected-mutation-500` (F-23): 703 | 0 | 379 ms |
-| `multi-site` | 81 / 1000 | `foreign-site-rows` (F-07): 919 | 0 | 193 ms |
-| `full` | 66 / 1000 | `rejected-mutation-500` (F-23): 644; `foreign-site-rows` (F-07): 584; `stuck-request` (F-13): 405 | F-23: 0, F-07: 0, F-13: 3 | 361 ms |
+| `baseline` | 1000 / 1000 | — | — | 253 ms |
+| `rejections` | 1000 / 1000 | — | — | 226 ms |
+| `multi-site` | 123 / 1000 | `foreign-site-rows` (F-07): 877 | 0, 1, 2 | 224 ms |
+| `full` | 100 / 1000 | `foreign-site-rows` (F-07): 777; `stuck-request` (F-13): 415 | F-07: 0, 1, 2; F-13: 0, 1, 3 | 204 ms |
 
-Per run on average: about 91 fault-phase steps, 4.8 dropped requests, 1.7 duplicates, 1.7 held
+Per run on average: about 90 fault-phase steps, 4.5 dropped requests, 1.7 duplicates, 1.7 held
 copies redelivered later, 2.9 dropped answers, 0.9 bad gateways, 0.9 truncated bodies, one link down
-and half a one-way partition; 2.5 writes per run (`baseline`) to a row another client wrote last; in
-the rejection profiles 86 to 93 mutations per run rejected by the server.
+and half a one-way partition; 2.6 writes per run (`baseline`) to a row another client wrote last; in
+the rejection profiles about 4 mutations per run rejected by the server, each with a code the
+profile's actions can cause.
 
-For example, the hung request of F-13 together with F-23 and F-07:
-
-```bash
-npm run sim -- --profile full --seed 1 --path 3 --trace
-```
+Before the protocol change, the same search from seed 1 found `rejected-mutation-500` (F-23) in 703
+of 1000 `rejections` runs and 644 of 1000 `full` runs (first path 0; for example
+`npm run sim -- --profile full --seed 1 --path 3 --trace` on the commit before `0abb406` shows the
+hung request of F-13 together with F-23 and F-07).
 
 ### Limitations
 
 - **No real concurrency.** Requests reach the server one at a time, so races between transactions
   (the change-log ordering of category 1, parallel duplicates of category 2) are out of the
-  simulation's reach. They need concurrent tests on Postgres: `client-ids.spec.ts` already races two
-  creates of one id; the change-log and duplicate races are tested with the protocol change.
+  simulation's reach. They are tested concurrently on Postgres: `client-ids.spec.ts`,
+  `commit-order.spec.ts`, `duplicates.spec.ts` and `lock-order.spec.ts`.
 - **One server instance**, and the notification stream is modelled as a `sync` step, not
   simulated.
 - **Not yet simulated:** page reloads and several tabs (the offline-client change), log compaction
@@ -967,8 +1363,8 @@ work.
   decision; only the lockfile is new. Node 20 left long-term support in April 2026. `npm audit`
   reports 20 known vulnerabilities (1 critical in `next`; high in `body-parser` and `multer`
   through `@nestjs/platform-express`, and in `eslint-config-next`; moderate ones elsewhere). The
-  API has no multipart endpoints, so `multer` is never used; request size limits are part of the
-  access-control work. The upgrade path is Node 22 or 24 LTS, NestJS 11 and a current Next.js
+  API has no multipart endpoints, so `multer` is never used; the JSON body limit is set explicitly
+  (`JSON_BODY_LIMIT_BYTES`, F-28). The upgrade path is Node 22 or 24 LTS, NestJS 11 and a current Next.js
   release, each with its own change and the full test suite as the safety net.
 - `typeorm` is flagged (moderate) through its `glob` dependency's command-line tool, which is never
   run: migrations are listed explicitly, not globbed.
@@ -980,5 +1376,18 @@ work.
   there.
 - E2e runs on one Postgres share the database name `fieldsync_e2e` unless `E2E_DATABASE` is set;
   two simultaneous runs against the same server would collide.
-- Eight defects are reproduced but not fixed yet (F-07 to F-13, F-23); each is a known-defect test with
-  an owner and is listed by every test run.
+- Six defects are reproduced but not fixed yet (F-07, F-08, F-10, F-11, F-13, F-33); each is a
+  known-defect test with an owner and is listed by every test run.
+- Writes are serialized on the change log's head for the last statement of each mutation, which
+  bounds write throughput per database (see [3.3.1](#protocol-correctness-331)).
+- A 409 `MUTATION_OUT_OF_ORDER` needs the client to reset its queue, which comes with the log
+  lifecycle work; until then the client reports it as `syncError` and keeps retrying with its
+  usual delay.
+- A session waiting for a lock does not notice that its client process died; it ends when it gets
+  the lock or its `lock_timeout` expires, so a crash leaves no trace either way.
+- There is no revert command. TypeORM's `undoLastMigration` ignores a migration's
+  `transaction = false` and reverts in a transaction, which `DROP INDEX CONCURRENTLY` cannot run in;
+  reverting by hand (as the migration tests do) needs `{ transaction: 'none' }`.
+- The OpenAPI document is 3.0 (`@nestjs/swagger` 8, the last version for NestJS 10).
+- `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on for `sync-core` only, the
+  shared protocol code; the server and the web app follow when they are next reworked.

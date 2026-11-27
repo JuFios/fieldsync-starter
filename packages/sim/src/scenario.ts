@@ -1,4 +1,4 @@
-import { ALLOWED_TRANSITIONS, type MutatorName, type Row, type TicketStatus } from '@fieldsync/sync-core';
+import { ALLOWED_TRANSITIONS, ticketEdit, type MutatorName, type Row, type TicketStatus } from '@fieldsync/sync-core';
 import type { ActionKind, Profile } from './profiles';
 import type { Fixtures, SimUser } from './types';
 
@@ -21,8 +21,8 @@ export interface ActionParams {
   sitePick: number;
   title: string;
   description: string;
-  /** When editing, keep the ticket's description instead of writing `description`. */
-  keepDescription: boolean;
+  /** Which fields an edit changes; the others keep what the user saw. */
+  editFields: 'title' | 'description' | 'both';
   /** Ask for a status the UI would not offer (an outdated screen) instead of an allowed one. */
   offScript: boolean;
   statusPick: number;
@@ -109,15 +109,21 @@ export function generateAction(kind: ActionKind, view: ActorView, params: Action
       return create();
     case 'edit-ticket':
       if (!ticket) return create();
-      return {
-        name: 'ticket.update',
-        args: {
-          id: ticket.id,
-          siteId: ticket.siteId,
-          title: params.title,
-          description: params.keepDescription ? ticket.description : params.description,
-        },
-      };
+      {
+        const seen = { title: String(ticket.title), description: String(ticket.description) };
+        const typed = {
+          title: params.editFields === 'description' ? seen.title : params.title,
+          description: params.editFields === 'title' ? seen.description : params.description,
+        };
+        // An edit that changes nothing is not sent, as in the UI: write a different title instead.
+        const args =
+          ticketEdit({ id: String(ticket.id), siteId: String(ticket.siteId) }, seen, typed) ??
+          ticketEdit({ id: String(ticket.id), siteId: String(ticket.siteId) }, seen, {
+            ...seen,
+            title: seen.title === 'Edited' ? 'Edited again' : 'Edited',
+          });
+        return { name: 'ticket.update', args: args as Record<string, unknown> };
+      }
     case 'change-status': {
       if (!ticket) return create();
       const from = ticket.status as TicketStatus;

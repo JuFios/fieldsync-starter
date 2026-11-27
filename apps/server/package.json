@@ -7,10 +7,11 @@
     "start": "node dist/main",
     "migrate": "node dist/database/migrate",
     "dev": "tsc -p tsconfig.build.json --watch",
-    "test": "jest",
+    "test": "jest --selectProjects unit integration simulation",
     "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration",
     "test:sim": "jest --selectProjects simulation",
+    "test:bench": "jest --selectProjects bench",
     "sim": "tsc -p tsconfig.sim.json && node dist-sim/test/simulation/cli.js"
   },
   "dependencies": {

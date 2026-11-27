@@ -1,5 +1,14 @@
-import { MUTATORS, MutationRejected, type MutatorTx } from '../src/mutators';
-import type { EntityName, Row } from '../src/types';
+import {
+  ALLOWED_TRANSITIONS,
+  isMutatorName,
+  MUTATORS,
+  MutationRejected,
+  mutatorNamed,
+  partsInState,
+  ticketEdit,
+  type MutatorTx,
+} from '../src/mutators';
+import type { EntityName, Row, TicketStatus } from '../src/types';
 
 /** The time a FakeTx reports; mutators must take every timestamp from it. */
 const TX_TIME = '2030-01-02T03:04:05.678Z';
@@ -32,6 +41,10 @@ class FakeTx implements MutatorTx {
   del(entity: EntityName, id: string) {
     this.rows.delete(`${entity}/${id}`);
   }
+
+  partsOf(ticketId: string): Row[] {
+    return partsInState(this.rows, ticketId);
+  }
 }
 
 const TICKET = '11111111-1111-4111-8111-111111111111';
@@ -58,8 +71,8 @@ describe('ticket mutators', () => {
     MUTATORS['ticket.create'].apply(tx, { id: TICKET, siteId: SITE, title: 'Broken pump', description: '' });
     expect(tx.rows.size).toBe(1);
     const [created] = [...tx.rows.values()];
-    expect(created.status).toBe('open');
-    expect(created.siteId).toBe(SITE);
+    expect(created?.status).toBe('open');
+    expect(created?.siteId).toBe(SITE);
   });
 
   it('creates the ticket under the id the client chose', () => {
@@ -126,6 +139,55 @@ describe('ticket mutators', () => {
   });
 });
 
+describe('ticket status machine', () => {
+  const STATUSES: TicketStatus[] = ['open', 'in_progress', 'done', 'cancelled'];
+  /** The whole table, written out, so a change to the state machine has to change this test. */
+  const EXPECTED: Record<TicketStatus, TicketStatus[]> = {
+    open: ['in_progress', 'cancelled'],
+    in_progress: ['done', 'open', 'cancelled'],
+    done: ['open'],
+    cancelled: [],
+  };
+
+  it('allows exactly the documented transitions', () => {
+    expect(ALLOWED_TRANSITIONS).toEqual(EXPECTED);
+  });
+
+  const pairs = STATUSES.flatMap((from) => STATUSES.map((to) => [from, to] as const));
+
+  it.each(pairs)('%s -> %s is applied exactly when the table allows it', (from, to) => {
+    const tx = new FakeTx([['ticket', TICKET, ticket(from)]]);
+    const run = () => MUTATORS['ticket.setStatus'].apply(tx, { id: TICKET, siteId: SITE, from, to });
+    if (EXPECTED[from].includes(to)) {
+      run();
+      expect(tx.get('ticket', TICKET)).toMatchObject({ status: to, updatedAt: TX_TIME });
+    } else {
+      const err = rejectionOf(run);
+      expect({ code: err.code, details: err.details }).toEqual({
+        code: 'INVALID_TRANSITION',
+        details: { from, to, allowed: EXPECTED[from] },
+      });
+      expect(tx.get('ticket', TICKET)?.status).toBe(from);
+    }
+  });
+
+  it.each(STATUSES)(
+    'rejects a change made from an outdated status with the current one and what it allows (now %s)',
+    (current) => {
+      const from = STATUSES.find((s) => s !== current) as TicketStatus;
+      const tx = new FakeTx([['ticket', TICKET, ticket(current)]]);
+      const err = rejectionOf(() =>
+        MUTATORS['ticket.setStatus'].apply(tx, { id: TICKET, siteId: SITE, from, to: 'open' }),
+      );
+      expect({ code: err.code, details: err.details }).toEqual({
+        code: 'STATUS_CONFLICT',
+        details: { current, allowed: EXPECTED[current] },
+      });
+      expect(tx.get('ticket', TICKET)?.status).toBe(current);
+    },
+  );
+});
+
 describe('part mutators', () => {
   it('rejects a part whose id is already taken instead of reporting it as added', () => {
     const existing = { id: PART, ticketId: TICKET, siteId: SITE, name: 'Seal', quantity: 1 };
@@ -143,7 +205,10 @@ describe('part mutators', () => {
   it('does not let a quantity go below zero', () => {
     const tx = new FakeTx([['part', PART, { id: PART, quantity: 1 }]]);
     const err = rejectionOf(() => MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: -2 }));
-    expect(err.code).toBe('NEGATIVE_QUANTITY');
+    expect({ code: err.code, details: err.details }).toEqual({
+      code: 'NEGATIVE_QUANTITY',
+      details: { quantity: 1, delta: -2 },
+    });
     expect(tx.get('part', PART)?.quantity).toBe(1);
   });
 
@@ -151,5 +216,121 @@ describe('part mutators', () => {
     const tx = new FakeTx([['part', PART, { id: PART, quantity: 1 }]]);
     MUTATORS['part.adjust'].apply(tx, { id: PART, siteId: SITE, delta: 3 });
     expect(tx.get('part', PART)?.quantity).toBe(4);
+  });
+});
+
+describe('mutatorNamed', () => {
+  it.each(Object.keys(MUTATORS))('finds %s', (name) => {
+    expect(mutatorNamed(name)).toBe(MUTATORS[name as keyof typeof MUTATORS]);
+    expect(isMutatorName(name)).toBe(true);
+  });
+
+  it.each(['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf', '', 'ticket.Create'])(
+    'finds nothing for %j, inherited names included',
+    (name) => {
+      expect(mutatorNamed(name)).toBeUndefined();
+      expect(isMutatorName(name)).toBe(false);
+    },
+  );
+});
+
+describe('ticket.update merges edits of different fields', () => {
+  const stored: Row = { ...ticket('open'), title: 'Pump', description: 'Leaks' };
+  const update = (args: Record<string, unknown>) => {
+    const tx = new FakeTx([['ticket', TICKET, stored]]);
+    MUTATORS['ticket.update'].apply(tx, { id: TICKET, siteId: SITE, ...args });
+    return tx.get('ticket', TICKET);
+  };
+  const rejection = (args: Record<string, unknown>) => rejectionOf(() => update(args) as unknown as void);
+
+  it('changes only the title, keeping the description', () => {
+    expect(update({ title: 'Pump 2' })).toMatchObject({ title: 'Pump 2', description: 'Leaks', updatedAt: TX_TIME });
+  });
+
+  it('changes only the description, keeping the title', () => {
+    expect(update({ description: '' })).toMatchObject({ title: 'Pump', description: '' });
+  });
+
+  it('writes both fields of an edit without a base, as the original form did', () => {
+    expect(update({ title: 'A', description: 'B' })).toMatchObject({ title: 'A', description: 'B' });
+  });
+
+  it('applies an edit whose base is still the stored value', () => {
+    expect(update({ title: 'Pump 2', base: { title: 'Pump' } })).toMatchObject({ title: 'Pump 2' });
+  });
+
+  it('ignores the base of a field the edit does not change', () => {
+    expect(update({ title: 'Pump 2', base: { title: 'Pump', description: 'old' } })).toMatchObject({ title: 'Pump 2' });
+  });
+
+  it('rejects an edit of a field changed since, with the current and the typed value', () => {
+    const err = rejection({
+      title: 'Main pump',
+      description: 'Leaks badly',
+      base: { title: 'Old', description: 'Old' },
+    });
+    expect({ code: err.code, message: err.message, details: err.details }).toEqual({
+      code: 'FIELD_CONFLICT',
+      message: 'title and description were changed by someone else',
+      details: {
+        fields: [
+          { field: 'title', current: 'Pump', yours: 'Main pump' },
+          { field: 'description', current: 'Leaks', yours: 'Leaks badly' },
+        ],
+      },
+    });
+  });
+
+  it('does not conflict when the edit writes the value already stored', () => {
+    expect(update({ title: 'Pump', base: { title: 'Old' } })).toMatchObject({ title: 'Pump' });
+  });
+
+  it.each([
+    [{}, 'An edit must change the title or the description'],
+    [{ description: 5 }, 'description must be a string'],
+    [{ title: 'T', base: [] }, 'base must be an object'],
+    [{ title: 'T', base: { title: 1 } }, 'base.title must be a string'],
+  ])('rejects %j as BAD_ARGS', (args, message) => {
+    const err = rejection(args);
+    expect({ code: err.code, message: err.message }).toEqual({ code: 'BAD_ARGS', message });
+  });
+});
+
+describe('ticketEdit', () => {
+  const t = { id: TICKET, siteId: SITE };
+  const seen = { title: 'Pump', description: 'Leaks' };
+
+  it('sends only the changed fields, each with the value the user saw', () => {
+    expect(ticketEdit(t, seen, { title: 'Pump 2', description: 'Leaks' })).toEqual({
+      id: TICKET,
+      siteId: SITE,
+      title: 'Pump 2',
+      base: { title: 'Pump' },
+    });
+  });
+
+  it('is undefined when nothing changed', () => {
+    expect(ticketEdit(t, seen, seen)).toBeUndefined();
+  });
+});
+
+describe('ticket.delete', () => {
+  it('deletes the ticket together with its parts, and only its parts', () => {
+    const OTHER = '44444444-4444-4444-8444-444444444444';
+    const tx = new FakeTx([
+      ['ticket', TICKET, ticket('open')],
+      ['part', PART, { id: PART, ticketId: TICKET, siteId: SITE, name: 'Seal', quantity: 1 }],
+      [
+        'part',
+        OTHER,
+        { id: OTHER, ticketId: '55555555-5555-4555-8555-555555555555', siteId: SITE, name: 'Valve', quantity: 1 },
+      ],
+    ]);
+    MUTATORS['ticket.delete'].apply(tx, { id: TICKET, siteId: SITE });
+    expect([...tx.rows.keys()]).toEqual([`part/${OTHER}`]);
+  });
+
+  it('declares the ticket whose parts it needs', () => {
+    expect(MUTATORS['ticket.delete'].partsOf?.({ id: TICKET, siteId: SITE })).toBe(TICKET);
   });
 });

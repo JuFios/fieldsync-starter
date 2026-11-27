@@ -1,7 +1,8 @@
 /**
- * Three projects: `unit` (no external services), `integration` (real Postgres from DATABASE_URL,
- * one database per test file; see test/support/database.ts) and `simulation` (the seeded network
- * simulation against the real server and database, see test/simulation).
+ * Four projects: `unit` (no external services), `integration` (real Postgres from DATABASE_URL,
+ * one database per test file; see test/support/database.ts), `simulation` (the seeded network
+ * simulation against the real server and database, see test/simulation) and `bench` (throughput
+ * measurements on Postgres, `npm run test:bench`; not part of `npm test`).
  */
 const base = {
   rootDir: __dirname,
@@ -20,6 +21,14 @@ module.exports = {
       ...base,
       displayName: 'simulation',
       testRegex: 'test/simulation/.+\\.spec\\.ts$',
+      globalSetup: '<rootDir>/test/support/global-setup.ts',
+      globalTeardown: '<rootDir>/test/support/global-teardown.ts',
+      setupFilesAfterEnv: ['<rootDir>/test/support/integration-setup.ts'],
+    },
+    {
+      ...base,
+      displayName: 'bench',
+      testRegex: 'test/bench/.+\\.bench\\.ts$',
       globalSetup: '<rootDir>/test/support/global-setup.ts',
       globalTeardown: '<rootDir>/test/support/global-teardown.ts',
       setupFilesAfterEnv: ['<rootDir>/test/support/integration-setup.ts'],

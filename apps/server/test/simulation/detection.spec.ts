@@ -7,14 +7,15 @@ import { RealServer } from './real-server';
 const describeWithDb = hasDatabase ? describe : describe.skip;
 
 /**
- * Checks of the harness itself: with a determinism defect put back into the shared mutators (both
+ * Checks of the harness itself: with a defect put back into the shared mutators (both
  * the simulated clients and the server run this process's copy of sync-core), the simulation must
  * fail. Each test restores the mutator afterwards.
  */
-describeWithDb('the simulation finds the determinism defects when they are put back', () => {
+describeWithDb('the simulation finds the defects of the mutators when they are put back', () => {
   let database: TestDatabase;
   let server: RealServer;
   const original: MutatorDef = MUTATORS['ticket.create'];
+  const originalUpdate: MutatorDef = MUTATORS['ticket.update'];
 
   beforeAll(async () => {
     database = await createTestDatabase();
@@ -22,6 +23,7 @@ describeWithDb('the simulation finds the determinism defects when they are put b
   });
   afterEach(() => {
     MUTATORS['ticket.create'] = original;
+    MUTATORS['ticket.update'] = originalUpdate;
   });
   afterAll(async () => {
     await server?.close();
@@ -48,6 +50,7 @@ describeWithDb('the simulation finds the determinism defects when they are put b
             put: (entity, id, row) => tx.put(entity, id, row),
             insert: (entity, id, row) => tx.insert(entity, id, row),
             del: (entity, id) => tx.del(entity, id),
+            partsOf: (ticketId) => tx.partsOf(ticketId),
           },
           args,
         ),
@@ -58,5 +61,14 @@ describeWithDb('the simulation finds the determinism defects when they are put b
     const second = await run();
     expect(first.failure).toBeUndefined();
     expect(second.results[0]?.traceHash).not.toBe(first.results[0]?.traceHash);
+  }, 120_000);
+
+  it('reports a lost edit when an edit of the title empties the description, as the original ticket.update did (F-27)', async () => {
+    MUTATORS['ticket.update'] = {
+      reads: (args) => originalUpdate.reads(args),
+      apply: (tx, args) => originalUpdate.apply(tx, { ...args, description: args.description ?? '' }),
+    };
+    const report = await checkProfile({ profile: PROFILES.baseline, server, seed: 1, runs: 10, shrinkTimeMs: 0 });
+    expect(report.failure?.unexpected.map((v) => v.signature)).toContain('lost-edit');
   }, 120_000);
 });

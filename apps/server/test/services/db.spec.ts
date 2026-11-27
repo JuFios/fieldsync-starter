@@ -2,16 +2,26 @@ import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
-import { Db } from '../../src/db';
+import { Db, SavepointRollbackError } from '../../src/db';
+import { isTransient } from '../../src/db-errors';
 import { mockConfig } from './support';
 
-/** A QueryRunner double that records the transaction calls in order. */
+/**
+ * A QueryRunner double that records the transaction calls in order. Like TypeORM's, a nested
+ * transaction is a savepoint.
+ */
 function mockRunner() {
   const calls: string[] = [];
+  let depth = 0;
   const runner = {
     calls,
     isReleased: false,
-    isTransactionActive: false,
+    get isTransactionActive() {
+      return depth > 0;
+    },
+    set isTransactionActive(active: boolean) {
+      depth = active ? Math.max(depth, 1) : 0;
+    },
     query: jest.fn((sql: string) => {
       calls.push(`query ${sql}`);
       return Promise.resolve({ records: [{ n: 1 }], affected: undefined as number | undefined });
@@ -21,18 +31,18 @@ function mockRunner() {
       return Promise.resolve();
     }),
     startTransaction: jest.fn(() => {
-      calls.push('begin');
-      runner.isTransactionActive = true;
+      calls.push(depth === 0 ? 'begin' : 'savepoint');
+      depth += 1;
       return Promise.resolve();
     }),
     commitTransaction: jest.fn(() => {
-      calls.push('commit');
-      runner.isTransactionActive = false;
+      depth -= 1;
+      calls.push(depth === 0 ? 'commit' : 'release savepoint');
       return Promise.resolve();
     }),
     rollbackTransaction: jest.fn(() => {
-      calls.push('rollback');
-      runner.isTransactionActive = false;
+      depth -= 1;
+      calls.push(depth === 0 ? 'rollback' : 'rollback to savepoint');
       return Promise.resolve();
     }),
     release: jest.fn(() => {
@@ -128,6 +138,69 @@ describe('Db', () => {
       await expect(db.tx(() => Promise.resolve())).rejects.toThrow('commit failed');
       expect(runner.rollbackTransaction).not.toHaveBeenCalled();
       expect(runner.release).toHaveBeenCalled();
+    });
+
+    it('starts the transaction with the given isolation and read-only mode', async () => {
+      await db.tx(() => Promise.resolve(), { isolation: 'REPEATABLE READ', readOnly: true });
+      expect(runner.startTransaction).toHaveBeenCalledWith('REPEATABLE READ');
+      expect(runner.calls).toEqual(['connect', 'begin', 'query SET TRANSACTION READ ONLY', 'commit', 'release']);
+    });
+
+    it('starts a read-write transaction with the default isolation when nothing is asked for', async () => {
+      await db.tx(() => Promise.resolve());
+      expect(runner.startTransaction).toHaveBeenCalledWith(undefined);
+      expect(runner.calls).toEqual(['connect', 'begin', 'commit', 'release']);
+    });
+
+    describe('savepoint', () => {
+      it('releases the savepoint when its callback resolves, inside the transaction', async () => {
+        const result = await db.tx((sql) => sql.savepoint(async () => (await sql.query('UPDATE t')).rowCount));
+        expect(result).toBe(1);
+        expect(runner.calls).toEqual([
+          'connect',
+          'begin',
+          'savepoint',
+          'query UPDATE t',
+          'release savepoint',
+          'commit',
+          'release',
+        ]);
+      });
+
+      it('rolls back to the savepoint and rethrows, and the transaction goes on', async () => {
+        const failure = new Error('rejected');
+        const outcome = await db.tx(async (sql) => {
+          const caught = await sql.savepoint(() => Promise.reject(failure)).catch((e: unknown) => e);
+          await sql.query('UPDATE after');
+          return caught;
+        });
+        expect(outcome).toBe(failure);
+        expect(runner.calls).toEqual([
+          'connect',
+          'begin',
+          'savepoint',
+          'rollback to savepoint',
+          'query UPDATE after',
+          'commit',
+          'release',
+        ]);
+      });
+
+      it('throws the failure to roll back to the savepoint as the cause, keeping the original error', async () => {
+        const failure = new Error('rejected');
+        const lost = new Error('Connection terminated unexpectedly');
+        runner.rollbackTransaction.mockRejectedValueOnce(lost);
+        const caught = await db.tx((sql) => sql.savepoint(() => Promise.reject(failure))).catch((e: unknown) => e);
+        expect(caught).toBeInstanceOf(SavepointRollbackError);
+        expect(caught).toMatchObject({
+          message: 'Rollback to savepoint failed after "rejected": Connection terminated unexpectedly',
+          cause: lost,
+          original: failure,
+        });
+        // A lost connection while rolling back is a moment's failure, not the mutation's.
+        expect(isTransient(caught)).toBe(true);
+        expect(runner.release).toHaveBeenCalled();
+      });
     });
 
     it('releases the runner when it cannot connect', async () => {

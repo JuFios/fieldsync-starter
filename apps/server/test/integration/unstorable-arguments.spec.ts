@@ -27,7 +27,7 @@ describeWithDb('arguments Postgres cannot store', () => {
 
   it('stores a long description cut at a character boundary', async () => {
     const { id, site, result } = await applyCreate({ title: 'pump', description: `${'x'.repeat(4999)}\u{1F600}` });
-    await expect(result).resolves.toEqual([site]);
+    await expect(result.then((entries) => entries.map((e) => e.siteId))).resolves.toEqual([site]);
     const { rows } = await ctx.db.query<{ description: string }>(
       `SELECT data->>'description' AS description FROM entities WHERE entity = 'ticket' AND id = $1`,
       [id],
