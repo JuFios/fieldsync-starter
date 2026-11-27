@@ -1,5 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import type { IncomingHttpHeaders, Server } from 'node:http';
+import { PROTOCOL_HEADER, PROTOCOL_VERSION } from '@fieldsync/sync-core';
 import request from 'supertest';
 
 export interface ApiResponse<T = unknown> {
@@ -8,18 +9,21 @@ export interface ApiResponse<T = unknown> {
   body: T;
 }
 
-/** Minimal JSON client for the application under test, over supertest. */
+/** Minimal JSON client for the application under test, over supertest; it speaks the current protocol. */
 export class Api {
   constructor(private readonly app: INestApplication) {}
 
   async request<T = unknown>(
     method: 'GET' | 'POST',
     path: string,
-    opts: { token?: string; body?: unknown } = {},
+    opts: { token?: string; body?: unknown; protocol?: string | null } = {},
   ): Promise<ApiResponse<T>> {
     const server = request(this.app.getHttpServer() as Server);
     let req = method === 'GET' ? server.get(path) : server.post(path);
     if (opts.token !== undefined) req = req.set('authorization', `Bearer ${opts.token}`);
+    // Every request speaks the current protocol unless a test says otherwise (null: no header).
+    const protocol = opts.protocol === undefined ? String(PROTOCOL_VERSION) : opts.protocol;
+    if (protocol !== null) req = req.set(PROTOCOL_HEADER, protocol);
     // Every status is an answer for the tests, not an error of the request.
     req = req.ok(() => true);
     // Serialized here, so every value (null, strings, arrays) is sent as JSON, as a client would.

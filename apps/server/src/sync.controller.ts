@@ -5,6 +5,7 @@ import {
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiGoneResponse,
+  ApiHeader,
   ApiInternalServerErrorResponse,
   ApiOkResponse,
   ApiOperation,
@@ -15,10 +16,12 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import type { Observable } from 'rxjs';
+import { PROTOCOL_HEADER } from '@fieldsync/sync-core';
 import { accessibleSites } from './access';
 import type { AuthedRequest } from './auth';
 import { Db } from './db';
 import { PullService } from './pull.service';
+import { SUPPORTED_PROTOCOL } from './protocol.guard';
 import { PushService } from './push.service';
 import { SnapshotService } from './snapshot.service';
 import { StreamService } from './stream.service';
@@ -34,6 +37,20 @@ import {
 
 @ApiTags('sync')
 @ApiBearerAuth()
+@ApiHeader({
+  name: PROTOCOL_HEADER,
+  required: true,
+  description: `Version of the sync protocol the client speaks (this server: ${SUPPORTED_PROTOCOL.min} to ${SUPPORTED_PROTOCOL.max}).`,
+})
+@ApiBadRequestResponse({
+  description:
+    'A client without a supported protocol version (CLIENT_UPDATE_REQUIRED, details.min/max): update the app.',
+  type: ProblemDto,
+})
+@ApiServiceUnavailableResponse({
+  description: 'A client newer than the server (SERVER_UPDATE_REQUIRED, Retry-After): retry later.',
+  type: ProblemDto,
+})
 @ApiUnauthorizedResponse({ description: 'Missing or unknown bearer token.', type: ProblemDto })
 @ApiInternalServerErrorResponse({ description: 'An unexpected failure (code INTERNAL).', type: ProblemDto })
 @Controller()

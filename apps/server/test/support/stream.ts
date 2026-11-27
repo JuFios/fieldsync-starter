@@ -1,6 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
+import { PROTOCOL_HEADER, PROTOCOL_VERSION } from '@fieldsync/sync-core';
 
 /** An open notification stream as a real HTTP client sees it. */
 export interface OpenStream {
@@ -24,10 +25,14 @@ export async function listenOnLoopback(app: INestApplication): Promise<number> {
   return (server.address() as AddressInfo).port;
 }
 
-/** Opens `GET /sync/stream` with the given headers and waits for the response head. */
+/**
+ * Opens `GET /sync/stream` with the given headers (and the current protocol version unless they name
+ * one) and waits for the response head.
+ */
 export function openStream(port: number, headers: Record<string, string>): Promise<OpenStream> {
   return new Promise((resolve, reject) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/sync/stream', headers }, (res) => {
+    const all = { [PROTOCOL_HEADER]: String(PROTOCOL_VERSION), ...headers };
+    const req = http.get({ host: '127.0.0.1', port, path: '/sync/stream', headers: all }, (res) => {
       let received = '';
       res.setEncoding('utf8');
       res.on('data', (chunk: string) => (received += chunk));

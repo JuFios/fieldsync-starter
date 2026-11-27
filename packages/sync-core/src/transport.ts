@@ -1,4 +1,13 @@
-import type { EntityName, PullResponse, PushRequest, PushResponse, SnapshotPage, SnapshotRequest } from './types';
+import {
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
+  type EntityName,
+  type PullResponse,
+  type PushRequest,
+  type PushResponse,
+  type SnapshotPage,
+  type SnapshotRequest,
+} from './types';
 
 /**
  * A request the server answered with an error (a problem, RFC 9457): `code` says what happened
@@ -88,10 +97,15 @@ export class HttpTransport implements Transport {
     private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
   ) {}
 
+  /** Headers of every request: the token and the protocol version this client speaks. */
+  private headers(): Record<string, string> {
+    return { authorization: `Bearer ${this.token}`, [PROTOCOL_HEADER]: String(PROTOCOL_VERSION) };
+  }
+
   async push(req: PushRequest): Promise<PushResponse> {
     const res = await this.fetchImpl(`${this.baseUrl}/sync/push`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
+      headers: { ...this.headers(), 'content-type': 'application/json' },
       body: JSON.stringify(req),
     });
     if (!res.ok) throw await errorOf('push', res);
@@ -101,7 +115,7 @@ export class HttpTransport implements Transport {
   async pull(cursor: number, clientId: string, limit = 500): Promise<PullResponse> {
     const qs = new URLSearchParams({ cursor: String(cursor), clientId, limit: String(limit) });
     const res = await this.fetchImpl(`${this.baseUrl}/sync/pull?${qs.toString()}`, {
-      headers: { authorization: `Bearer ${this.token}` },
+      headers: this.headers(),
     });
     if (!res.ok) throw await errorOf('pull', res);
     return (await res.json()) as PullResponse;
@@ -117,7 +131,7 @@ export class HttpTransport implements Transport {
     }
     if (req.limit !== undefined) qs.set('limit', String(req.limit));
     const res = await this.fetchImpl(`${this.baseUrl}/sync/snapshot?${qs.toString()}`, {
-      headers: { authorization: `Bearer ${this.token}` },
+      headers: this.headers(),
     });
     if (!res.ok) throw await errorOf('snapshot', res);
     const body: unknown = await res.json();

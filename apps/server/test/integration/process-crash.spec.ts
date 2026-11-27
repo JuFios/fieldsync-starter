@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { PushResponse } from '@fieldsync/sync-core';
+import { PROTOCOL_HEADER, PROTOCOL_VERSION, type PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { describeWithDb, TEST_APPLICATION_NAME, useIntegration } from '../support/integration';
 
@@ -130,7 +130,11 @@ describeWithDb('a server process killed in the middle of a mutation', () => {
       await holder.query('UPDATE log_head SET version = version WHERE id = 1');
       void fetch(`${url}/sync/push`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${tech.token}` },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${tech.token}`,
+          [PROTOCOL_HEADER]: String(PROTOCOL_VERSION),
+        },
         body: JSON.stringify({ clientId, mutations: [edit] }),
       }).catch(() => undefined);
       // The server's transaction has locked the client and written the ticket, and waits for the head.

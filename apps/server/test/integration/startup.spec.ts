@@ -116,6 +116,7 @@ describeWithDb('server startup', () => {
         }>('/docs-json');
         const pull = res.body.paths['/sync/pull'].get.parameters ?? [];
         expect(pull.map((p) => [p.name, p.in, p.required ?? false]).sort()).toEqual([
+          ['FieldSync-Protocol', 'header', true],
           ['clientId', 'query', false],
           ['cursor', 'query', false],
           ['limit', 'query', false],
@@ -129,6 +130,7 @@ describeWithDb('server startup', () => {
         expect(responses('/sync/snapshot', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
         const snapshot = res.body.paths['/sync/snapshot'].get.parameters ?? [];
         expect(snapshot.map((p) => [p.name, p.in, p.required ?? false]).sort()).toEqual([
+          ['FieldSync-Protocol', 'header', true],
           ['afterEntity', 'query', false],
           ['afterId', 'query', false],
           ['afterSite', 'query', false],

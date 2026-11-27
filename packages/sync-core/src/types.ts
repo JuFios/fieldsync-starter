@@ -162,3 +162,17 @@ export interface SnapshotRequest {
 }
 
 export type TicketStatus = 'open' | 'in_progress' | 'done' | 'cancelled';
+
+/**
+ * The request header that names the version of the sync protocol a client speaks. The server
+ * accepts a range of versions; a client below it (or one that sends no version, as clients before
+ * versioning did) is told to update (`CLIENT_UPDATE_REQUIRED`), one above it waits for the server
+ * to be updated (`SERVER_UPDATE_REQUIRED`).
+ */
+export const PROTOCOL_HEADER = 'FieldSync-Protocol';
+
+/**
+ * The version of the sync protocol this code speaks: the mutation and result formats, the pull,
+ * snapshot and stream answers. It changes when one side could no longer understand the other.
+ */
+export const PROTOCOL_VERSION = 1;

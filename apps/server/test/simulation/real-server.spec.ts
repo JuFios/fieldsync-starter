@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Fixtures, SimRequest } from '@fieldsync/sim';
+import { PROTOCOL_HEADER, PROTOCOL_VERSION } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import type { Socket } from 'node:net';
 import { Pool } from 'pg';
@@ -8,6 +9,9 @@ import { PullService } from '../../src/pull.service';
 import { RealServer } from './real-server';
 
 const describeWithDb = hasDatabase ? describe : describe.skip;
+
+/** The protocol version header every request of the sync client carries. */
+const PROTOCOL = { [PROTOCOL_HEADER]: String(PROTOCOL_VERSION) };
 
 describeWithDb('the simulation binding of the real server', () => {
   let database: TestDatabase;
@@ -40,7 +44,7 @@ describeWithDb('the simulation binding of the real server', () => {
   const push = (mutations: unknown[], clientId = randomUUID()): SimRequest => ({
     method: 'POST',
     path: '/sync/push',
-    headers: { authorization: `Bearer ${user.token}`, 'content-type': 'application/json' },
+    headers: { ...PROTOCOL, authorization: `Bearer ${user.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ clientId, mutations }),
   });
   const create = (id: string) => ({
@@ -75,7 +79,7 @@ describeWithDb('the simulation binding of the real server', () => {
       const failed = await server.send({
         method: 'GET',
         path: '/sync/pull?cursor=0',
-        headers: { authorization: `Bearer ${user.token}` },
+        headers: { ...PROTOCOL, authorization: `Bearer ${user.token}` },
       });
       expect(failed.status).toBe(500);
       expect(failed.serverErrors).toEqual([{ name: 'TypeError', code: 'XX000' }]);
@@ -83,7 +87,7 @@ describeWithDb('the simulation binding of the real server', () => {
       pull.mockRestore();
     }
 
-    const unauthorised = await server.send({ method: 'GET', path: '/me', headers: {} });
+    const unauthorised = await server.send({ method: 'GET', path: '/me', headers: PROTOCOL });
     expect(unauthorised).toMatchObject({ status: 401, serverErrors: [] });
   });
 
@@ -124,7 +128,7 @@ describeWithDb('the simulation binding of the real server', () => {
         const res = await server.send({
           method: 'GET',
           path: '/me',
-          headers: { authorization: `Bearer ${user.token}` },
+          headers: { ...PROTOCOL, authorization: `Bearer ${user.token}` },
         });
         precondition(res.status === 200, `GET /me answered ${res.status}`);
       }
@@ -141,7 +145,7 @@ describeWithDb('the simulation binding of the real server', () => {
     // Node closes idle keep-alive sockets after keepAliveTimeout (5 s by default); a request sent just
     // as the server closes the socket fails with ECONNRESET and would abort a long search. (Node adds about
     // a second to the timeout before it closes the socket, hence the pause of 6.5 s.)
-    const me = { method: 'GET', path: '/me', headers: { authorization: `Bearer ${user.token}` } };
+    const me = { method: 'GET', path: '/me', headers: { ...PROTOCOL, authorization: `Bearer ${user.token}` } };
     await server.reset(fixtures, () => time);
     precondition((await server.send(me)).status === 200, 'the first request failed');
     let closed = 0;
