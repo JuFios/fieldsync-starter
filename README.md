@@ -36,7 +36,11 @@ Protocol in brief:
    a cursor below the collected part of the log is answered 410 `RESET_REQUIRED`.
 4. `GET /sync/snapshot` returns the live state page by page; a new client, and one that was reset,
    starts from it and then pulls the log from its watermark.
-5. `GET /sync/stream` emits `poke` events so clients pull promptly.
+5. `GET /sync/stream` emits `poke` events so clients pull promptly, and heartbeats.
+6. Every request names the protocol version it speaks (`FieldSync-Protocol`); the server tells an
+   outdated client to update.
+7. In the browser the client keeps its whole state (queue included) in IndexedDB, one database per
+   user; one tab of the user talks to the server, the others follow it.
 
 ## Running
 
@@ -154,6 +158,7 @@ errors.
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | 3600–2147483647 | Change-log entries older than this are removed by the GC, oldest first. A client whose cursor falls behind them is reset (410) and reloads from a snapshot. At least an hour: a snapshot must finish within the retention (see [3.3.6](#change-log-lifecycle-336)) |
 | `MUTATION_RESULT_RETENTION_SECONDS` | twice `CHANGELOG_RETENTION_SECONDS`, at least `1209600` | 3600–2147483647, ≥ `CHANGELOG_RETENTION_SECONDS` | Results of rejected mutations (and of applied ones that changed nothing) are kept this long, so a retried copy is answered with the same rejection; results of applied mutations go with the log entries of their changes |
 | `GC_BATCH_SIZE` | `5000` | 100–100000 | Most change-log entries one GC transaction removes |
+| `STREAM_HEARTBEAT_MS` | `15000` | 1000–60000 | Heartbeat interval of an idle notification stream. Clients treat a stream silent for three intervals as dead and reconnect; the HTML standard suggests a keep-alive "every 15 seconds or so" against proxies that drop idle connections |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
 | `JSON_BODY_LIMIT_BYTES` | `2097152` | 1048576–67108864 | Largest JSON request body. Never below the 1 MiB the client puts in one push (`MAX_PUSH_BODY_BYTES`), so its batches are not refused for their size |
 | `API_DOCS_ENABLED` | `false` | `true`, `false` | Serve the OpenAPI description at `/docs-json` and Swagger UI at `/docs`, without a token. Off by default so the API surface is not published by accident |
@@ -334,8 +339,8 @@ fast-check shrink them like any other step.
 
 ### Pending decision records
 
-Offline-first client (3.3.3), partial replication (3.3.4), schema evolution (3.3.7) and SSE
-authentication are recorded with the changes that implement them.
+Partial replication (3.3.4) and SSE authentication are recorded with the changes that implement
+them.
 
 ### Protocol correctness (3.3.1)
 
@@ -411,9 +416,8 @@ mutation applies when sent again), `lock-order.spec.ts`, and the simulation.
 
 **Remaining limitations.** Writes are serialized on the head for the last statement of each
 mutation, which bounds write throughput per database. A 409 means the client lost the mutations
-the server misses (a lost local queue); recovering from it needs a new client id and a server that
-refuses late copies under the old one, which comes with the durable client queue (3.3.3). Until then
-the client reports it as `syncError` and keeps retrying with its usual delay. After
+the server misses (a lost local queue); the client then retires its id and continues under a new one
+(see [3.3.3](#offline-first-client-333)). After
 `MUTATION_RESULT_RETENTION_SECONDS` a copy of a rejected mutation is answered `duplicate` without its
 reason.
 
@@ -537,11 +541,10 @@ of the new state, and rejections stay listed. An interrupted snapshot leaves the
 place and starts over at the next sync; after three resets in one sync the client waits for its
 next retry.
 
-*Tombstones and results.* A tombstone goes with the log entry of its deletion: every client that
-could still hold the row has a cursor below the floor and is reset, so nobody needs it. After that
-its id is free: a `ticket.create` with it is a new ticket. Retried copies of the original create are
-still answered as duplicates, because the client's last mutation id is kept for good; so an id is
-protected against reuse while its deletion is within the retention. Results of applied mutations go
+*Tombstones and results.* Tombstones (key, site and version, no data) are kept for good, so a deleted
+id is never taken again. The log lifecycle change first removed a tombstone with the log entry of its
+deletion; then an offline client's queued `ticket.delete` of the old ticket would have deleted a new
+ticket created under the same id, so the offline-client change keeps them. Results of applied mutations go
 with their log entries too (their `version` would point into the collected log). Rejections, and
 mutations that changed nothing, have no version; they are kept for `MUTATION_RESULT_RETENTION_SECONDS`
 (by default twice the log retention and at least 14 days, never less than the log retention), so a client reset after a week offline
@@ -550,7 +553,7 @@ still learns why its queued mutations were rejected.
 **Consequences.** The log, the tombstones and the results are bounded by the retention. New clients
 read the live state, not the history. A client away longer than the retention reloads and keeps
 its queue. Costs: a reset client downloads its whole state again; the snapshot must finish within
-the retention; an id can be reused once its deletion is older than the retention.
+the retention; a tombstone stays for every deletion.
 
 **NFRs, measured** (`npm run test:bench`, 16 clients, local Postgres 16, see [Indexes](#indexes) for
 the queries): one GC batch of 5000 versions takes about 10 ms; collecting a backlog of 200 000
@@ -576,6 +579,132 @@ update the old server's GC still deletes by age without raising the floor: stop 
 (or their GC) before the new ones migrate the database. Reverting the migration removes the floor,
 so a revert needs every client to reload.
 
+### Offline-first client (3.3.3)
+
+**Context.** The original client kept the server's rows and its cursor in `localStorage` and its
+queue in memory (F-10), allocated mutation ids in memory, so two tabs used the same ones (F-11),
+ignored a refused write (F-38), had no request timeout (F-13), retried every 5 s, and its web app
+never closed it (F-37). The task asks for a queue that survives reloads, tabs that do not break each
+other's queue, reconnection with exponential backoff and jitter, and a status that tells synced,
+pending, offline and rejected apart.
+
+**Storage.** IndexedDB through `idb` (decision Д-6), one database per user (named after a SHA-256
+of the token, F-40), four stores: `meta` (client id, cursor, last and next mutation ids, an update
+refusal, a client id being retired), `base` (the server's rows), `pending` (the queue, keyed by a
+generated position) and `rejections`. Every change of the state is one transaction that awaits only
+its own requests (a transaction commits once it has no pending request: MDN, `idb` "Transaction
+lifetime") and aborts on any failure; queue writes use `durability: 'strict'`, pull pages and
+snapshots, which the server can send again, `relaxed`. A mutation gets its id in the transaction that
+queues it and is shown only once stored: what the user sees survives a reload. `MemoryStorage`
+implements the same interface for tests and the simulation.
+
+| Point a page can close at | What the client does after the reload |
+|---|---|
+| before a mutation's transaction commits | the mutation is not queued and was never shown |
+| after it, before the push | the queue sends it |
+| push sent, no answer (or answer not stored yet) | it sends it again; the server answers `duplicate` with the version |
+| a pull page received, not stored | it pulls the page again (same cursor) |
+| in the middle of a snapshot | the previous state, or no cursor: a new snapshot; the queue is kept |
+| between importing the original `localStorage` and removing it | the import is marked; the next start removes it |
+| after a 409, before the old id is retired | the intent is stored; the next sync retires it first |
+| after signing out, before the database is deleted | nobody is signed in: the start deletes every FieldSync database |
+
+**Tabs** (decision Д-7). The tab that holds a Web Lock named after the user's database leads: it
+pushes, pulls and keeps the stream open; the browser releases the lock when the tab closes or
+crashes and grants it to the next tab in line (checked in Chromium by crashing the leading tab's
+renderer). The others queue their mutations in the database and are told through a
+BroadcastChannel to read what the leader stored; messages carry no data and no token and are
+checked as untrusted input. The leader reads the queue as stored right before each push, in the
+same step as it takes the batch, so a mutation another tab queued meanwhile never leaves a gap.
+
+**Network.** A request is aborted after 30 s (on the client's clock, so tests and the simulation
+control it) and on `dispose()`. Retries use exponential backoff with full jitter (a random delay
+below a ceiling that starts at 1 s and doubles up to 60 s; AWS Architecture Blog, "Exponential
+Backoff And Jitter"), never sooner than a `Retry-After`, reset after a success; the web app syncs at
+once on the browser's `online` event. The notification stream is read over `fetch` with
+`eventsource-parser`, so it carries the bearer token and the protocol version in headers like every
+other request (the browser's `EventSource` can send neither): on `ready` and on every `poke` the
+client syncs, a stream silent for three heartbeat intervals is reopened, every reopening waits a
+backoff delay. A sync asked for while one runs runs once more after it (F-39). A pull stops at the
+head of its first page, and a snapshot is installed once its tail reaches the highest head of its
+pages (each page says the head it was read at): under writes faster than a page per request,
+neither waits for a page without more changes, which never comes.
+
+**Status.** `indicator`: `synced`, `pending`, `offline`, `rejected` (until the user dismisses the
+rejections), plus `loading`, `error` (the storage refuses writes) and `update-required`.
+
+**Recovery from a 409.** A 409 `MUTATION_OUT_OF_ORDER` means the server misses mutations of this
+client id that the client no longer has. Renumbering them under the same id could let a late copy of
+an old request apply one twice, so the client gives the id up: it stores the intent, retires the id
+on the server (`DELETE /sync/clients/:clientId`, owner only; from then on the id applies nothing new,
+410 `CLIENT_RETIRED`, while copies of handled mutations still get their results) and continues under
+a new id: unsent mutations up to the last id handled under the old one wait for a pull, the others
+are renumbered from 1.
+
+**Options considered.** `localStorage` (synchronous, small, no transactions); a client id per tab
+(a closed tab's queue is stranded); a SharedWorker owning the queue (missing on Safari before 16 and
+Chrome for Android); the `eventsource` package for the stream (it schedules its own reconnect timer
+outside the client's clock after every error, which a closed stream cannot cancel).
+
+**NFRs.** No mutation that `mutate` resolved for is lost (RPO 0 for the queue on `strict`
+durability); one request at a time per user, whatever the number of tabs.
+
+**Evidence.** Unit tests (`idb-storage.spec.ts` on fake-indexeddb, `tabs.spec.ts` with a property
+test over any order of mutations, syncs and tabs closing, `stream.spec.ts`, `backoff.spec.ts`,
+`termination.spec.ts`, `versioning.spec.ts`, `dispose.spec.ts`), e2e in Chromium
+(`offline-client.spec.ts`, `user-switch.spec.ts`) and the simulation's `reload`, `tab`, `poke` and
+`drop-stream` steps.
+
+**Remaining limitations.** Web Locks, BroadcastChannel and IndexedDB are required (all current
+browsers, secure contexts only); in some private modes IndexedDB is unavailable and the app says it
+cannot work offline. The app asks for persistent storage (`navigator.storage.persist()`); a browser that refuses it may
+evict the database under storage pressure (best effort, MDN "Storage quotas and eviction criteria"). Pokes come only
+from the server instance that applied the change (fan-out across instances is the observability
+change's); a client on another instance learns of it at its next sync. Signing out with unsynced
+changes discards them after a confirmation.
+
+### Schema evolution (3.3.7)
+
+**Context.** Clients update later than the server, and an app update must not lose the queue of a
+client that was offline. The task asks for a clear "update required" answer to an outdated client
+and a local database that migrates without losing its queue.
+
+**Protocol.** Every request carries `FieldSync-Protocol: <integer>`; the server accepts a range
+(`SUPPORTED_PROTOCOL`, now 1 to 1) and checks it before authentication, on every sync route and the
+stream. A client without the header (every client before versioning) or below the range gets **400**
+`CLIENT_UPDATE_REQUIRED` with `details: { min, max }`; one above the range (updated before the
+server, during a rolling update) gets 503 `SERVER_UPDATE_REQUIRED` with `Retry-After`. Not 426: RFC
+9110 (15.5.22) requires a 426 to name, in an `Upgrade` header, a protocol to switch to on the same
+connection (7.8), which an API version is not; the problem code carries the meaning. A client told to
+update stores it, makes no more requests and shows `update-required`; its queue waits for the updated
+app, which clears the refusal.
+
+**Local schema.** IndexedDB versions with one upgrade step per version in the upgrade transaction
+(an interrupted upgrade leaves the old version). Step 0 → 1 creates the stores and imports the
+original client's id and last mutation id from `localStorage` (its rows are not imported: the key was
+shared by every user, so they cannot be attributed to the one signing in; the client reloads them
+from a snapshot); the original keys are removed once the upgrade committed. A tab that holds the
+database open when another tab opens a newer version closes it at once (`versionchange`) and asks
+for a reload, so the upgrade is never kept waiting by this app.
+
+**Queued mutations.** Each carries the format version of its arguments; a queue written by a newer
+app is kept and not sent (the client says it needs the update). The arguments of the first versioned
+format are what the server accepts (an edit without `base` is a last-writer-wins edit), so no
+upgrader is needed yet.
+
+**Options considered.** URI versions (`/v1/sync/...`, the usual default for HTTP APIs and a mode of
+Nest's `enableVersioning`): routes per version, no range, and Nest answers an unknown version with
+404, not "update required". No versions: an outdated client retries forever (the client before the log
+lifecycle change does that on 410).
+
+**Evidence.** `protocol-version.spec.ts` (every route and the stream, below, above, malformed, health
+not checked), `versioning.spec.ts`, `idb-storage.spec.ts` (import, interrupted import, `versionchange`,
+`blocked`), e2e "moves the original client's id from localStorage into the database".
+
+**Remaining limitations.** A client before versioning (the original one) cannot understand the
+answer: it shows offline and retries; only a reload with the new app helps. The first local schema
+has a single upgrade step; the mechanism for the next ones is in place, their tests come with them.
+
 ## Found issues
 
 Each issue has an id (in the order the issues were found), the category from the task (1 delivery
@@ -596,10 +725,10 @@ reproduce and fix it.
 | F-07 | 4 | Incremental pull returns other sites' changes | Open (known defect) |
 | F-08 | 4 | Write access is checked against the `siteId` the client sends | Open (known defect) |
 | F-09 | 2 | Client reuses a mutation id after a rejection | Fixed |
-| F-10 | 8 | Pending mutations are lost on reload | Open (known defect) |
-| F-11 | 8 | Two tabs sharing a `clientId` lose each other's mutations | Open (known defect) |
+| F-10 | 8 | Pending mutations and the list of rejections are lost on reload | Fixed |
+| F-11 | 8 | Two tabs sharing a `clientId` lose each other's mutations | Fixed |
 | F-12 | 3 | Mutator names from `Object.prototype` crash the push | Fixed |
-| F-13 | 6 | A request that never answers blocks syncing forever | Open (known defect) |
+| F-13 | 6 | A request that never answers blocks syncing forever | Fixed |
 | F-14 | other | A failed rollback replaces the original error | Fixed |
 | F-15 | other | A dropped database connection crashes the server | Fixed |
 | F-16 | other | Unvalidated settings: an invalid GC interval runs the GC every millisecond | Fixed |
@@ -621,6 +750,12 @@ reproduce and fix it.
 | F-32 | 8 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
 | F-33 | 4 | A client id is not bound to its user: another user can push under it and take the owner's next mutation id | Open (known defect) |
 | F-34 | 5 | The GC deletes the change log by age without a signal: stale clients skip changes, new clients miss entities, and the log gets holes | Fixed |
+| F-35 | 6 | Notification streams stay subscribed after their connection closes, and an idle stream gets no heartbeat | Fixed |
+| F-36 | 6 | Open notification streams keep the server from shutting down | Fixed |
+| F-37 | 6 | The web app never closes its client and stream; a disposed client keeps its request and writes its state | Fixed |
+| F-38 | 8 | A write the browser storage refuses is ignored, and the client shows itself as synced | Fixed |
+| F-39 | 1 | A notification that arrives while a sync is running is lost (found after the protocol change) | Fixed |
+| F-40 | 4 | A user who signs in after another in the same browser sees the other's data and pushes under their client id | Fixed |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -746,18 +881,38 @@ reproduce and fix it.
 
 ### F-10: pending mutations are lost on reload (category 8)
 
-- **What.** The client persists the server snapshot and cursor but not the pending queue.
-- **Why it is dangerous.** Work done offline disappears when the page reloads.
-- **Reproduce.** `client.spec.ts`, "keeps unsynced mutations across a reload" (known defect).
-- **Fix.** Not fixed yet; owned by the offline-client change. **Commits.** `f943f8d` (test).
+- **What.** The client persisted the server's rows and its cursor (in `localStorage`) but not its
+  queue, and kept the list of rejected mutations only in memory.
+- **Why it is dangerous.** Work done offline disappears when the page reloads, and so does the
+  reason a change was refused: the user cannot tell that it never reached the server.
+- **Reproduce.** `client.spec.ts`, "keeps unsynced mutations across a reload" (a known defect from
+  the start); `idb-storage.spec.ts`, "serves a client across a reload"; e2e `offline-client.spec.ts`,
+  "keeps changes made without the server across a reload".
+- **Fix.** The client's whole state (meta, rows, queue, rejections) is in its storage, IndexedDB in
+  the browser (`IdbSyncStorage`, through `idb`), and every change of it is one transaction. A
+  mutation is shown once it is stored (see [3.3.3](#offline-first-client-333)).
+- **Alternatives.** The queue in `localStorage` next to the state: synchronous, a few megabytes for
+  every origin, no transactions across keys, shared by every tab without any coordination. A queue
+  kept in memory and written on `beforeunload`/`pagehide`: browsers do not guarantee those events
+  (a crash, a killed mobile tab).
+- **Commits.** `f943f8d` (test), `373c2a8` (fix).
 
 ### F-11: two tabs sharing a `clientId` lose each other's mutations (category 8)
 
-- **What.** Tabs share `clientId` and storage but allocate mutation ids independently, so both use
-  id 1 and the server drops the second as a duplicate.
-- **Reproduce.** `client.spec.ts`, "does not lose mutations when two tabs share one clientId"
-  (known defect).
-- **Fix.** Not fixed yet; owned by the offline-client change. **Commits.** `f943f8d` (test).
+- **What.** Tabs shared `clientId` and storage but allocated mutation ids in memory, so both used
+  id 1 and the server dropped the second as a duplicate.
+- **Why it is dangerous.** A user with two tabs open loses changes without any message.
+- **Reproduce.** `client.spec.ts`, "does not lose mutations when two tabs share one clientId" (a
+  known defect from the start); `tabs.spec.ts` (a property test over any order of mutations, syncs
+  and tabs closing); e2e "lets two tabs of one user work at once".
+- **Fix.** The storage gives a mutation its id in the transaction that queues it, so ids are unique
+  however many tabs queue (`373c2a8`); and one tab talks to the server for all of them (Web Locks and
+  BroadcastChannel, `298850b`), reading the queue as stored right before each push, so it never sends
+  a batch with a gap in the ids.
+- **Alternatives.** A client id per tab: the server would see every tab as its own device, and a
+  closed tab's queue would be stranded. A SharedWorker owning the queue: not available in Safari
+  before 16 or on Chrome for Android.
+- **Commits.** `f943f8d` (test), `373c2a8`, `298850b` (fix).
 
 ### F-12: mutator names from `Object.prototype` crash the push (category 3)
 
@@ -779,13 +934,18 @@ reproduce and fix it.
 
 ### F-13: a request that never answers blocks syncing forever (category 6)
 
-- **What.** `HttpTransport` has no timeout or abort signal; sync attempts are deduplicated, so
-  while one request hangs no other is made.
+- **What.** `HttpTransport` had no timeout or abort signal; sync attempts are deduplicated, so
+  while one request hung no other was made.
 - **Why it is dangerous.** After a half-open connection the client shows "syncing" forever and
   never pushes again until the page reloads.
-- **Reproduce.** `client.spec.ts`, "gives up on a request that never answers and retries" (known
-  defect); in the simulation, the signature `stuck-request` in the `full` profile.
-- **Fix.** Not fixed yet; owned by the offline-client change. **Commits.** `22b61c2` (test).
+- **Reproduce.** `client.spec.ts`, "gives up on a request that never answers and retries" (a known
+  defect from the start); the simulation's `hang` fault (the signature `stuck-request` in `full`).
+- **Fix.** Every request gets an abort signal; it is aborted after `requestTimeoutMs` (30 s by
+  default) on the client's clock, fails as `TIMEOUT` and is retried with backoff. The simulation no
+  longer tolerates `stuck-request`; a client without a timeout still produces it (checked).
+- **Alternatives.** `AbortSignal.timeout()`: real time, which the simulation and the tests cannot
+  control.
+- **Commits.** `22b61c2` (test), `c1605bb` (fix).
 
 ### F-14: a failed rollback replaces the original error (other)
 
@@ -1229,6 +1389,96 @@ The fix belongs to the access-control change; this change adds the known-defect 
   changes between two reloads and reloads everyone needlessly.
 - **Commits.** `54c3486` (test), `f17f51d` (fix).
 
+### F-35: notification streams outlive their connection, and get no heartbeat (category 6)
+
+- **What.** `StreamService` added every stream's response to a set and never removed it; nothing was
+  written to an idle stream.
+- **Why it is dangerous.** Every reload of a page left a subscriber behind for the life of the
+  process: memory grows, and every notification writes to dead sockets. Without traffic a proxy
+  drops an idle stream, and neither end notices a dead connection.
+- **Reproduce.** `stream.spec.ts` (integration, over real HTTP: a client goes away and the count
+  stays at 1; a hundred connections and closes; no byte on an idle stream).
+- **Fix.** The stream is a `@Sse()` Observable: Nest unsubscribes when the connection closes, and the
+  teardown removes the subscriber. The handler is synchronous, since Nest 10 listens for the close
+  only once the handler has returned its Observable. An idle stream gets a `heartbeat` event every
+  `STREAM_HEARTBEAT_MS` (Nest 10 cannot write SSE comments); pokes are merged within 250 ms; a client
+  whose writes stay backed up for a whole interval is dropped.
+- **Alternatives.** Keeping `res.write` and removing the subscriber on `res.on('close')`: works, but
+  bypasses the framework's SSE support and its backpressure handling.
+- **Commits.** `0da3a2d` (test), `4fdea61` (fix).
+
+### F-36: open notification streams keep the server from shutting down (category 6)
+
+- **What.** `app.close()` closes the HTTP server, which waits for every open connection, and an event
+  stream never ends.
+- **Why it is dangerous.** A deploy or restart hangs until the orchestrator kills the process, which
+  cuts the requests in progress too.
+- **Reproduce.** `stream.spec.ts`, "lets the application close while a stream is open".
+- **Fix.** `StreamService.onModuleDestroy` ends every stream and refuses new ones; the HTTP server
+  then closes normally, and requests in progress finish.
+- **Alternatives.** `forceCloseConnections: true` (a standard Nest option): destroys every socket,
+  also those of pushes in the middle of their answer.
+- **Commits.** `cf610a7` (test), `d1f61da` (fix).
+
+### F-37: the web app never closes its client and stream; a disposed client keeps working (category 6)
+
+- **What.** The provider started a `SyncClient` and an `EventSource` for every token and never
+  stopped them; `dispose()` did not abort the request in flight, and an answer that arrived after it
+  was still stored.
+- **Why it is dangerous.** After a change of token the old client keeps retrying and writes the old
+  user's state into the shared storage; connections and timers leak.
+- **Reproduce.** `dispose.spec.ts` (every request in flight is aborted; nothing is written after
+  `dispose()`).
+- **Fix.** Every request carries an abort signal tied to the client, and a request that ends after
+  `dispose()` rejects instead of returning its answer (`4e8aaac`). The provider's effect disposes the
+  client and closes its storage in its cleanup, also when the cleanup comes before the asynchronous
+  open finished (`e84f17b`); development renders use React strict mode, which runs effects twice and
+  shows a missing cleanup at once.
+- **Commits.** `26d01b8` (test), `4e8aaac`, `e84f17b` (fix).
+
+### F-38: a write the browser storage refuses is ignored (category 8)
+
+- **What.** `LocalStorageSyncStorage.save` caught every error (a full quota) and the client went on
+  as if the state were stored.
+- **Why it is dangerous.** The user is shown "synced" while nothing survives a reload.
+- **Reproduce.** `storage-errors.spec.ts`.
+- **Fix.** A refused write rejects; the client reports `STORAGE` with the status `error`, a mutation
+  it cannot store is not shown and its `mutate` rejects, and IndexedDB writes abort their whole
+  transaction on any failure (also one thrown synchronously, which IndexedDB would otherwise commit
+  around).
+- **Commits.** `b7bb646` (test), `4aa2581`, `373c2a8` (fix).
+
+### F-39: a notification that arrives while a sync is running is lost (category 1)
+
+- **What.** `sync()` returned the sync already running. A poke that arrived after that sync's pull
+  had read its page was dropped, and the client did not see the change until something else made it
+  sync.
+- **Why it is dangerous.** Delivery is incomplete for an indefinite time: the stream announced the
+  change, the client discarded the announcement. Category 1 belongs to the protocol change, which was
+  done; it was found here, with the stream.
+- **Reproduce.** `pokes.spec.ts`.
+- **Fix.** A sync asked for while one runs makes one more run after it (unless the running one
+  failed; the retry timer runs the next) and resolves when that one ends.
+- **Commits.** `5643cea` (test), `2e2ebe2` (fix).
+
+### F-40: the next user of the browser sees the previous user's data (category 4)
+
+- **What.** Every user of the browser shared one stored state (`fs_state`) and one client id
+  (`fs_client_id`). There was no way to sign out; a user who signed in after another (a new token)
+  saw the other's rows, of sites they have no access to, and pushed under the other's client id.
+- **Why it is dangerous.** A read path that bypasses the server's access checks: the local cache.
+  Category 4 belongs to the access-control change, still to come; the offline client owns local data,
+  so the fix is here.
+- **Reproduce.** e2e `user-switch.spec.ts`.
+- **Fix.** Each user's state is in a database of its own, named after a SHA-256 of the token
+  (`databaseNameFor`): it works offline from the first sign-in and does not contain the token. A
+  sign-out button (with a confirmation when changes are not synced) removes the token and deletes
+  every FieldSync database; a start with nobody signed in deletes any left behind; other tabs close
+  on the deletion and show the sign-in form.
+- **Alternatives.** A namespace by user id from `/me`: the first sign-in would need the network.
+  Keeping a signed-out user's database: their data stays in the browser.
+- **Commits.** `aae9a1a` (test), `4eddf32` (fix).
+
 ## Changes to starter tests
 
 | Starter test | Change | Reason |
@@ -1242,6 +1492,11 @@ The fix belongs to the access-control change; this change adds the known-defect 
 | `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Reads the created row with optional chaining (`created?.status`) | `sync-core` compiles with `noUncheckedIndexedAccess`: an array element may be `undefined`, so the type checker rejects the unguarded access |
 | `packages/sync-core/test/client.spec.ts` `OfflineTransport` | Implements `snapshot` (it fails like the other requests) | Protocol change of F-34: a `Transport` also reads snapshots, and a client without a stored state starts with one |
 | `packages/sync-core/test/client.spec.ts` (all) | Clients are disposed in `afterEach`, not at the end of the test body: a failing assertion skipped `dispose()`, the client's retry timer stayed alive and Jest never exited | A failing test must fail, not hang |
+| `packages/sync-core/test/client.spec.ts` (all that call `mutate`) | `await client.mutate(...)`; the tests that read the view right after it are `async`; the unsendable-arguments test expects a rejection instead of a throw | The queue is written to IndexedDB before a mutation is shown, so `mutate` is asynchronous (F-10) |
+| `packages/sync-core/test/client.spec.ts` fake transports | Pull answers and snapshot pages carry `head` | Protocol change of the offline-client work: the head bounds every sync under constant writes |
+| `packages/sync-core/test/client.spec.ts` "retries and stamps optimistic rows…" | The client gets `random: () => 0.5` and the retry comes after 500 ms instead of 5 s | Retries use exponential backoff with jitter (task 3.3.3) instead of a fixed 5 s |
+| `packages/sync-core/test/client.spec.ts` F-10, F-11, F-13 | Known defects become regular tests; F-10 waits for `ready`, F-13 uses the client's clock and checks the `TIMEOUT` error | Fixed by the offline-client change |
+| `e2e/ticket-sharing.spec.ts` | Expects `synced · 0 pending` instead of `idle · 0 pending` | The status line shows the indicator of task 3.3.3 |
 | `apps/server/test/access.spec.ts` | Tests renamed to what they check; the fake answers per query; admin and missing-`siteId` cases added | F-04 |
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
 | `apps/server/test/sync.integration.spec.ts` | Removed; replaced by `test/integration/sync.characterization.spec.ts` | F-05 |
@@ -1299,7 +1554,7 @@ random) on an emptied database. Then:
    | Step | What happens |
    |---|---|
    | `act` | A user acts on what their client shows: creates or edits a ticket, changes its status, deletes it, adds a part, adjusts a quantity. Text is mostly plain, sometimes non-ASCII or emoji, sometimes exactly at a length limit (a description longer than its limit has an emoji across the cut); in the rejection profiles sometimes empty, too long, with NUL or with an unpaired surrogate. Most actions target a few shared rows, as technicians of one site work on the same jobs |
-   | `sync` | A client syncs, as on a server notification (the notification stream itself is not simulated) |
+   | `sync` | A client syncs, as when the user asks for it |
    | `deliver` | The oldest request of a client reaches the network, with a request fault (below) |
    | `respond` | The oldest answer the server produced for a client goes back, with a response fault |
    | `redeliver` | A stale copy of an earlier request reaches the server again |
@@ -1307,6 +1562,10 @@ random) on an emptied database. Then:
    | `link` | A client's link goes down, comes back, or starts losing every answer |
    | `compact` | The server runs its change-log GC at the current virtual time (the simulation runs with a retention of one hour) |
    | `away` | A client's link goes down and two hours of virtual time pass at once (fake-timers `setSystemTime`: pending timers move with the time, so no thousand retries fire); after a `compact`, its cursor is behind the floor and the client is reset when it comes back |
+| `reload` | The page of a device reloads: its leading tab is disposed at once, whatever it is doing (a request in flight, a write about to start), and a new tab opens on the device's storage |
+| `tab` | A second tab of the device opens on the same storage, or, with two open, the leading one closes and the other takes over (tabs are coordinated like browser tabs, `TabGroup`) |
+| `poke` | The notification stream of a device delivers a poke the server sent for another device's change |
+| `drop-stream` | The notification stream of a device breaks; the client reopens it with its backoff (a link going down breaks it too) |
 
 3. **Heal.** Every link comes back and faults stop. Requests and answers are delivered and time
    advances to the next timer until nothing is in transit and no client has pending mutations;
@@ -1319,7 +1578,8 @@ random) on an emptied database. Then:
 | Request | `drop-request` | never sees it | `fetch` fails |
 | Request | `duplicate` | handles it twice in a row | gets the second answer |
 | Request | `hold-copy` | handles it now and once more later (`redeliver`) | gets the first answer |
-| Request | `hang` | handles it | never gets an answer; the connection never closes |
+| Request | `hang` | handles it | never gets an answer; the connection never closes, until the client's request timeout |
+| Request | `cut-request` | gets half of the body (answers 400, applies nothing); a request without a body never reaches it | gets no answer |
 | Response | `drop-response` | already handled it | `fetch` fails |
 | Response | `bad-gateway` | already handled it | gets a 502 from a "proxy" |
 | Response | `truncate` | already handled it | gets half of the body |
@@ -1366,7 +1626,7 @@ Each violation has a **signature**:
 | `unexpected-rejection` | the server rejected a mutation with a code none of the profile's actions can cause | — |
 | `lost-edit` | a ticket field does not hold the last applied write of that field | — |
 | `foreign-site-rows` | a client holds rows of a site its user cannot access | F-07 (access-control change) |
-| `stuck-request` | a client waits forever on a request that never completes | F-13 (offline-client change) |
+| `stuck-request` | a client waits forever on a request that never completes | — (F-13, fixed: requests time out) |
 | `livelock` | a queue never drained for another reason | — |
 | `divergence` | a client's rows differ from the server's within its sites | — |
 | `client-error` | the client code threw (for example while computing its view) | — |
@@ -1376,10 +1636,10 @@ Each violation has a **signature**:
 
 | Profile | Sites, users, clients | Actions | Faults | Tolerated signatures |
 |---|---|---|---|---|
-| `baseline` | 1 site, 3 technicians, 4 clients (one technician on two devices) | create, edit, add part, increase quantity: nothing the server can reject | all but `hang` | none: must converge on every seed |
+| `baseline` | 1 site, 3 technicians, 4 devices (one technician on two), each with one or two tabs | create, edit, add part, increase quantity: nothing the server can reject | all but `hang` | none: must converge on every seed |
 | `rejections` | as `baseline` | all, including status races, deletes against edits, adjustments near zero, invalid text | all but `hang` | none; every rejection must carry a code the actions can cause |
 | `multi-site` | 2 sites; a technician of each, one of both, an admin; 4 clients | as `baseline` | all but `hang` | `foreign-site-rows` |
-| `full` | as `multi-site` | as `rejections` | all, `hang` included | `foreign-site-rows`, `stuck-request` |
+| `full` | as `multi-site` | as `rejections` | all, `hang` included | `foreign-site-rows` |
 
 A profile may produce only its tolerated signatures; anything else fails. Each tolerated signature
 is a known-defect test in the corpus, so the change that fixes the defect sees "appears fixed - flip
@@ -1387,6 +1647,13 @@ it" and removes the signature from the profile. Each profile also has minimums f
 seed of its run statistics (every fault kind occurs, timers fire, clients write rows another client
 wrote last, the rejection profiles see rejections), so a profile cannot quietly stop exercising what
 it is for. Lowering a minimum needs a reason here.
+
+The offline-client change added `reload` (weight 2), `tab` (2), `poke` (5) and `drop-stream` (2) to
+every profile, the request fault `cut-request`, and minimums of 0.3 reloads, 0.3 tab changes, 0.6
+pokes, 0.15 dropped streams and 0.4 cut requests per seed. It lowered the minimum of writes to a row
+another client wrote last from 0.8 to 0.4 (0.6 to 0.2 with two sites): every stream that opens and
+every poke queues a pull, so more exchanges wait on the network and the views users act on are older;
+raising the weight of `act` did not bring it back.
 
 The log lifecycle change added `compact` (weight 4) and `away` (weight 3) to every profile, with
 minimums of 0.8 compactions, 0.5 periods away and 0.1 resets (410 answers) per seed, and lowered the
@@ -1472,6 +1739,23 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 
 ### Results
 
+After the offline-client change, a local search of 1000 runs per profile from seed 20261128
+(`npm run sim -- --profile <name> --seed 20261128 --runs 1000`, one process per profile, about
+7 minutes) found no violation other than the access-control defect F-07: no divergence, lost edit,
+lost mutation, unexpected rejection, and no request stuck any more, with reloads at any point, a
+second tab, the notification stream and requests cut in the middle in every profile.
+
+| Profile | Runs without violations | Known-defect runs | Reloads per run | Tab changes per run | Pokes per run | Dropped streams per run | Cut requests per run |
+|---|---|---|---|---|---|---|---|
+| `baseline` | 1000 / 1000 | — | 0.73 | 0.70 | 1.16 | 0.58 | 0.94 |
+| `rejections` | 1000 / 1000 | — | 0.68 | 0.76 | 1.21 | 0.55 | 0.91 |
+| `multi-site` | 102 / 1000 | `foreign-site-rows` (F-07): 898 | 0.73 | 0.70 | 1.16 | 0.58 | 0.94 |
+| `full` | 124 / 1000 | `foreign-site-rows` (F-07): 876 | 0.68 | 0.76 | 1.21 | 0.55 | 0.89 |
+
+The same search before the change (no reloads, tabs or stream in the simulation): `baseline` and
+`rejections` 1000 / 1000, `multi-site` 119 without violations (F-07 in 881), `full` 105 (F-07 in 762,
+`stuck-request` (F-13) in 370).
+
 After the log lifecycle change, a local search of 1000 runs per profile from seed 20261127
 (`npm run sim -- --profile <name> --seed 20261127 --runs 1000`, one process per profile, about
 7 minutes) found no violation other than the known defects each profile tolerates: no divergence,
@@ -1517,11 +1801,14 @@ hung request of F-13 together with F-23 and F-07).
   (the change-log ordering of category 1, parallel duplicates of category 2) are out of the
   simulation's reach. They are tested concurrently on Postgres: `client-ids.spec.ts`,
   `commit-order.spec.ts`, `duplicates.spec.ts` and `lock-order.spec.ts`.
-- **One server instance**, and the notification stream is modelled as a `sync` step, not
-  simulated.
-- **Not yet simulated:** page reloads and several tabs (the offline-client change), access changes
-  and moving tickets (the access-control change), two server instances (the observability change). Each of these changes
-  adds its events as new commands.
+- **One server instance.** The stream is the simulated network's, not the server's SSE endpoint:
+  opening it says `ready`, a push the server applied makes a poke wait for every other device with
+  an open stream, and the `poke` step delivers it. The stream endpoint itself is tested over real
+  HTTP (`stream.spec.ts`) and in the browser (e2e).
+- **One storage per device in memory** (`MemoryStorage`): IndexedDB is tested on fake-indexeddb and
+  in Chromium, not in the simulation.
+- **Not yet simulated:** access changes and moving tickets (the access-control change), two server
+  instances (the observability change). Each of these changes adds its events as new commands.
 - Traces are compared within one environment; a different Node.js or Postgres version may change
   response bodies (for example error messages) and with them the trace digest, but not whether a
   run passes. A new fast-check version may generate different scenarios from the same seed, so the
@@ -1541,7 +1828,7 @@ after, on a database of 1 000 000 log entries over 100 sites, 300 000 entities (
 | Query | Without the index | With it | Index |
 |---|---|---|---|
 | Snapshot page in the middle of a site of 100 000 rows (`WHERE NOT deleted AND site_id = ANY(…) AND (site_id, entity, id) > (…) ORDER BY site_id, entity, id LIMIT 501`) | 19 ms, 50 101 rows read through `entities_site_idx` and sorted | 2.6 ms, index scan of 501 rows | `entities_snapshot_idx (site_id, entity, id) WHERE NOT deleted` |
-| Tombstones of one GC batch (`WHERE deleted AND version > … AND version <= …`) | 36 ms (sequential scan of `entities` per batch) | 4 ms | `entities_tombstone_idx (version) WHERE deleted` |
+| Tombstones of one GC batch (`WHERE deleted AND version > … AND version <= …`) | 36 ms (sequential scan of `entities` per batch) | 4 ms | `entities_tombstone_idx (version) WHERE deleted`; dropped by the offline-client change, which keeps tombstones, so no query uses it |
 | Results of the applied mutations of one batch | 25 ms (sequential scan) | 2 ms | `mutation_results_applied_version_idx (version) WHERE status = 'applied'` |
 | Next batch of the log (`WHERE version > floor ORDER BY version LIMIT 5000`) | — | 7 ms, primary key | `change_log_pkey` |
 | Expired results without a version, 5000 at a time | 72 ms with `IN (subquery)` (hash join over the whole table) | 8.7 ms with `ctid = ANY(ARRAY(subquery))` (TID scan); a partial index on `created_at` made it slower (17 ms) | none |
@@ -1577,15 +1864,17 @@ work.
   there.
 - E2e runs on one Postgres share the database name `fieldsync_e2e` unless `E2E_DATABASE` is set;
   two simultaneous runs against the same server would collide.
-- Six defects are reproduced but not fixed yet (F-07, F-08, F-10, F-11, F-13, F-33); each is a
-  known-defect test with an owner and is listed by every test run.
+- Four defects are reproduced but not fixed yet (F-07, F-08, F-33, all of the access-control
+  change); each is a known-defect test with an owner and is listed by every test run.
 - Writes are serialized on the change log's head for the last statement of each mutation, which
   bounds write throughput per database (see [3.3.1](#protocol-correctness-331)).
-- A 409 `MUTATION_OUT_OF_ORDER` means the client lost part of its queue; recovering needs a new
-  client id and a server that refuses late copies under the old one, which comes with the durable
-  client queue (3.3.3). Until then the client reports it as `syncError` and keeps retrying.
+- Offline client (see [3.3.3](#offline-first-client-333) and [3.3.7](#schema-evolution-337)): it
+  needs IndexedDB, Web Locks and BroadcastChannel (secure contexts); pokes come only from the server
+  instance that applied a change; signing out with unsynced changes discards them after a
+  confirmation; a client released before protocol versioning cannot understand "update required".
+  Every deletion keeps a tombstone for good.
 - Log lifecycle (see [3.3.6](#change-log-lifecycle-336)): a snapshot must finish within the
-  retention; an id is protected against reuse only while its deletion is within the retention; a
+  retention; a
   rejection's reason is lost after `MUTATION_RESULT_RETENTION_SECONDS`; push p95 rises by up to
   about 5 ms while the GC collects a large backlog; partitioning the log is the documented way once
   it outgrows the database server's memory; a client released before this change cannot handle
