@@ -660,8 +660,12 @@ browsers, secure contexts only); in some private modes IndexedDB is unavailable 
 cannot work offline. The app asks for persistent storage (`navigator.storage.persist()`); a browser that refuses it may
 evict the database under storage pressure (best effort, MDN "Storage quotas and eviction criteria"). Pokes come only
 from the server instance that applied the change (fan-out across instances is the observability
-change's); a client on another instance learns of it at its next sync. Signing out with unsynced
-changes discards them after a confirmation.
+change's): a client whose stream is on another instance gets none and has the change from its next
+sync on (`two-instances.spec.ts`: two instances on one database, a live client on one, a push through
+the other). Nothing is lost, but for an idle client with a healthy stream that next sync has no time
+bound: it comes when one of its tabs queues a change, its stream reopens, the device comes back
+online, the page reloads or another tab takes the lead. Signing out with unsynced changes discards
+them after a confirmation.
 
 ### Schema evolution (3.3.7)
 
@@ -1871,7 +1875,8 @@ work.
   bounds write throughput per database (see [3.3.1](#protocol-correctness-331)).
 - Offline client (see [3.3.3](#offline-first-client-333) and [3.3.7](#schema-evolution-337)): it
   needs IndexedDB, Web Locks and BroadcastChannel (secure contexts); pokes come only from the server
-  instance that applied a change; signing out with unsynced changes discards them after a
+  instance that applied a change, so with several instances an idle client may not learn of a change
+  until something else makes it sync; signing out with unsynced changes discards them after a
   confirmation; a client released before protocol versioning cannot understand "update required".
   Every deletion keeps a tombstone for good.
 - Log lifecycle (see [3.3.6](#change-log-lifecycle-336)): a snapshot must finish within the
