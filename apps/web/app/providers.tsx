@@ -29,8 +29,11 @@ const TOKEN_KEY = 'fs_token';
 
 const ClientContext = createContext<SyncClient | null>(null);
 
-/** Why the app cannot work right now, other than being signed out. */
-type Problem = 'storage' | 'superseded';
+/**
+ * Why the app cannot work right now, other than being signed out. `blocked` passes: the other tab
+ * keeps an older local schema open, and the app goes on once it is closed.
+ */
+type Problem = 'storage' | 'superseded' | 'blocked';
 
 export function Providers({ children }: { children: ReactNode }) {
   const [client, setClient] = useState<SyncClient | null>(null);
@@ -55,6 +58,7 @@ export function Providers({ children }: { children: ReactNode }) {
     // late result closed at once.
     let stopped = false;
     let opened: { client: SyncClient; storage: IdbSyncStorage } | undefined;
+    const unblocked = () => setProblem((current) => (current === 'blocked' ? null : current));
     const onOnline = () => void opened?.client.sync();
     const onClosed = (reason: StorageClosedReason) => {
       if (stopped) return;
@@ -70,7 +74,15 @@ export function Providers({ children }: { children: ReactNode }) {
         // One database per user (F-40). The original client's id and last mutation id move into it
         // from localStorage, where the token signed in now was stored next to them.
         const name = await databaseNameFor(token);
-        const storage = await IdbSyncStorage.open(name, { legacy: localStorageLegacy(localStorage), onClosed });
+        const storage = await IdbSyncStorage.open(name, {
+          legacy: localStorageLegacy(localStorage),
+          onClosed,
+          onBlocked: () => {
+            if (!stopped) setProblem('blocked');
+          },
+        });
+        // The open is through; a newer app may have closed the database again meanwhile.
+        unblocked();
         if (stopped) {
           storage.close();
           return;
@@ -93,6 +105,7 @@ export function Providers({ children }: { children: ReactNode }) {
     })();
     return () => {
       stopped = true;
+      unblocked();
       window.removeEventListener('online', onOnline);
       setClient(null);
       if (opened) {
@@ -116,6 +129,9 @@ export function Providers({ children }: { children: ReactNode }) {
 
   if (problem === 'storage') {
     return <p role="alert">This browser does not let FieldSync keep data on this device, so it cannot work offline.</p>;
+  }
+  if (problem === 'blocked') {
+    return <p role="alert">FieldSync is open in another tab with an older version. Close it to continue.</p>;
   }
   if (problem === 'superseded') {
     return <p role="alert">A newer version of FieldSync is open in another tab. Reload this page to continue.</p>;

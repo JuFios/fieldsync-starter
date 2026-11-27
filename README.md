@@ -689,7 +689,11 @@ original client's id and last mutation id from `localStorage` (its rows are not 
 shared by every user, so they cannot be attributed to the one signing in; the client reloads them
 from a snapshot); the original keys are removed once the upgrade committed. A tab that holds the
 database open when another tab opens a newer version closes it at once (`versionchange`) and asks
-for a reload, so the upgrade is never kept waiting by this app.
+for a reload, so the upgrade is never kept waiting by this app's handler. A connection that does not
+close on `versionchange` blocks the open of the newer version: meanwhile the app says to close the
+other tab, and it goes on once that tab is closed. The browser reports this (`blocked`) only for an
+open that raises the version, so with the first local schema it cannot happen yet; it starts to apply
+with the release that adds the second.
 
 **Queued mutations.** Each carries the format version of its arguments; a queue written by a newer
 app is kept and not sent (the client says it needs the update). The arguments of the first versioned
@@ -703,11 +707,16 @@ lifecycle change does that on 410).
 
 **Evidence.** `protocol-version.spec.ts` (every route and the stream, below, above, malformed, health
 not checked), `versioning.spec.ts`, `idb-storage.spec.ts` (import, interrupted import, `versionchange`,
-`blocked`), e2e "moves the original client's id from localStorage into the database".
+`blocked`), e2e "moves the original client's id from localStorage into the database" and "asks to
+close the tab that keeps an older local schema open, and goes on once it is closed" (in Chromium: a
+connection without a `versionchange` handler, and a tab that acts as the next release because the
+test raises the version it asks for by one; the queued change survives the upgrade and is sent once).
 
 **Remaining limitations.** A client before versioning (the original one) cannot understand the
 answer: it shows offline and retries; only a reload with the new app helps. The first local schema
 has a single upgrade step; the mechanism for the next ones is in place, their tests come with them.
+The browser sends `blocked` only to the open request that is first in line: tabs of the newer app
+opened while one already waits show "Loading…" without the notice until the older tab is closed.
 
 ## Found issues
 

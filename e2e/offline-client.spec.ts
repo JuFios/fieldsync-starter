@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import type { BrowserContext } from '@playwright/test';
+import { createHash, randomUUID } from 'node:crypto';
+import type { BrowserContext, Page } from '@playwright/test';
 import { expect, test } from './support/world';
 import { TicketsPage } from './support/tickets-page';
 
@@ -11,7 +11,6 @@ const cutOffApi = (context: BrowserContext) =>
   context.route(`${API}/**`, (route) => route.abort('internetdisconnected'));
 const reconnectApi = (context: BrowserContext) => context.unroute(`${API}/**`);
 
-/** How many tickets with this title the server stored. */
 test.describe('the offline-first client', () => {
   test('keeps changes made without the server across a reload and sends each exactly once', async ({
     browser,
@@ -126,6 +125,88 @@ test.describe('the offline-first client', () => {
       await expect(app.status).toHaveText('offline · 1 pending');
       await context.setOffline(false);
       await app.expectSynced();
+      const { rows } = await db.query(`SELECT 1 FROM entities WHERE entity = 'ticket' AND data->>'title' = $1`, [
+        title,
+      ]);
+      expect(rows).toHaveLength(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('asks to close the tab that keeps an older local schema open, and goes on once it is closed', async ({
+    browser,
+    world,
+    db,
+  }) => {
+    const site = await world.site('Blocked');
+    const tech = await world.technician(site);
+    // The user's database (`databaseNameFor`): named after the SHA-256 of the token.
+    const database = `fieldsync-${createHash('sha256').update(tech.token).digest('hex')}`;
+    const context = await browser.newContext();
+    const versionOf = (page: Page) =>
+      page.evaluate(
+        async (name) => (await indexedDB.databases()).find((found) => found.name === name)?.version,
+        database,
+      );
+    try {
+      // Today's app creates the database, and a change made without the server waits in its queue.
+      const today = new TicketsPage(await context.newPage());
+      await today.signIn(tech.token);
+      await today.expectSynced();
+      await cutOffApi(context);
+      const title = unique('Queued before the update');
+      await today.create(title, site);
+      await expect(today.status).toContainText('1 pending');
+      await today.page.close();
+      await reconnectApi(context);
+
+      // A tab of an older app that does not close: a connection without a `versionchange` handler, on
+      // an empty page of the same origin.
+      const holder = await context.newPage();
+      await holder.route('**/older-app', (route) => route.fulfill({ contentType: 'text/html', body: '<p></p>' }));
+      await holder.goto('/older-app');
+      await holder.evaluate(
+        (name) =>
+          new Promise<void>((resolve, reject) => {
+            const request = indexedDB.open(name);
+            request.onsuccess = () => {
+              Object.assign(window, { held: request.result });
+              resolve();
+            };
+            request.onerror = () => reject(new Error(String(request.error)));
+          }),
+        database,
+      );
+
+      // The next release. The browser sends `blocked` only to an open that raises the version, and no
+      // release has raised the local schema yet, so in this tab the test raises the version the app
+      // asks for by one. Everything else is the app and the browser as they are.
+      const next = new TicketsPage(await context.newPage());
+      await next.page.addInitScript(() => {
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its factory below
+        const open = IDBFactory.prototype.open;
+        IDBFactory.prototype.open = function (this: IDBFactory, name: string, version?: number) {
+          const raised = version !== undefined && name.startsWith('fieldsync-') ? version + 1 : version;
+          return open.call(this, name, raised);
+        };
+      });
+      await next.page.goto('/');
+      // Next.js has an alert of its own (its route announcer), so the notice is found by its text.
+      const notice = next.page.getByRole('alert').filter({ hasText: 'FieldSync' });
+      await expect(notice).toHaveText('FieldSync is open in another tab with an older version. Close it to continue.');
+      await expect(next.page.getByRole('heading', { name: 'Tickets' })).toBeHidden();
+      // The open waits: the database is still the old one.
+      expect(await versionOf(holder)).toBe(1);
+
+      await holder.close();
+
+      await expect(next.page.getByRole('heading', { name: 'Tickets' })).toBeVisible();
+      await expect(notice).toHaveCount(0);
+      expect(await versionOf(next.page)).toBe(2);
+      // The queue came through the upgrade and reaches the server once.
+      await expect(next.ticket(title)).toBeVisible();
+      await next.expectSynced();
       const { rows } = await db.query(`SELECT 1 FROM entities WHERE entity = 'ticket' AND data->>'title' = $1`, [
         title,
       ]);
