@@ -153,6 +153,57 @@ describe('the notification stream of a client', () => {
     expect(t.streams).toHaveLength(1);
   });
 
+  it('leaves no listener behind after reconnecting many times', async () => {
+    // Abort listeners per signal, added minus removed (a once listener that fired counts as removed).
+    const live = new Map<EventTarget, Set<unknown>>();
+    // Kept to be called with Reflect.apply and its own `this`, and put back afterwards.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalAdd = EventTarget.prototype.addEventListener;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalRemove = EventTarget.prototype.removeEventListener;
+    EventTarget.prototype.addEventListener = function (
+      this: EventTarget,
+      type: string,
+      listener: unknown,
+      options?: unknown,
+    ) {
+      if (type === 'abort' && this instanceof AbortSignal) {
+        const set = live.get(this) ?? new Set();
+        set.add(listener);
+        live.set(this, set);
+      }
+      return Reflect.apply(originalAdd, this, [type, listener, options]) as void;
+    };
+    EventTarget.prototype.removeEventListener = function (
+      this: EventTarget,
+      type: string,
+      listener: unknown,
+      options?: unknown,
+    ) {
+      if (type === 'abort') live.get(this)?.delete(listener);
+      return Reflect.apply(originalRemove, this, [type, listener, options]) as void;
+    };
+    try {
+      const clock = new ManualClock();
+      const t = new StreamingTransport();
+      const c = client(t, clock);
+      await c.ready;
+      for (let i = 0; i < 30; i += 1) {
+        t.open.emit({ type: 'ready', heartbeatMs: 15_000 });
+        t.open.end();
+        await settle();
+        await clock.advance(1_000);
+      }
+      expect(t.streams.length).toBeGreaterThan(30);
+      // The client's own signal carries a handful of listeners however often the stream reopened.
+      const most = Math.max(...[...live.values()].map((set) => set.size));
+      expect(most).toBeLessThan(5);
+    } finally {
+      EventTarget.prototype.addEventListener = originalAdd;
+      EventTarget.prototype.removeEventListener = originalRemove;
+    }
+  });
+
   it('opens no stream when the client is not live', async () => {
     const t = new StreamingTransport();
     const c = new SyncClient({ clientId: 'c1', transport: t, storage: new MemoryStorage(), live: false });

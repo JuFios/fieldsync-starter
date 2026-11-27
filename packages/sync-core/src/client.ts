@@ -680,9 +680,14 @@ export class SyncClient {
       const retryAfterMs = failure instanceof TransportError ? (failure.retryAfterSeconds ?? 0) * 1000 : 0;
       const delay = backoffDelay(failures, this.backoff, this.random, retryAfterMs);
       failures += 1;
+      // The listener goes with the wait: one per reconnection would pile up on the client's signal.
       await new Promise<void>((resolve) => {
-        this.track(resolve, delay);
-        this.life.signal.addEventListener('abort', () => resolve(), { once: true });
+        const done = () => {
+          this.life.signal.removeEventListener('abort', done);
+          resolve();
+        };
+        this.track(done, delay);
+        this.life.signal.addEventListener('abort', done, { once: true });
       });
     }
   }

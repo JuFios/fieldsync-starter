@@ -75,6 +75,9 @@ export function Providers({ children }: { children: ReactNode }) {
           storage.close();
           return;
         }
+        // Ask the browser not to evict the queue under storage pressure (it decides; Firefox asks
+        // the user). Best-effort storage keeps working without it.
+        void navigator.storage?.persist?.().catch(() => false);
         // The user's tabs share the database; the one that leads talks to the server and keeps the
         // notification stream open (with the token in a header), the others follow it.
         const c = new SyncClient({ transport: new HttpTransport(API, token), storage, tabs: new BrowserTabs(name) });
