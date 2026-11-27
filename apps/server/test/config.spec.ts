@@ -34,6 +34,7 @@ describe('validate', () => {
       GC_BATCH_SIZE: 5_000,
       GC_INTERVAL_MS: 3_600_000,
       JSON_BODY_LIMIT_BYTES: 2_097_152,
+      STREAM_HEARTBEAT_MS: 15_000,
       API_DOCS_ENABLED: false,
     });
   });
@@ -50,6 +51,7 @@ describe('validate', () => {
         GC_BATCH_SIZE: '100',
         GC_INTERVAL_MS: '1000',
         JSON_BODY_LIMIT_BYTES: '1048576',
+        STREAM_HEARTBEAT_MS: '1000',
         API_DOCS_ENABLED: 'true',
       }),
     ).toMatchObject({
@@ -62,6 +64,7 @@ describe('validate', () => {
       GC_BATCH_SIZE: 100,
       GC_INTERVAL_MS: 1000,
       JSON_BODY_LIMIT_BYTES: 1_048_576,
+      STREAM_HEARTBEAT_MS: 1000,
       API_DOCS_ENABLED: true,
     });
   });
@@ -86,6 +89,10 @@ describe('validate', () => {
     ['JSON_BODY_LIMIT_BYTES', '1048575'],
     ['JSON_BODY_LIMIT_BYTES', '67108865'],
     ['JSON_BODY_LIMIT_BYTES', '2mb'],
+    // A heartbeat under a second floods the streams; over a minute, proxies drop idle connections.
+    ['STREAM_HEARTBEAT_MS', '999'],
+    ['STREAM_HEARTBEAT_MS', '60001'],
+    ['STREAM_HEARTBEAT_MS', '15s'],
     ['DB_LOCK_TIMEOUT_MS', '0'],
     ['DB_STATEMENT_TIMEOUT_MS', '2s'],
     ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '-1'],

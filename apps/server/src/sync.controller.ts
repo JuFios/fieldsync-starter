@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Header, Post, Query, Req, Sse, type MessageEvent } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
@@ -14,7 +14,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import type { Response } from 'express';
+import type { Observable } from 'rxjs';
 import { accessibleSites } from './access';
 import type { AuthedRequest } from './auth';
 import { Db } from './db';
@@ -129,15 +129,24 @@ export class SyncController {
     return this.snapshotService.page(req.user, { watermark: query.watermark, after, limit: query.limit });
   }
 
-  @Get('sync/stream')
+  @Sse('sync/stream')
   @ApiOperation({
     summary: 'Server-sent events: a `poke` event whenever an accessible site changes',
-    description: 'The client pulls after a poke.',
+    description:
+      'The first event is `ready` with `{ heartbeatMs }`; then `poke` (merged within 250 ms) whenever a site of the ' +
+      'user changes, and `heartbeat` every heartbeatMs. The client pulls after `ready` and after every poke, and ' +
+      'reconnects when the stream stays silent for three heartbeat intervals.',
   })
   @ApiProduces('text/event-stream')
   @ApiOkResponse({ description: 'An open event stream.' })
-  async stream(@Req() req: AuthedRequest, @Res() res: Response) {
-    const sites = await accessibleSites(this.db, req.user);
-    this.streams.add(sites, res);
+  // Synchronous on purpose: Nest 10 starts listening for the connection's close only once the handler
+  // has returned the Observable, so a client that left while an async handler awaited would leave
+  // its subscription behind. The sites are looked up inside the Observable instead.
+  stream(@Req() req: AuthedRequest): Observable<MessageEvent> {
+    return this.streams.events({
+      sites: () => accessibleSites(this.db, req.user),
+      backedUp: () => req.socket.writableNeedDrain,
+      drop: () => req.socket.destroy(),
+    });
   }
 }
