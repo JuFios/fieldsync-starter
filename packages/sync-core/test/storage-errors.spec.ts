@@ -1,10 +1,13 @@
+import 'fake-indexeddb/auto';
 import {
   asVersion,
-  LocalStorageSyncStorage,
+  IdbSyncStorage,
   MemoryStorage,
   SyncClient,
-  type Persisted,
+  type NewMutation,
   type SnapshotPage,
+  type StateChange,
+  type StoredMutation,
   type Transport,
 } from '../src';
 
@@ -24,43 +27,69 @@ const transport: Transport = {
   snapshot: () => Promise.resolve(EMPTY),
 };
 
+const quota = () => new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+
 /** Storage that is full: every write fails as browsers report it. */
 class FullStorage extends MemoryStorage {
-  override save(_state: Persisted): Promise<void> {
-    return Promise.reject(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+  override commit(_change: StateChange): Promise<void> {
+    return Promise.reject(quota());
+  }
+}
+
+/** Storage that becomes full after the queue was written: the answers of the server cannot be kept. */
+class FullAfterQueueStorage extends MemoryStorage {
+  override enqueue(entry: NewMutation): Promise<StoredMutation> {
+    return super.enqueue(entry);
+  }
+
+  override commit(_change: StateChange): Promise<void> {
+    return Promise.reject(quota());
   }
 }
 
 const clients: SyncClient[] = [];
 afterEach(() => {
   for (const c of clients.splice(0)) c.dispose();
-  delete (globalThis as { localStorage?: unknown }).localStorage;
 });
 
 /** A write to the client's storage that fails is reported, never taken for a stored state (F-38). */
 describe('a failed write to storage', () => {
   it('is reported as a storage error instead of a synced state', async () => {
-    const client = new SyncClient({ clientId: 'c1', transport, storage: new FullStorage() });
+    const client = new SyncClient({ clientId: 'c1', transport, storage: new FullAfterQueueStorage() });
     clients.push(client);
     await client.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'A', description: '' });
     await client.sync();
 
     expect(client.syncError).toMatchObject({ code: 'STORAGE' });
-    expect(client.status).not.toBe('idle');
+    expect(client.status).toBe('error');
+  });
+
+  it('refuses a mutation it cannot store, and says why', async () => {
+    const storage = new FullStorage();
+    storage.enqueue = () => Promise.reject(quota());
+    const client = new SyncClient({ clientId: 'c1', transport, storage });
+    clients.push(client);
+
+    await expect(
+      client.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'A', description: '' }),
+    ).rejects.toMatchObject({ name: 'StorageFailure' });
+
+    expect(client.pendingCount).toBe(0);
+    expect(client.rows('ticket')).toEqual([]);
+    expect({ status: client.status, error: client.syncError }).toEqual({
+      status: 'error',
+      error: { status: 0, code: 'STORAGE' },
+    });
   });
 
   it('is not swallowed by the browser storage', async () => {
-    (globalThis as { localStorage?: unknown }).localStorage = {
-      getItem: () => null,
-      setItem: () => {
-        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
-      },
-    };
-    const client = new SyncClient({ clientId: 'c1', transport, storage: new LocalStorageSyncStorage('fs_state') });
-    clients.push(client);
-    await client.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'A', description: '' });
-    await client.sync();
-
-    expect(client.syncError).toMatchObject({ code: 'STORAGE' });
+    const storage = await IdbSyncStorage.open(`storage-errors-${Math.random()}`);
+    try {
+      // A row IndexedDB cannot clone fails the transaction, as a full quota does.
+      await expect(storage.commit({ base: { put: [['ticket/x', { f: () => 1 }]] } })).rejects.toThrow();
+      await expect(storage.load()).resolves.toMatchObject({ base: new Map() });
+    } finally {
+      storage.close();
+    }
   });
 });

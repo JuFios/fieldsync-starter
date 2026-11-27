@@ -37,6 +37,11 @@
     "@fast-check/jest": "^3.0.0",
     "@fieldsync/test-kit": "*",
     "@types/eslint": "^8.56.12",
+    "fake-indexeddb": "^6.2.8",
     "fast-check": "^4.11.0"
+  },
+  "dependencies": {
+    "eventsource-parser": "^3.1.1",
+    "idb": "^8.0.4"
   }
 }

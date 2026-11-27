@@ -3,7 +3,7 @@ import {
   HttpTransport,
   MemoryStorage,
   SyncClient,
-  type Persisted,
+  type StateChange,
   type PushRequest,
   type PushResponse,
   type SnapshotPage,
@@ -14,13 +14,13 @@ const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
 const EMPTY: SnapshotPage = { watermark: asVersion(0), head: asVersion(0), rows: [], next: null };
 
-/** Storage that records every save, so a test can see what a disposed client still writes. */
+/** Storage that records every write, so a test can see what a disposed client still writes. */
 class RecordingStorage extends MemoryStorage {
-  readonly saves: Persisted[] = [];
+  readonly saves: StateChange[] = [];
 
-  override save(state: Persisted): Promise<void> {
-    this.saves.push(structuredClone(state));
-    return super.save(state);
+  override commit(change: StateChange): Promise<void> {
+    this.saves.push(structuredClone(change));
+    return super.commit(change);
   }
 }
 

@@ -1,4 +1,4 @@
-import { knownDefect, precondition } from '@fieldsync/test-kit';
+import { precondition } from '@fieldsync/test-kit';
 import {
   asVersion,
   DEFAULT_REQUEST_TIMEOUT_MS,
@@ -347,35 +347,28 @@ describe('SyncClient', () => {
     expect(transport.pushCalls).toBeGreaterThan(1);
   });
 
-  knownDefect(
-    { id: 'F-10', owner: 'offline-client', reason: 'the pending queue is never persisted' },
-    'keeps unsynced mutations across a reload',
-    async () => {
-      const storage = new MemoryStorage();
-      const before = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
-      await before.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Written offline', description: '' });
-      await before.sync();
-      before.dispose(); // the page goes away
+  it('keeps unsynced mutations across a reload', async () => {
+    const storage = new MemoryStorage();
+    const before = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+    await before.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Written offline', description: '' });
+    await before.sync();
+    before.dispose(); // the page goes away
 
-      const after = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
-      expect(after.pendingCount).toBe(1);
-      expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
-    },
-  );
+    const after = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+    await after.ready;
+    expect(after.pendingCount).toBe(1);
+    expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
+  });
 
-  knownDefect(
-    { id: 'F-11', owner: 'offline-client', reason: 'tabs sharing one clientId allocate the same mutation ids' },
-    'does not lose mutations when two tabs share one clientId',
-    async () => {
-      const server = new FakeServer();
-      const storage = new MemoryStorage();
-      const tabA = newClient({ clientId: 'c1', transport: server.transport(), storage });
-      const tabB = newClient({ clientId: 'c1', transport: server.transport(), storage });
-      await tabA.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab A', description: '' });
-      await tabA.sync();
-      await tabB.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab B', description: '' });
-      await tabB.sync();
-      expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
-    },
-  );
+  it('does not lose mutations when two tabs share one clientId', async () => {
+    const server = new FakeServer();
+    const storage = new MemoryStorage();
+    const tabA = newClient({ clientId: 'c1', transport: server.transport(), storage });
+    const tabB = newClient({ clientId: 'c1', transport: server.transport(), storage });
+    await tabA.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab A', description: '' });
+    await tabA.sync();
+    await tabB.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab B', description: '' });
+    await tabB.sync();
+    expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
+  });
 });

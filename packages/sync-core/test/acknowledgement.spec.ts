@@ -1,3 +1,4 @@
+import { storeState } from './support/stored';
 import {
   asVersion,
   MemoryStorage,
@@ -45,8 +46,7 @@ class ScriptedTransport {
 /** A client that synced before: it has a stored state, so it reads the log and never a snapshot. */
 function client(transport: ScriptedTransport): SyncClient {
   const storage = new MemoryStorage();
-  // MemoryStorage stores synchronously; the client created next loads this state.
-  void storage.save({ cursor: 0, lastMutationId: 0, base: {} });
+  storeState(storage, { cursor: 0, lastMutationId: 0, base: {} });
   return new SyncClient({ clientId: 'c1', transport, storage });
 }
 

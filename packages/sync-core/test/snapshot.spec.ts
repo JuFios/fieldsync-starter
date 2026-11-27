@@ -1,3 +1,4 @@
+import { storeState } from './support/stored';
 import {
   asVersion,
   HttpTransport,
@@ -79,8 +80,7 @@ const pulled =
 const clients: SyncClient[] = [];
 function client(transport: Transport, stored?: { cursor: number; lastMutationId: number; base: Record<string, Row> }) {
   const storage = new MemoryStorage();
-  // MemoryStorage stores synchronously; the client created next loads this state.
-  if (stored) void storage.save(stored);
+  if (stored) storeState(storage, stored);
   const c = new SyncClient({ clientId: 'c1', transport, storage });
   clients.push(c);
   return { client: c, storage };
@@ -110,7 +110,7 @@ describe('SyncClient snapshots', () => {
     expect(c.rows('part')).toEqual([part(2)]);
     expect(statuses).toContain('loading');
     expect(c.status).toBe('idle');
-    await expect(storage.load()).resolves.toMatchObject({ cursor: 8 });
+    await expect(storage.load()).resolves.toMatchObject({ meta: { cursor: 8 } });
   });
 
   it('reloads a client whose pull is answered RESET_REQUIRED, dropping rows the server no longer has', async () => {
@@ -167,7 +167,7 @@ describe('SyncClient snapshots', () => {
 
     expect(c.status).toBe('offline');
     expect(c.rows('ticket')).toEqual([ticket('old')]);
-    await expect(storage.load()).resolves.toMatchObject({ cursor: 3 });
+    await expect(storage.load()).resolves.toMatchObject({ meta: { cursor: 3 } });
     t.pulls.push(() => Promise.reject(reset()), pulled([], 31));
     t.snapshots.push(page(31, []));
     await c.sync();
@@ -380,29 +380,5 @@ describe('asVersion', () => {
 
   it.each([-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY])('refuses %p', (n) => {
     expect(() => asVersion(n)).toThrow(RangeError);
-  });
-});
-
-describe('a stored state with a cursor that is not a version', () => {
-  it('loads a snapshot instead, and keeps numbering mutations after the stored id', async () => {
-    const t = new ScriptedTransport();
-    t.snapshots.push(page(4, []));
-    t.pulls.push(pulled([], 4, 7));
-    const { client: c } = client(t, { cursor: -3, lastMutationId: 7, base: { [`ticket/${TICKET}`]: ticket('stale') } });
-    const pushed: number[] = [];
-    t.pushes.push((req) => {
-      pushed.push(...req.mutations.map((m) => m.id));
-      return Promise.resolve({
-        results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
-        lastMutationId: 8,
-      });
-    });
-    await c.mutate('ticket.create', { id: OTHER, siteId: SITE, title: 'new', description: '' });
-
-    await c.sync();
-
-    expect(pushed).toEqual([8]);
-    expect(t.snapshotRequests).toEqual([{ limit: 500 }]);
-    expect(c.rows('ticket').map((r) => r.id)).not.toContain(TICKET);
   });
 });

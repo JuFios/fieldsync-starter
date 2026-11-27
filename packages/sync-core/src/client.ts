@@ -1,6 +1,12 @@
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
-import type { SyncStorage } from './storage';
+import {
+  MUTATION_FORMAT_VERSION,
+  type StateChange,
+  type StoredMutation,
+  type StoredRejection,
+  type SyncStorage,
+} from './storage';
 import { RESET_REQUIRED, TransportError, type RequestOptions, type Transport } from './transport';
 import {
   asVersion,
@@ -98,26 +104,6 @@ export interface RejectedMutation extends Rejection {
   mutation: Mutation;
 }
 
-/** A mutation waiting for the server, with the time it was queued (its optimistic timestamp). */
-interface Queued {
-  mutation: Mutation;
-  queuedAt: string;
-  /** UTF-8 bytes of the mutation's JSON, for splitting the queue into push bodies. */
-  bytes: number;
-  /**
-   * Set once the server applied the mutation: the change-log version of its last change. The
-   * mutation stays in the queue, and in the optimistic view, until the cursor reaches this version,
-   * so an interrupted pull never takes the user's change out of the view (F-30). It is not sent again.
-   */
-  appliedAt?: Version;
-  /**
-   * Set when the server answered a copy of the mutation as a duplicate without a version (its
-   * result was collected): the change's version is unknown, so the mutation stays in the view until
-   * a pull completes, and is not sent again.
-   */
-  awaitingPull?: true;
-}
-
 const utf8 = new TextEncoder();
 
 /** UTF-8 bytes of a value's JSON; the same in Node and browsers. */
@@ -125,8 +111,12 @@ function jsonBytes(value: unknown): number {
   return utf8.encode(JSON.stringify(value)).length;
 }
 
+/** The longest mutation id, for the size of a mutation before the storage gives it its id. */
+const LONGEST_ID = Number.MAX_SAFE_INTEGER;
+
 export interface SyncClientOptions {
-  clientId: string;
+  /** The client id to take when the storage holds none yet (its first start); otherwise a new UUID. */
+  clientId?: string;
   transport: Transport;
   storage: SyncStorage;
   /** Time and timers; defaults to the system clock. */
@@ -194,21 +184,30 @@ function wireArgs(args: Record<string, unknown>): Record<string, unknown> {
   return snapshot as Record<string, unknown>;
 }
 
+/** A mutation of the queue that the server has not answered yet. */
+function isUnsent(q: StoredMutation): boolean {
+  return q.appliedAt === undefined && !q.awaitingPull;
+}
+
+/**
+ * The sync client: a durable queue of mutations applied optimistically on top of the server's rows,
+ * a push of the queue and a pull of the change log. Its whole state is in its storage (IndexedDB in
+ * the browser) and every change of it is one atomic write, so a page that reloads or closes at any
+ * point loses no queued mutation and repeats none (F-10).
+ */
 export class SyncClient {
-  readonly clientId: string;
   private readonly transport: Transport;
   private readonly storage: SyncStorage;
   private readonly clock: SyncClock;
   private readonly requestTimeoutMs: number;
+  private readonly initialClientId: string | undefined;
+  private id = '';
   private base = new Map<string, Row>();
   private cursor: Version = asVersion(0);
   private lastMutationId = 0;
-  /**
-   * The id the next mutation gets. Ids only grow, whatever the server answers: deriving them from
-   * the last applied id and the queue length reused an id once a mutation left the queue (F-09).
-   */
-  private nextMutationId = 1;
-  private pending: Queued[] = [];
+  private pending: StoredMutation[] = [];
+  /** UTF-8 bytes of each queued mutation's JSON, by queue position, for splitting the queue into pushes. */
+  private readonly bytes = new Map<number, number>();
   /**
    * Whether `base` and `cursor` hold a state read from the server. A client without one, and one
    * whose cursor the server no longer serves (410 RESET_REQUIRED), loads a snapshot instead of
@@ -230,33 +229,48 @@ export class SyncClient {
   private disposed = false;
   /** Aborts every request of the client when it is disposed. */
   private readonly life = new AbortController();
-  /** Resolves once the stored state is loaded; every operation waits for it. */
+  /**
+   * Resolves once the stored state is loaded; every operation waits for it. It does not reject: a
+   * storage that cannot be read leaves the client in the status `error` (see `syncError`).
+   */
   readonly ready: Promise<void>;
 
   constructor(opts: SyncClientOptions) {
-    this.clientId = opts.clientId;
     this.transport = opts.transport;
     this.storage = opts.storage;
     this.clock = opts.clock ?? systemClock;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.initialClientId = opts.clientId;
     this.ready = this.load();
   }
 
+  /** The client id the server knows this client by ('' until `ready`). */
+  get clientId(): string {
+    return this.id;
+  }
+
   private async load(): Promise<void> {
-    const saved = await this.storage.load();
-    if (saved) {
-      this.lastMutationId = saved.lastMutationId;
-      this.nextMutationId = saved.lastMutationId + 1;
-      // A stored cursor that is not a version (storage edited or damaged) cannot be pulled from: the
-      // client then loads a snapshot instead of failing.
-      if (Number.isSafeInteger(saved.cursor) && saved.cursor >= 0) {
-        this.cursor = asVersion(saved.cursor);
-        this.base = new Map(Object.entries(saved.base));
+    try {
+      const state = await this.storage.load();
+      this.id = state.meta.clientId ?? (await this.storage.ensureClientId(this.initialClientId ?? newClientId()));
+      this.lastMutationId = state.meta.lastMutationId;
+      this.pending = state.pending;
+      this.rejected = state.rejections.map(({ seq: _seq, ...rejection }) => rejection);
+      if (state.meta.cursor !== null) {
+        this.cursor = state.meta.cursor;
+        this.base = state.base;
         this.hasState = true;
       }
+    } catch (err) {
+      this.broken = new StorageFailure(err);
+      this.lastError = syncErrorOf(this.broken);
+      this.currentStatus = 'error';
     }
     this.emit();
   }
+
+  /** Set when the storage could not be read: the client cannot work. */
+  private broken: StorageFailure | undefined;
 
   get status(): SyncStatus {
     return this.currentStatus;
@@ -290,24 +304,41 @@ export class SyncClient {
   }
 
   /**
-   * Queues a mutation and applies it optimistically. Rejects with a TypeError, without queueing
-   * anything, when `args` cannot be sent as JSON (a BigInt, a cycle); see {@link wireArgs}.
+   * Queues a mutation and applies it optimistically, once it is stored: what the user sees survives a
+   * reload. Rejects with a TypeError, without queueing anything, when `args` cannot be sent as JSON
+   * (a BigInt, a cycle; see {@link wireArgs}) or would not fit in one push, and with a
+   * {@link StorageFailure} when the storage refuses the write (the client then reports `STORAGE`).
    */
   async mutate(name: MutatorName, args: Record<string, unknown>): Promise<void> {
     await this.ready;
-    const mutation: Mutation = {
-      id: this.nextMutationId,
-      name,
-      args: wireArgs(args),
-    };
-    const bytes = jsonBytes(mutation);
-    if (this.envelopeBytes() + bytes > MAX_PUSH_BODY_BYTES) {
+    if (this.broken) throw this.broken;
+    if (this.disposed) throw new ClientDisposed();
+    const wire = wireArgs(args);
+    if (this.envelopeBytes() + jsonBytes({ id: LONGEST_ID, name, args: wire }) > MAX_PUSH_BODY_BYTES) {
       throw new TypeError(`A mutation may take at most ${MAX_PUSH_BODY_BYTES} bytes of JSON in a push`);
     }
-    this.nextMutationId += 1;
-    this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString(), bytes });
+    let queued: StoredMutation;
+    try {
+      queued = await this.storage.enqueue({ name, args: wire, queuedAt: new Date(this.clock.now()).toISOString() });
+    } catch (err) {
+      const failure = new StorageFailure(err);
+      this.lastError = syncErrorOf(failure);
+      this.setStatus('error');
+      throw failure;
+    }
+    if (this.disposed) return;
+    this.pending.push(queued);
     this.emit();
     void this.start();
+  }
+
+  /** Removes every kept rejection (the user has seen them). */
+  async dismissRejections(): Promise<void> {
+    await this.ready;
+    if (this.rejected.length === 0) return;
+    await this.commit({ rejections: { clear: true } });
+    this.rejected = [];
+    this.emit();
   }
 
   /** Server state with all unacknowledged local mutations applied on top. */
@@ -344,7 +375,8 @@ export class SyncClient {
         const again = this.again;
         this.again = false;
         // After a failed sync the retry timer runs the next one, with its delay.
-        if ((again || this.unsent().length > 0) && this.currentStatus !== 'offline') void this.start();
+        const failed = this.currentStatus === 'offline' || this.currentStatus === 'error';
+        if ((again || this.unsent().length > 0) && !failed) void this.start();
       });
     }
     return this.inFlight;
@@ -396,9 +428,24 @@ export class SyncClient {
     }
   }
 
+  /**
+   * Writes a change of the state, in one transaction. A disposed client writes nothing (its
+   * successor may already own the storage); a write the storage refuses rejects with
+   * {@link StorageFailure} (F-38).
+   */
+  private async commit(change: StateChange): Promise<void> {
+    if (this.disposed) throw new ClientDisposed();
+    try {
+      await this.storage.commit(change);
+    } catch (err) {
+      throw new StorageFailure(err);
+    }
+    if (this.disposed) throw new ClientDisposed();
+  }
+
   private async runSync(): Promise<void> {
     await this.ready;
-    if (this.disposed) return;
+    if (this.disposed || this.broken) return;
     this.setStatus('syncing');
     try {
       await this.push();
@@ -424,97 +471,137 @@ export class SyncClient {
 
   /** Bytes of a push body with no mutations. */
   private envelopeBytes(): number {
-    return jsonBytes({ clientId: this.clientId, mutations: [] });
+    return jsonBytes({ clientId: this.id, mutations: [] });
+  }
+
+  private bytesOf(q: StoredMutation): number {
+    let bytes = this.bytes.get(q.seq);
+    if (bytes === undefined) {
+      bytes = jsonBytes(q.mutation);
+      this.bytes.set(q.seq, bytes);
+    }
+    return bytes;
   }
 
   /**
    * The head of the queue that fits in one push: at most {@link MAX_PUSH_MUTATIONS} mutations and
    * {@link MAX_PUSH_BODY_BYTES} bytes. `mutate` refuses a mutation that does not fit on its own, so
-   * the batch is never empty while the queue is not.
+   * the batch is never empty while the queue is not. Mutations in a format this code does not know
+   * (queued by a newer app) are not sent.
    */
-  private nextBatch(): Mutation[] {
-    const batch: Mutation[] = [];
+  private nextBatch(): StoredMutation[] {
+    const batch: StoredMutation[] = [];
     let bytes = this.envelopeBytes();
-    for (const q of this.pending) {
-      if (q.appliedAt !== undefined || q.awaitingPull) continue;
+    for (const q of this.unsent()) {
+      if (q.v > MUTATION_FORMAT_VERSION) break;
       // A comma separates every mutation after the first.
-      const added = q.bytes + (batch.length > 0 ? 1 : 0);
+      const added = this.bytesOf(q) + (batch.length > 0 ? 1 : 0);
       if (batch.length === MAX_PUSH_MUTATIONS || bytes + added > MAX_PUSH_BODY_BYTES) break;
-      batch.push(q.mutation);
+      batch.push(q);
       bytes += added;
     }
     return batch;
   }
 
   /** Mutations the server has not answered yet. */
-  private unsent(): Queued[] {
-    return this.pending.filter((q) => q.appliedAt === undefined && !q.awaitingPull);
+  private unsent(): StoredMutation[] {
+    return this.pending.filter(isUnsent);
   }
 
   private async push(): Promise<void> {
-    if (this.unsent().length === 0) return;
     const batch = this.nextBatch();
-    const resp = await this.request((init) => this.transport.push({ clientId: this.clientId, mutations: batch }, init));
+    if (batch.length === 0) return;
+    const resp = await this.request((init) =>
+      this.transport.push({ clientId: this.id, mutations: batch.map((q) => q.mutation) }, init),
+    );
+    const sent = new Map(batch.map((q) => [q.mutation.id, q]));
     const done = new Set<number>();
+    const updated: StoredMutation[] = [];
+    const rejections: Array<Omit<StoredRejection, 'seq'>> = [];
     for (const r of resp.results) {
-      const queued = this.pending.find((q) => q.mutation.id === r.id);
+      const queued = sent.get(r.id);
       if (!queued) continue;
       if (r.status === 'rejected') {
-        this.rejected.push({
+        rejections.push({
           mutation: queued.mutation,
           code: r.code,
           message: r.message,
           ...(r.details === undefined ? {} : { details: r.details }),
         });
-        done.add(r.id);
+        done.add(queued.seq);
       } else if (r.version === undefined && r.status === 'duplicate') {
-        queued.awaitingPull = true;
+        updated.push({ ...queued, awaitingPull: true });
       } else if (r.version === undefined || r.version <= this.cursor) {
         // Nothing to wait for: the mutation changed nothing, or the client has its change already.
-        done.add(r.id);
+        done.add(queued.seq);
       } else {
-        queued.appliedAt = r.version;
+        updated.push({ ...queued, appliedAt: r.version });
       }
     }
-    this.pending = this.pending.filter((q) => !done.has(q.mutation.id));
-    this.acknowledge(resp.lastMutationId);
-    // Stored at once, not only after the next pull: after a reload, ids continue after the last one
-    // the server handled, so a new mutation is never answered as a duplicate of an old one.
-    await this.persist();
+    const lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+    // Stored at once, with the last id the server handled: after a reload, ids continue after it, so
+    // a new mutation is never answered as a duplicate of an old one (F-32).
+    await this.commit({
+      pending: { put: updated, delete: [...done] },
+      rejections: { add: rejections },
+      meta: { lastMutationId, nextMutationIdAtLeast: lastMutationId + 1 },
+    });
+    const replaced = new Map(updated.map((q) => [q.seq, q]));
+    this.pending = this.pending.filter((q) => !done.has(q.seq)).map((q) => replaced.get(q.seq) ?? q);
+    this.rejected.push(...rejections);
+    this.lastMutationId = lastMutationId;
     this.emit();
-  }
-
-  /** The server applied (or rejected) every mutation up to `lastMutationId`. */
-  private acknowledge(lastMutationId: number): void {
-    this.lastMutationId = Math.max(this.lastMutationId, lastMutationId);
-    this.nextMutationId = Math.max(this.nextMutationId, this.lastMutationId + 1);
   }
 
   private async pull(): Promise<void> {
     for (;;) {
-      const resp = await this.request((init) => this.transport.pull(this.cursor, this.clientId, PAGE_SIZE, init));
+      const from = this.cursor;
+      const resp = await this.request((init) => this.transport.pull(from, this.id, PAGE_SIZE, init));
+      const settled = this.settled(resp, resp.nextCursor);
+      const put: Array<[string, Row]> = [];
+      const removed: string[] = [];
+      for (const change of resp.changes) {
+        const key = `${change.entity}/${change.id}`;
+        if (change.op === 'put' && change.data) put.push([key, change.data]);
+        else removed.push(key);
+      }
+      await this.commit({
+        base: { put, delete: removed },
+        pending: { delete: settled.dropped },
+        meta: { cursor: resp.nextCursor, ...settled.meta },
+        // Lost on a crash, the page is pulled again: the cursor is written with it.
+        durability: 'relaxed',
+      });
       applyChanges(this.base, resp.changes);
       this.cursor = resp.nextCursor;
-      this.settle(resp);
-      await this.persist();
+      this.apply(settled);
       this.emit();
       if (!resp.hasMore) break;
     }
   }
 
   /**
-   * After a pull page: takes the server's last handled id and drops the pending mutations whose
-   * effect the client now has.
+   * What a pull page settles at `cursor`: the server's last handled id, and the pending mutations
+   * whose effect the client then has.
    */
-  private settle(resp: PullResponse): void {
-    this.acknowledge(resp.lastMutationId);
-    this.pending = this.pending.filter((q) => {
-      if (q.appliedAt !== undefined) return q.appliedAt > this.cursor;
-      if (q.awaitingPull) return resp.hasMore;
-      // A mutation whose answer was lost: the last page comes from the same snapshot as the
-      // client's last applied id, so every change of those mutations is in the pages read.
-      return resp.hasMore || q.mutation.id > resp.lastMutationId;
-    });
+  private settled(resp: PullResponse, cursor: Version) {
+    const lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+    const dropped = this.pending
+      .filter((q) => {
+        if (q.appliedAt !== undefined) return q.appliedAt <= cursor;
+        if (q.awaitingPull) return !resp.hasMore;
+        // A mutation whose answer was lost: the last page comes from the same snapshot as the
+        // client's last applied id, so every change of those mutations is in the pages read.
+        return !resp.hasMore && q.mutation.id <= resp.lastMutationId;
+      })
+      .map((q) => q.seq);
+    return { dropped, meta: { lastMutationId, nextMutationIdAtLeast: lastMutationId + 1 } };
+  }
+
+  private apply(settled: { dropped: number[]; meta: { lastMutationId: number } }): void {
+    const dropped = new Set(settled.dropped);
+    this.pending = this.pending.filter((q) => !dropped.has(q.seq));
+    this.lastMutationId = settled.meta.lastMutationId;
   }
 
   /**
@@ -555,31 +642,22 @@ export class SyncClient {
     let last: PullResponse;
     do {
       const from = cursor;
-      last = await this.request((init) => this.transport.pull(from, this.clientId, PAGE_SIZE, init));
+      last = await this.request((init) => this.transport.pull(from, this.id, PAGE_SIZE, init));
       applyChanges(staged, last.changes);
       cursor = last.nextCursor;
     } while (last.hasMore);
+    const settled = this.settled(last, cursor);
+    await this.commit({
+      base: { replace: true, put: [...staged] },
+      pending: { delete: settled.dropped },
+      meta: { cursor, ...settled.meta },
+      durability: 'relaxed',
+    });
     this.base = staged;
     this.cursor = cursor;
     this.hasState = true;
-    this.settle(last);
-    await this.persist();
+    this.apply(settled);
     this.emit();
-  }
-
-  /** Stores the state; a write the storage refuses rejects with {@link StorageFailure} (F-38). */
-  private async persist(): Promise<void> {
-    // Checked here as well: a disposed client must not overwrite what its successor stores.
-    if (this.disposed) throw new ClientDisposed();
-    try {
-      await this.storage.save({
-        cursor: this.cursor,
-        lastMutationId: this.lastMutationId,
-        base: Object.fromEntries(this.base),
-      });
-    } catch (err) {
-      throw new StorageFailure(err);
-    }
   }
 
   private setStatus(status: SyncStatus): void {
@@ -598,4 +676,9 @@ export class SyncClient {
     this.changeCount += 1;
     for (const listener of this.listeners) listener();
   }
+}
+
+/** A new client id: a random UUID (browsers expose it in secure contexts only, see README). */
+function newClientId(): string {
+  return globalThis.crypto.randomUUID();
 }

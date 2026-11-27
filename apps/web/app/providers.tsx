@@ -5,20 +5,14 @@
 // the specific polyfill is imported here, before the sync client is created.
 import 'core-js/stable/string/is-well-formed';
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { HttpTransport, LocalStorageSyncStorage, SyncClient } from '@fieldsync/sync-core';
+import { HttpTransport, IdbSyncStorage, localStorageLegacy, SyncClient } from '@fieldsync/sync-core';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 
 const ClientContext = createContext<SyncClient | null>(null);
 
-function getClientId(): string {
-  let id = localStorage.getItem('fs_client_id');
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem('fs_client_id', id);
-  }
-  return id;
-}
+/** The database of the client's state; one for the browser, as the original client's localStorage was. */
+const DATABASE = 'fieldsync';
 
 export function Providers({ children }: { children: ReactNode }) {
   const [client, setClient] = useState<SyncClient | null>(null);
@@ -30,15 +24,14 @@ export function Providers({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!token) return;
-    const c = new SyncClient({
-      clientId: getClientId(),
-      transport: new HttpTransport(API, token),
-      storage: new LocalStorageSyncStorage('fs_state'),
+    // The original client's id and last mutation id move from localStorage into the database.
+    void IdbSyncStorage.open(DATABASE, { legacy: localStorageLegacy(localStorage) }).then((storage) => {
+      const c = new SyncClient({ transport: new HttpTransport(API, token), storage });
+      setClient(c);
+      void c.sync();
+      const es = new EventSource(`${API}/sync/stream?token=${encodeURIComponent(token)}`);
+      es.addEventListener('poke', () => void c.sync());
     });
-    setClient(c);
-    void c.sync();
-    const es = new EventSource(`${API}/sync/stream?token=${encodeURIComponent(token)}`);
-    es.addEventListener('poke', () => void c.sync());
   }, [token]);
 
   if (!token) {
