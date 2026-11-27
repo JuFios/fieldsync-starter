@@ -34,12 +34,18 @@ class RecordingTransport implements Transport {
 
   pull(): Promise<PullResponse> {
     if (!this.online) return Promise.reject(new Error('offline'));
-    return Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 0 });
+    return Promise.resolve({
+      changes: [],
+      nextCursor: asVersion(0),
+      hasMore: false,
+      lastMutationId: 0,
+      head: asVersion(0),
+    });
   }
 
   snapshot(): Promise<SnapshotPage> {
     if (!this.online) return Promise.reject(new Error('offline'));
-    return Promise.resolve({ watermark: asVersion(0), rows: [], next: null });
+    return Promise.resolve({ watermark: asVersion(0), head: asVersion(0), rows: [], next: null });
   }
 }
 

@@ -101,6 +101,12 @@ describe('PullService', () => {
     await expect(pull.pull(TECH, 5, 500)).resolves.toMatchObject({ changes: [], nextCursor: 5, hasMore: false });
   });
 
+  it("returns the snapshot's head, also when the page stops before it", async () => {
+    logOf(1, 2, 3);
+    await expect(pull.pull(TECH, 0, 2)).resolves.toMatchObject({ head: 3, hasMore: true });
+    await expect(pull.pull(TECH, 2, 2)).resolves.toMatchObject({ head: 3, hasMore: false });
+  });
+
   it('reports more, and stops the cursor at the page, only when changes follow the page', async () => {
     logOf(1, 2, 3);
     await expect(pull.pull(TECH, 0, 2)).resolves.toMatchObject({ nextCursor: 2, hasMore: true });

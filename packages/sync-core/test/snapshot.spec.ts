@@ -63,11 +63,18 @@ class ScriptedTransport implements Transport {
 const page =
   (watermark: number, rows: SnapshotPage['rows'], next: SnapshotPage['next'] = null) =>
   () =>
-    Promise.resolve({ watermark: asVersion(watermark), rows, next });
+    Promise.resolve({ watermark: asVersion(watermark), head: asVersion(watermark), rows, next });
+/** A pull page; with more to come, the server's head is ahead of the page (by default one version). */
 const pulled =
-  (changes: Change[], nextCursor: number, lastMutationId = 0, hasMore = false) =>
+  (
+    changes: Change[],
+    nextCursor: number,
+    lastMutationId = 0,
+    hasMore = false,
+    head = hasMore ? nextCursor + 1 : nextCursor,
+  ) =>
   () =>
-    Promise.resolve({ changes, nextCursor: asVersion(nextCursor), hasMore, lastMutationId });
+    Promise.resolve({ changes, nextCursor: asVersion(nextCursor), hasMore, lastMutationId, head: asVersion(head) });
 
 const clients: SyncClient[] = [];
 function client(transport: Transport, stored?: { cursor: number; lastMutationId: number; base: Record<string, Row> }) {
@@ -127,7 +134,7 @@ describe('SyncClient snapshots', () => {
       page(30, [{ entity: 'part', id: PART, siteId: SITE, data: part(9) }], { siteId: SITE, entity: 'part', id: PART }),
       () =>
         new Promise((resolve) => {
-          releasePage2 = () => resolve({ watermark: asVersion(30), rows: [], next: null });
+          releasePage2 = () => resolve({ watermark: asVersion(30), head: asVersion(30), rows: [], next: null });
         }),
     );
     t.pulls.push(pulled([], 30));
@@ -296,7 +303,7 @@ describe('HttpTransport.snapshot', () => {
     const urls: string[] = [];
     const fetchImpl: typeof fetch = (input) => {
       urls.push(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
-      return ok({ watermark: asVersion(4), rows: [], next: null })(input);
+      return ok({ watermark: asVersion(4), head: asVersion(4), rows: [], next: null })(input);
     };
     await new HttpTransport('http://api', 't', fetchImpl).snapshot({
       watermark: asVersion(4),
@@ -333,19 +340,32 @@ describe('HttpTransport.snapshot', () => {
 describe('isSnapshotPage', () => {
   const row = { entity: 'ticket', id: TICKET, siteId: SITE, data: {} };
   it.each([
-    ['a page', { watermark: asVersion(1), rows: [row], next: null }, true],
+    ['a page', { watermark: asVersion(1), head: asVersion(1), rows: [row], next: null }, true],
     [
       'a page with a key',
-      { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part', id: PART } },
+      { watermark: asVersion(1), head: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part', id: PART } },
       true,
     ],
     ['no watermark', { rows: [], next: null }, false],
-    ['a fractional watermark', { watermark: 1.5, rows: [], next: null }, false],
-    ['a negative watermark', { watermark: -1, rows: [], next: null }, false],
-    ['an unknown entity', { watermark: asVersion(1), rows: [{ ...row, entity: 'site' }], next: null }, false],
-    ['a row without data', { watermark: asVersion(1), rows: [{ ...row, data: null }], next: null }, false],
-    ['a key without an id', { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part' } }, false],
-    ['no next', { watermark: asVersion(1), rows: [] }, false],
+    ['a fractional watermark', { watermark: 1.5, head: 1.5, rows: [], next: null }, false],
+    ['a negative watermark', { watermark: -1, head: -1, rows: [], next: null }, false],
+    [
+      'an unknown entity',
+      { watermark: asVersion(1), head: asVersion(1), rows: [{ ...row, entity: 'site' }], next: null },
+      false,
+    ],
+    [
+      'a row without data',
+      { watermark: asVersion(1), head: asVersion(1), rows: [{ ...row, data: null }], next: null },
+      false,
+    ],
+    [
+      'a key without an id',
+      { watermark: asVersion(1), head: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part' } },
+      false,
+    ],
+    ['no next', { watermark: asVersion(1), head: asVersion(1), rows: [] }, false],
+    ['no head', { watermark: asVersion(1), rows: [], next: null }, false],
     ['an array', [], false],
   ])('%s', (_case, body, expected) => {
     expect(isSnapshotPage(body)).toBe(expected);

@@ -52,8 +52,15 @@ describe('SyncClient.syncError', () => {
         fail
           ? Promise.reject(new TransportError(409, 'MUTATION_OUT_OF_ORDER', 'push failed', { expected: 2 }))
           : Promise.resolve({ results: [], lastMutationId: 0 }),
-      pull: () => Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 0 }),
-      snapshot: () => Promise.resolve({ watermark: asVersion(0), rows: [], next: null }),
+      pull: () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(0),
+          hasMore: false,
+          lastMutationId: 0,
+          head: asVersion(0),
+        }),
+      snapshot: () => Promise.resolve({ watermark: asVersion(0), head: asVersion(0), rows: [], next: null }),
     };
     const client = new SyncClient({ clientId: 'c', transport, storage: new MemoryStorage() });
     try {

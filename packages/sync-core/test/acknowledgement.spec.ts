@@ -71,7 +71,14 @@ describe('acknowledged mutations', () => {
     const transport = new ScriptedTransport();
     // The first page ends before the change; it already reports the mutation as applied.
     transport.pulls = [
-      () => Promise.resolve({ changes: [], nextCursor: asVersion(2), hasMore: true, lastMutationId: 1 }),
+      () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(2),
+          hasMore: true,
+          lastMutationId: 1,
+          head: asVersion(3),
+        }),
     ];
     const c = client(transport);
     try {
@@ -87,7 +94,13 @@ describe('acknowledged mutations', () => {
     const transport = new ScriptedTransport();
     transport.pulls = [
       () =>
-        Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
+        Promise.resolve({
+          changes: [ticketChange(3)],
+          nextCursor: asVersion(3),
+          hasMore: false,
+          lastMutationId: 1,
+          head: asVersion(3),
+        }),
     ];
     const c = client(transport);
     try {
@@ -120,7 +133,13 @@ describe('acknowledged mutations', () => {
       });
       transport.pulls = [
         () =>
-          Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
+          Promise.resolve({
+            changes: [ticketChange(3)],
+            nextCursor: asVersion(3),
+            hasMore: false,
+            lastMutationId: 1,
+            head: asVersion(3),
+          }),
       ];
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({

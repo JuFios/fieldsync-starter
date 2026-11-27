@@ -212,6 +212,13 @@ export class PullResponseDto {
 
   @ApiProperty({ description: 'The last mutation id the server handled for clientId (0 without one).' })
   lastMutationId!: number;
+
+  @ApiProperty({
+    description:
+      'Head of the change log in the snapshot this page was read from (lastMutationId is from the same one). ' +
+      'Pull until the cursor reaches the head of the first page, then stop until the next sync.',
+  })
+  head!: number;
 }
 
 export class SnapshotRowDto {
@@ -244,6 +251,13 @@ export class SnapshotPageDto {
     description: 'Head of the change log when the snapshot started; pull from it after the last page.',
   })
   watermark!: number;
+
+  @ApiProperty({
+    description:
+      'Head of the change log when this page was read; no row of the page holds a later change. After pulling ' +
+      'the log up to the highest head of the pages, the rows and the log are one state of the server.',
+  })
+  head!: number;
 
   @ApiProperty({ type: [SnapshotRowDto], description: "Live rows of the user's sites, ordered by siteId, entity, id." })
   rows!: SnapshotRowDto[];

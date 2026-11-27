@@ -25,7 +25,9 @@ export class PullService {
    * snapshot. Versions become visible in commit order (see `finishMutation`), so the snapshot holds
    * every version up to its head and no later one. When the page is not full the cursor moves to that
    * head, past changes the user does not see, so a client with nothing new does not read the same
-   * rows again; `hasMore` is true exactly when changes after the page exist in the snapshot.
+   * rows again; `hasMore` is true exactly when changes after the page exist in the snapshot. `head`
+   * is that snapshot's head: a client that pulls until its cursor reaches the head of its first page
+   * stops after a bounded number of pages however fast others write.
    *
    * Throws 410 RESET_REQUIRED when the cursor is below the floor of the log: the changes after it are
    * partly collected, so the client has to reload its state from a snapshot (see SnapshotService).
@@ -89,6 +91,7 @@ export class PullService {
       nextCursor: hasMore ? changes[changes.length - 1].version : asVersion(Math.max(cursor, headVersion)),
       hasMore,
       lastMutationId,
+      head: asVersion(headVersion),
     };
   }
 }

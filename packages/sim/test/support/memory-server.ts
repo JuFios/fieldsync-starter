@@ -276,6 +276,7 @@ export class MemoryServer implements SimServer {
     const last = page.at(-1)?.e;
     return json(200, {
       watermark,
+      head: this.head,
       rows: page.map(({ e }) => ({ entity: e.entity, id: e.id, siteId: e.siteId, data: this.shown(e.entity, e.data) })),
       next: rows.length > limit && last ? { siteId: last.siteId, entity: last.entity, id: last.id } : null,
     });
@@ -306,6 +307,7 @@ export class MemoryServer implements SimServer {
       nextCursor: page.length === limit ? (page.at(-1)?.version ?? cursor) : Math.max(cursor, head),
       hasMore: page.length === limit,
       lastMutationId: clientId ? (this.lastMutation.get(clientId) ?? 0) : 0,
+      head,
     });
   }
 }

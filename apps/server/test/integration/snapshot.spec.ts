@@ -80,6 +80,7 @@ describeWithDb('GET /sync/snapshot', () => {
     expect(first.headers['cache-control']).toBe('no-store');
     expect(first.body).toEqual({
       watermark: Number(head.rows[0].version),
+      head: Number(head.rows[0].version),
       rows: [{ entity: 'ticket', id: LOW(1), siteId: mine, data: expect.objectContaining({ title: 'T1' }) as Row }],
       next: { siteId: mine, entity: 'ticket', id: LOW(1) },
     });
@@ -93,6 +94,7 @@ describeWithDb('GET /sync/snapshot', () => {
     // The deleted ticket and the other site's ticket are never part of it.
     expect(second.body).toEqual({
       watermark: first.body.watermark,
+      head: first.body.watermark,
       rows: [{ entity: 'ticket', id: HIGH(1), siteId: mine, data: expect.objectContaining({ title: 'T0' }) as Row }],
       next: null,
     });

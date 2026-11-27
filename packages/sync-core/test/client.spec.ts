@@ -4,7 +4,7 @@ import type { SyncClock } from '../src';
 import type { PullResponse, PushRequest, PushResponse, SnapshotPage } from '../src';
 
 /** The snapshot of an empty server. */
-const EMPTY_SNAPSHOT: SnapshotPage = { watermark: asVersion(0), rows: [], next: null };
+const EMPTY_SNAPSHOT: SnapshotPage = { watermark: asVersion(0), head: asVersion(0), rows: [], next: null };
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 
@@ -51,7 +51,13 @@ class RejectingTransport implements Transport {
   }
 
   pull(): Promise<PullResponse> {
-    return Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 0 });
+    return Promise.resolve({
+      changes: [],
+      nextCursor: asVersion(0),
+      hasMore: false,
+      lastMutationId: 0,
+      head: asVersion(0),
+    });
   }
 
   snapshot(): Promise<SnapshotPage> {
@@ -109,6 +115,7 @@ class FakeServer {
           nextCursor: asVersion(0),
           hasMore: false,
           lastMutationId: this.last.get(clientId) ?? 0,
+          head: asVersion(0),
         }),
       snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
@@ -271,7 +278,14 @@ describe('SyncClient', () => {
           })),
           lastMutationId: 1,
         }),
-      pull: () => Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 1 }),
+      pull: () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(0),
+          hasMore: false,
+          lastMutationId: 1,
+          head: asVersion(0),
+        }),
       snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
     const client = makeClient(transport);

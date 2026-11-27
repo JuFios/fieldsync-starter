@@ -126,6 +126,13 @@ export interface PullResponse {
   nextCursor: Version;
   hasMore: boolean;
   lastMutationId: number;
+  /**
+   * The head of the log in the database snapshot this page was read from; `lastMutationId` comes from
+   * the same snapshot. Every change up to it is on this page or a later one. A client that keeps
+   * pulling until its cursor reaches the head of its first page ends after a bounded number of pages,
+   * however fast others write.
+   */
+  head: Version;
 }
 
 /** A live row of a snapshot. */
@@ -150,6 +157,12 @@ export interface SnapshotKey {
  */
 export interface SnapshotPage {
   watermark: Version;
+  /**
+   * The head of the log when this page was read: no row of the page holds a change after it. Once the
+   * client has pulled the log from the watermark up to the highest head of the pages, the rows and the
+   * log form one state of the server, even while writes go on (the point of consistency).
+   */
+  head: Version;
   rows: SnapshotRow[];
   next: SnapshotKey | null;
 }

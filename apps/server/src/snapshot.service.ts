@@ -42,7 +42,9 @@ export class SnapshotService {
 
   /**
    * One page, read in one read-only REPEATABLE READ transaction with the head and floor of the log.
-   * Throws 410 RESET_REQUIRED for a watermark below the floor and 400 for one above the head.
+   * The page carries that head: every row of it holds no change after it, so once the client has
+   * pulled the log up to the highest head of its pages, the rows and the log form one state of the
+   * server (see `SnapshotPage.head`). Throws 410 RESET_REQUIRED for a watermark below the floor and 400 for one above the head.
    */
   page(user: AuthUser, query: SnapshotQuery): Promise<SnapshotPage> {
     return this.db
@@ -88,6 +90,7 @@ export class SnapshotService {
     const last = page[page.length - 1];
     return {
       watermark: asVersion(watermark),
+      head: asVersion(head),
       rows: page.map((r) => ({ entity: r.entity, id: r.id, siteId: r.site_id, data: r.data })),
       next: rows.length > query.limit && last ? { siteId: last.site_id, entity: last.entity, id: last.id } : null,
     };
