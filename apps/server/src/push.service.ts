@@ -71,6 +71,29 @@ export class PushService {
     return { results, lastMutationId: await this.lastMutationId(req.clientId) };
   }
 
+  /**
+   * Retires a client id of this user: from now on no new mutation is applied under it (copies of
+   * handled ones are still answered). Idempotent; an id nobody used yet is recorded as retired, so it
+   * can never be used. Takes the client's row lock like a push, so a push in progress finishes first.
+   * Returns the last mutation id the server handled under it, which no later request can change.
+   * An id another user owns is answered 404, as if it did not exist.
+   */
+  async retire(user: AuthUser, clientId: string): Promise<{ lastMutationId: number }> {
+    const { rows } = await this.db
+      .query<{ last_mutation_id: string }>(
+        `INSERT INTO clients (client_id, user_id, last_mutation_id, retired_at) VALUES ($1, $2, 0, $3)
+         ON CONFLICT (client_id) DO UPDATE SET retired_at = coalesce(clients.retired_at, EXCLUDED.retired_at)
+          WHERE clients.user_id = EXCLUDED.user_id
+         RETURNING last_mutation_id`,
+        [clientId, user.id, this.clock.now()],
+      )
+      .catch((err: unknown) => {
+        throw isTransient(err) ? retryLater() : err;
+      });
+    if (rows.length === 0) throw new ProblemException(HttpStatus.NOT_FOUND, 'NOT_FOUND', 'No such client');
+    return { lastMutationId: Number(rows[0].last_mutation_id) };
+  }
+
   async lastMutationId(clientId: string): Promise<number> {
     const { rows } = await this.db.query<{ last_mutation_id: string }>(
       `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
@@ -87,13 +110,20 @@ export class PushService {
    * Locks are always taken in this order: client row, entity rows by key, `log_head` last.
    */
   private async applyOne(c: TxSql, user: AuthUser, clientId: string, m: ReceivedMutation): Promise<Outcome> {
-    const { last, ownerId } = await this.lockClient(c, clientId, user.id);
+    const { last, ownerId, retired } = await this.lockClient(c, clientId, user.id);
     if (m.id <= last) {
       // Only the client's owner learns how its mutations ended (their rejections carry stored data).
       // That another user can push under this client id at all is a known defect (F-33).
       const result: MutationResult =
         ownerId === user.id ? await this.previousResult(c, clientId, m.id) : { id: m.id, status: 'duplicate' };
       return { result, touched: [] };
+    }
+    if (retired) {
+      // Its owner continues under another id: nothing new is applied under this one, so a late copy
+      // of an old request cannot apply a mutation the client has since sent again under the new id.
+      throw new ProblemException(HttpStatus.GONE, 'CLIENT_RETIRED', `Client ${clientId} was retired`, {
+        lastMutationId: last,
+      });
     }
     if (m.id !== last + 1) {
       // A gap: the mutations between were never received. The client cannot fill it (it would have
@@ -144,18 +174,25 @@ export class PushService {
     return { result, touched: [...new Set(entries.map((e) => e.siteId))] };
   }
 
-  /** Locks the client's row, creating it on its first push; returns its last applied id and its owner. */
-  private async lockClient(c: TxSql, clientId: string, userId: string): Promise<{ last: number; ownerId: string }> {
+  /**
+   * Locks the client's row, creating it on its first push; returns its last applied id, its owner and
+   * whether it was retired.
+   */
+  private async lockClient(
+    c: TxSql,
+    clientId: string,
+    userId: string,
+  ): Promise<{ last: number; ownerId: string; retired: boolean }> {
     await c.query(
       `INSERT INTO clients (client_id, user_id, last_mutation_id) VALUES ($1, $2, 0)
        ON CONFLICT (client_id) DO NOTHING`,
       [clientId, userId],
     );
-    const { rows } = await c.query<{ last_mutation_id: string; user_id: string }>(
-      `SELECT last_mutation_id, user_id FROM clients WHERE client_id = $1 FOR UPDATE`,
+    const { rows } = await c.query<{ last_mutation_id: string; user_id: string; retired: boolean }>(
+      `SELECT last_mutation_id, user_id, retired_at IS NOT NULL AS retired FROM clients WHERE client_id = $1 FOR UPDATE`,
       [clientId],
     );
-    return { last: Number(rows[0].last_mutation_id), ownerId: rows[0].user_id };
+    return { last: Number(rows[0].last_mutation_id), ownerId: rows[0].user_id, retired: rows[0].retired };
   }
 
   /**

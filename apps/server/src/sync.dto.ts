@@ -271,6 +271,20 @@ export class SnapshotPageDto {
   next!: SnapshotKeyDto | null;
 }
 
+export class ClientParamsDto {
+  @ApiProperty({ description: 'Id of the client installation.', format: 'uuid' })
+  @IsUUID()
+  clientId!: string;
+}
+
+export class RetiredClientDto {
+  @ApiProperty({
+    description:
+      'The last mutation id the server handled under the retired id; final, since nothing more is applied under it.',
+  })
+  lastMutationId!: number;
+}
+
 export class ProblemDto {
   @ApiProperty({ example: 'about:blank' })
   type!: string;

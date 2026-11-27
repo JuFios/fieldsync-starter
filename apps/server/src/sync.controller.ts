@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Header, Post, Query, Req, Sse, type MessageEvent } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, Param, Post, Query, Req, Sse, type MessageEvent } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiGoneResponse,
+  ApiNotFoundResponse,
   ApiHeader,
   ApiInternalServerErrorResponse,
   ApiOkResponse,
@@ -26,11 +27,13 @@ import { PushService } from './push.service';
 import { SnapshotService } from './snapshot.service';
 import { StreamService } from './stream.service';
 import {
+  ClientParamsDto,
   ProblemDto,
   PullQueryDto,
   PullResponseDto,
   PushRequestDto,
   PushResponseDto,
+  RetiredClientDto,
   SnapshotPageDto,
   SnapshotQueryDto,
 } from './sync.dto';
@@ -85,6 +88,10 @@ export class SyncController {
     description: 'A mutation id skips ahead of the last applied one (MUTATION_OUT_OF_ORDER, details.expected).',
     type: ProblemDto,
   })
+  @ApiGoneResponse({
+    description: 'The client id was retired (CLIENT_RETIRED, details.lastMutationId): continue under the new id.',
+    type: ProblemDto,
+  })
   @ApiPayloadTooLargeResponse({ description: 'The body exceeds JSON_BODY_LIMIT_BYTES.', type: ProblemDto })
   @ApiServiceUnavailableResponse({
     description: 'A transient database failure (TRANSIENT, Retry-After); the mutations before it were applied.',
@@ -92,6 +99,25 @@ export class SyncController {
   })
   push(@Req() req: AuthedRequest, @Body() body: PushRequestDto) {
     return this.pushService.push(req.user, body);
+  }
+
+  @Delete('sync/clients/:clientId')
+  @ApiOperation({
+    summary: 'Retire a client id of the user',
+    description:
+      'After a 409 MUTATION_OUT_OF_ORDER the client continues under a new id. Once retired, an id applies no new ' +
+      'mutation (410 CLIENT_RETIRED), so a late copy of an old request cannot apply what the client sends again ' +
+      'under the new id; copies of handled mutations still get their results. Idempotent.',
+  })
+  @ApiOkResponse({ type: RetiredClientDto })
+  @ApiNotFoundResponse({ description: 'The id belongs to another user.', type: ProblemDto })
+  @ApiServiceUnavailableResponse({
+    description: 'A transient database failure (TRANSIENT, Retry-After).',
+    type: ProblemDto,
+  })
+  @Header('Cache-Control', 'no-store')
+  retire(@Req() req: AuthedRequest, @Param() params: ClientParamsDto) {
+    return this.pushService.retire(req.user, params.clientId);
   }
 
   @Get('sync/pull')

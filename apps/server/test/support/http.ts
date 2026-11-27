@@ -14,12 +14,12 @@ export class Api {
   constructor(private readonly app: INestApplication) {}
 
   async request<T = unknown>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     opts: { token?: string; body?: unknown; protocol?: string | null } = {},
   ): Promise<ApiResponse<T>> {
     const server = request(this.app.getHttpServer() as Server);
-    let req = method === 'GET' ? server.get(path) : server.post(path);
+    let req = method === 'GET' ? server.get(path) : method === 'POST' ? server.post(path) : server.delete(path);
     if (opts.token !== undefined) req = req.set('authorization', `Bearer ${opts.token}`);
     // Every request speaks the current protocol unless a test says otherwise (null: no header).
     const protocol = opts.protocol === undefined ? String(PROTOCOL_VERSION) : opts.protocol;

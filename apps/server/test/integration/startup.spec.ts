@@ -90,6 +90,7 @@ describeWithDb('server startup', () => {
         expect(Object.keys(res.body.paths).sort()).toEqual([
           '/health',
           '/me',
+          '/sync/clients/{clientId}',
           '/sync/pull',
           '/sync/push',
           '/sync/snapshot',
@@ -125,7 +126,7 @@ describeWithDb('server startup', () => {
           Object.keys(
             (res.body.paths[path][method] as unknown as { responses: Record<string, unknown> }).responses,
           ).sort();
-        expect(responses('/sync/push', 'post')).toEqual(['201', '400', '401', '409', '413', '500', '503']);
+        expect(responses('/sync/push', 'post')).toEqual(['201', '400', '401', '409', '410', '413', '500', '503']);
         expect(responses('/sync/pull', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
         expect(responses('/sync/snapshot', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
         const snapshot = res.body.paths['/sync/snapshot'].get.parameters ?? [];
