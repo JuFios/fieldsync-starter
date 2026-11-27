@@ -17,6 +17,7 @@ const DATABASE = 'fieldsync';
 export function Providers({ children }: { children: ReactNode }) {
   const [client, setClient] = useState<SyncClient | null>(null);
   const [token, setToken] = useState<string | null>(null);
+  const [storageError, setStorageError] = useState(false);
 
   useEffect(() => {
     setToken(localStorage.getItem('fs_token'));
@@ -24,13 +25,36 @@ export function Providers({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!token) return;
+    // Everything this effect starts is stopped by its cleanup: on unmount, and before it runs again
+    // for another token. Opening is asynchronous, so a cleanup that comes first is remembered and the
+    // late result closed at once.
+    let stopped = false;
+    let opened: { client: SyncClient; storage: IdbSyncStorage } | undefined;
     // The original client's id and last mutation id move from localStorage into the database.
-    void IdbSyncStorage.open(DATABASE, { legacy: localStorageLegacy(localStorage) }).then((storage) => {
-      // The client keeps the notification stream open itself, with the token in a header.
-      const c = new SyncClient({ transport: new HttpTransport(API, token), storage });
-      setClient(c);
-      void c.sync();
-    });
+    IdbSyncStorage.open(DATABASE, { legacy: localStorageLegacy(localStorage) })
+      .then((storage) => {
+        if (stopped) {
+          storage.close();
+          return;
+        }
+        // The client keeps the notification stream open itself, with the token in a header.
+        const c = new SyncClient({ transport: new HttpTransport(API, token), storage });
+        opened = { client: c, storage };
+        setClient(c);
+        void c.sync();
+      })
+      // IndexedDB unavailable (some private modes) or refused: the app cannot keep any work.
+      .catch(() => {
+        if (!stopped) setStorageError(true);
+      });
+    return () => {
+      stopped = true;
+      setClient(null);
+      if (opened) {
+        opened.client.dispose();
+        opened.storage.close();
+      }
+    };
   }, [token]);
 
   if (!token) {
@@ -51,6 +75,10 @@ export function Providers({ children }: { children: ReactNode }) {
         <button type="submit">Sign in</button>
       </form>
     );
+  }
+
+  if (storageError) {
+    return <p role="alert">This browser does not let FieldSync keep data on this device, so it cannot work offline.</p>;
   }
 
   return <ClientContext.Provider value={client}>{children}</ClientContext.Provider>;
