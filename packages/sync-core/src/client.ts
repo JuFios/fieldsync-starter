@@ -16,10 +16,11 @@ import {
 } from './types';
 
 /**
- * `loading`: the client is reading a snapshot of the server's state (it has none yet, or its cursor
+ * `error`: the client's storage refused a write, so what it shows may not survive a reload; it keeps
+ * retrying. `loading`: the client is reading a snapshot of the server's state (it has none yet, or its cursor
  * fell behind the collected part of the change log); its view still shows the previous state.
  */
-export type SyncStatus = 'idle' | 'syncing' | 'loading' | 'offline';
+export type SyncStatus = 'idle' | 'syncing' | 'loading' | 'offline' | 'error';
 
 /** Changes and snapshot rows per request. */
 const PAGE_SIZE = 500;
@@ -29,6 +30,16 @@ const PAGE_SIZE = 500;
  * RESET_REQUIRED again only if it took longer than the server's change-log retention.
  */
 const MAX_SNAPSHOT_ATTEMPTS = 3;
+
+/** The client's storage refused a write (full, or unavailable); `cause` is the storage's error. */
+export class StorageFailure extends Error {
+  constructor(cause: unknown) {
+    super(`The client's storage refused a write: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
+    this.name = 'StorageFailure';
+  }
+}
 
 /** A request that got no answer within the client's request timeout. */
 export class RequestTimeout extends Error {
@@ -49,6 +60,15 @@ export class ClientDisposed extends Error {
   }
 }
 
+/** What the client reports for a failed sync. */
+function syncErrorOf(err: unknown): SyncError {
+  if (err instanceof TransportError) {
+    return { status: err.status, code: err.code, ...(err.details ? { details: err.details } : {}) };
+  }
+  if (err instanceof StorageFailure) return { status: 0, code: 'STORAGE' };
+  return { status: 0, code: err instanceof RequestTimeout ? 'TIMEOUT' : 'NETWORK' };
+}
+
 function isResetRequired(err: unknown): boolean {
   return err instanceof TransportError && err.code === RESET_REQUIRED;
 }
@@ -63,7 +83,8 @@ function applyChanges(state: Map<string, Row>, changes: PullResponse['changes'])
 
 /**
  * Why the last sync failed: the server's problem code, NETWORK when the request failed without an
- * answer, TIMEOUT when no answer came within the request timeout.
+ * answer, TIMEOUT when no answer came within the request timeout, STORAGE when the client's storage
+ * refused to keep what the server said.
  */
 export interface SyncError {
   /** 0 when no answer arrived. */
@@ -394,11 +415,9 @@ export class SyncClient {
     } catch (err) {
       // A disposed client has nobody to report to and nothing to retry.
       if (this.disposed) return;
-      this.lastError =
-        err instanceof TransportError
-          ? { status: err.status, code: err.code, ...(err.details ? { details: err.details } : {}) }
-          : { status: 0, code: err instanceof RequestTimeout ? 'TIMEOUT' : 'NETWORK' };
-      this.setStatus('offline');
+      this.lastError = syncErrorOf(err);
+      // What the server said was not stored: the client is not in sync, whatever the network does.
+      this.setStatus(err instanceof StorageFailure ? 'error' : 'offline');
       this.scheduleRetry();
     }
   }
@@ -548,14 +567,19 @@ export class SyncClient {
     this.emit();
   }
 
-  private persist(): Promise<void> {
+  /** Stores the state; a write the storage refuses rejects with {@link StorageFailure} (F-38). */
+  private async persist(): Promise<void> {
     // Checked here as well: a disposed client must not overwrite what its successor stores.
-    if (this.disposed) return Promise.reject(new ClientDisposed());
-    return this.storage.save({
-      cursor: this.cursor,
-      lastMutationId: this.lastMutationId,
-      base: Object.fromEntries(this.base),
-    });
+    if (this.disposed) throw new ClientDisposed();
+    try {
+      await this.storage.save({
+        cursor: this.cursor,
+        lastMutationId: this.lastMutationId,
+        base: Object.fromEntries(this.base),
+      });
+    } catch (err) {
+      throw new StorageFailure(err);
+    }
   }
 
   private setStatus(status: SyncStatus): void {

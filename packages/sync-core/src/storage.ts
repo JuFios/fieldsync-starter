@@ -40,12 +40,13 @@ export class LocalStorageSyncStorage implements SyncStorage {
     }
   }
 
+  /** Rejects when the browser refuses the write (full or unavailable storage), so the client can say so. */
   save(state: Persisted): Promise<void> {
     try {
       globalThis.localStorage.setItem(this.key, JSON.stringify(state));
-    } catch {
-      // Storage may be full or unavailable; the client keeps working in memory.
+      return Promise.resolve();
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
     }
-    return Promise.resolve();
   }
 }
