@@ -173,6 +173,11 @@ export class SyncClient {
   private changeCount = 0;
   private retryTimer?: TimerHandle;
   private inFlight: Promise<void> | undefined;
+  /**
+   * A sync was asked for while one was running: run another once it ends. The running one may have
+   * read its pull page before the change that prompted the request committed (F-39).
+   */
+  private again = false;
   private disposed = false;
   /** Resolves once the stored state is loaded; every operation waits for it. */
   readonly ready: Promise<void>;
@@ -250,7 +255,7 @@ export class SyncClient {
     this.nextMutationId += 1;
     this.pending.push({ mutation, queuedAt: new Date(this.clock.now()).toISOString(), bytes });
     this.emit();
-    void this.sync();
+    void this.start();
   }
 
   /** Server state with all unacknowledged local mutations applied on top. */
@@ -265,12 +270,29 @@ export class SyncClient {
     return [...this.view()].filter(([key]) => key.startsWith(prefix)).map(([, row]) => row);
   }
 
+  /**
+   * Pushes the queue and pulls the server's changes. Asked for while a sync is running (a
+   * notification, a retry), it runs once more after the running one, unless that one failed (then
+   * the retry timer runs the next), and resolves when that one ends.
+   */
   sync(): Promise<void> {
+    const running = this.inFlight;
+    if (!running) return this.start();
+    this.again = true;
+    // The running sync's end starts the next one before this continuation runs.
+    return running.then(() => this.inFlight);
+  }
+
+  /** Starts a sync unless one is running; the running one sends whatever is queued by then. */
+  private start(): Promise<void> {
     if (this.disposed) return Promise.resolve();
     if (!this.inFlight) {
       this.inFlight = this.runSync().finally(() => {
         this.inFlight = undefined;
-        if (this.unsent().length > 0 && this.currentStatus !== 'offline') void this.sync();
+        const again = this.again;
+        this.again = false;
+        // After a failed sync the retry timer runs the next one, with its delay.
+        if ((again || this.unsent().length > 0) && this.currentStatus !== 'offline') void this.start();
       });
     }
     return this.inFlight;
