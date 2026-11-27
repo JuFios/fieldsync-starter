@@ -288,7 +288,7 @@ small enough to read.
    real Postgres in the same process, with the network, time and the order of events under the
    control of the test: each run is a sequence of steps generated from a seed.
 
-**Decision: option 3** (decision D-11 of the plan), built on the documented tools of
+**Decision: option 3**, built on the documented tools of
 [fast-check](https://fast-check.dev/docs/advanced/model-based-testing/) rather than an engine of
 our own. Everything except the network and the clock is the code that ships, and every source of
 nondeterminism is controlled:
@@ -453,11 +453,12 @@ acting on it (keeping one of the two values, retrying a status change) is part o
 
 ## Found issues
 
-Each issue has an id, the category from the task (1 delivery order and completeness, 2 retried and
-parallel pushes, 3 rejection in the middle of the queue, 4 authenticity and access, 5 change-log
-lifecycle, 6 resources not released, 7 determinism across environments, 8 client data loss,
-9 merging concurrent edits, 10 tests that pass regardless of the behaviour they name; "other" for
-everything else), a test that reproduces it, and the commits that reproduce and fix it.
+Each issue has an id (in the order the issues were found), the category from the task (1 delivery
+order and completeness, 2 retried and parallel pushes, 3 rejection in the middle of the queue, 4
+authenticity and access, 5 change-log lifecycle, 6 resources not released, 7 determinism across
+environments, 8 client data loss, 9 merging concurrent edits, 10 tests that pass regardless of the
+behaviour they name; "other" for everything else), a test that reproduces it, and the commits that
+reproduce and fix it.
 
 | Id | Category | Issue | Status |
 |---|---|---|---|
@@ -492,7 +493,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 | F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
 | F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
 | F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
-| F-32 | 2 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
+| F-32 | 8 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
 | F-33 | 4 | A client id is not bound to its user: another user can push under it and take the owner's next mutation id | Open (known defect) |
 
 ### F-01: pull access test mocked every query (category 10)
@@ -1039,7 +1040,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
   UI only: the data stays and keeps diverging from what the user expects.
 - **Commits.** `6bde1c5` (test), `5042988` (fix).
 
-### F-32: after a reload, a new mutation reuses an id the server already handled (category 2)
+### F-32: after a reload, a new mutation reuses an id the server already handled (category 8)
 
 - **What.** The client stored its last applied mutation id only after a completed pull. When a push
   was applied but the pull after it failed (the network went down) and the page was reloaded, the
@@ -1057,8 +1058,7 @@ everything else), a test that reproduces it, and the commits that reproduce and 
 
 ### F-33: a client id is not bound to its user (category 4)
 
-Found after the access-control area was assigned (decision Д-15): the fix belongs to the
-access-control change; this change adds the known-defect test.
+The fix belongs to the access-control change; this change adds the known-defect test.
 
 - **What.** The server takes any client id with any token. The `clients` row records the user who
   pushed first, but nothing checks it. Another user who knows a client id can push mutations under
