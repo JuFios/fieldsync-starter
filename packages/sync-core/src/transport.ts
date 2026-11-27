@@ -51,11 +51,16 @@ async function errorOf(what: string, res: Response): Promise<TransportError> {
 /** The problem code of a pull or snapshot whose cursor is below the floor of the change log (410). */
 export const RESET_REQUIRED = 'RESET_REQUIRED';
 
+/** Options of one request; `signal` aborts it (the client aborts its requests when it is disposed). */
+export interface RequestOptions {
+  signal?: AbortSignal;
+}
+
 export interface Transport {
-  push(req: PushRequest): Promise<PushResponse>;
-  pull(cursor: number, clientId: string, limit?: number): Promise<PullResponse>;
+  push(req: PushRequest, init?: RequestOptions): Promise<PushResponse>;
+  pull(cursor: number, clientId: string, limit?: number, init?: RequestOptions): Promise<PullResponse>;
   /** One page of a snapshot of the live state (see {@link SnapshotPage}). */
-  snapshot(req: SnapshotRequest): Promise<SnapshotPage>;
+  snapshot(req: SnapshotRequest, init?: RequestOptions): Promise<SnapshotPage>;
 }
 
 const ENTITIES: readonly EntityName[] = ['ticket', 'part'];
@@ -90,6 +95,11 @@ export function isSnapshotPage(body: unknown): body is SnapshotPage {
   return rowsOk && nextOk;
 }
 
+/** The `signal` member of a fetch init, present only when there is a signal. */
+function signalOf(init: RequestOptions): { signal?: AbortSignal } {
+  return init.signal === undefined ? {} : { signal: init.signal };
+}
+
 export class HttpTransport implements Transport {
   constructor(
     private readonly baseUrl: string,
@@ -102,8 +112,9 @@ export class HttpTransport implements Transport {
     return { authorization: `Bearer ${this.token}`, [PROTOCOL_HEADER]: String(PROTOCOL_VERSION) };
   }
 
-  async push(req: PushRequest): Promise<PushResponse> {
+  async push(req: PushRequest, init: RequestOptions = {}): Promise<PushResponse> {
     const res = await this.fetchImpl(`${this.baseUrl}/sync/push`, {
+      ...signalOf(init),
       method: 'POST',
       headers: { ...this.headers(), 'content-type': 'application/json' },
       body: JSON.stringify(req),
@@ -112,16 +123,17 @@ export class HttpTransport implements Transport {
     return (await res.json()) as PushResponse;
   }
 
-  async pull(cursor: number, clientId: string, limit = 500): Promise<PullResponse> {
+  async pull(cursor: number, clientId: string, limit = 500, init: RequestOptions = {}): Promise<PullResponse> {
     const qs = new URLSearchParams({ cursor: String(cursor), clientId, limit: String(limit) });
     const res = await this.fetchImpl(`${this.baseUrl}/sync/pull?${qs.toString()}`, {
+      ...signalOf(init),
       headers: this.headers(),
     });
     if (!res.ok) throw await errorOf('pull', res);
     return (await res.json()) as PullResponse;
   }
 
-  async snapshot(req: SnapshotRequest): Promise<SnapshotPage> {
+  async snapshot(req: SnapshotRequest, init: RequestOptions = {}): Promise<SnapshotPage> {
     const qs = new URLSearchParams();
     if (req.watermark !== undefined) qs.set('watermark', String(req.watermark));
     if (req.after !== undefined) {
@@ -131,6 +143,7 @@ export class HttpTransport implements Transport {
     }
     if (req.limit !== undefined) qs.set('limit', String(req.limit));
     const res = await this.fetchImpl(`${this.baseUrl}/sync/snapshot?${qs.toString()}`, {
+      ...signalOf(init),
       headers: this.headers(),
     });
     if (!res.ok) throw await errorOf('snapshot', res);

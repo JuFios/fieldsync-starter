@@ -1,7 +1,7 @@
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
-import { RESET_REQUIRED, TransportError, type Transport } from './transport';
+import { RESET_REQUIRED, TransportError, type RequestOptions, type Transport } from './transport';
 import {
   asVersion,
   MAX_PUSH_BODY_BYTES,
@@ -29,6 +29,14 @@ const PAGE_SIZE = 500;
  * RESET_REQUIRED again only if it took longer than the server's change-log retention.
  */
 const MAX_SNAPSHOT_ATTEMPTS = 3;
+
+/** What a step of a disposed client rejects with: it stops without storing or reporting anything. */
+export class ClientDisposed extends Error {
+  constructor() {
+    super('The sync client was disposed');
+    this.name = 'ClientDisposed';
+  }
+}
 
 function isResetRequired(err: unknown): boolean {
   return err instanceof TransportError && err.code === RESET_REQUIRED;
@@ -179,6 +187,8 @@ export class SyncClient {
    */
   private again = false;
   private disposed = false;
+  /** Aborts every request of the client when it is disposed. */
+  private readonly life = new AbortController();
   /** Resolves once the stored state is loaded; every operation waits for it. */
   readonly ready: Promise<void>;
 
@@ -298,14 +308,41 @@ export class SyncClient {
     return this.inFlight;
   }
 
+  /**
+   * Stops all work of the client (its page closes, or another user signs in): aborts every request
+   * in flight, cancels the retry, and from now on writes nothing to its storage, whatever answer still
+   * arrives.
+   */
   dispose(): void {
     this.disposed = true;
+    this.life.abort();
     if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
     this.listeners.clear();
   }
 
+  /**
+   * Runs one request with a signal that aborts when the client is disposed. Resolves only while the
+   * client is alive: a request that ends after `dispose()` rejects with {@link ClientDisposed}, even if
+   * the transport ignored the signal, so no later step stores its answer.
+   */
+  private async request<T>(send: (init: RequestOptions) => Promise<T>): Promise<T> {
+    const { signal } = this.life;
+    if (signal.aborted) throw new ClientDisposed();
+    let onAbort: () => void = () => undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new ClientDisposed());
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([send({ signal }), aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
   private async runSync(): Promise<void> {
     await this.ready;
+    if (this.disposed) return;
     this.setStatus('syncing');
     try {
       await this.push();
@@ -320,6 +357,8 @@ export class SyncClient {
       this.lastError = undefined;
       this.setStatus('idle');
     } catch (err) {
+      // A disposed client has nobody to report to and nothing to retry.
+      if (this.disposed) return;
       this.lastError =
         err instanceof TransportError
           ? { status: err.status, code: err.code, ...(err.details ? { details: err.details } : {}) }
@@ -361,7 +400,7 @@ export class SyncClient {
   private async push(): Promise<void> {
     if (this.unsent().length === 0) return;
     const batch = this.nextBatch();
-    const resp = await this.transport.push({ clientId: this.clientId, mutations: batch });
+    const resp = await this.request((init) => this.transport.push({ clientId: this.clientId, mutations: batch }, init));
     const done = new Set<number>();
     for (const r of resp.results) {
       const queued = this.pending.find((q) => q.mutation.id === r.id);
@@ -399,7 +438,7 @@ export class SyncClient {
 
   private async pull(): Promise<void> {
     for (;;) {
-      const resp = await this.transport.pull(this.cursor, this.clientId, PAGE_SIZE);
+      const resp = await this.request((init) => this.transport.pull(this.cursor, this.clientId, PAGE_SIZE, init));
       applyChanges(this.base, resp.changes);
       this.cursor = resp.nextCursor;
       this.settle(resp);
@@ -450,17 +489,19 @@ export class SyncClient {
    */
   private async loadSnapshot(): Promise<void> {
     const staged = new Map<string, Row>();
-    let page = await this.transport.snapshot({ limit: PAGE_SIZE });
+    let page = await this.request((init) => this.transport.snapshot({ limit: PAGE_SIZE }, init));
     const { watermark } = page;
     for (;;) {
       for (const row of page.rows) staged.set(`${row.entity}/${row.id}`, row.data);
       if (page.next === null) break;
-      page = await this.transport.snapshot({ watermark, after: page.next, limit: PAGE_SIZE });
+      const after = page.next;
+      page = await this.request((init) => this.transport.snapshot({ watermark, after, limit: PAGE_SIZE }, init));
     }
     let cursor = watermark;
     let last: PullResponse;
     do {
-      last = await this.transport.pull(cursor, this.clientId, PAGE_SIZE);
+      const from = cursor;
+      last = await this.request((init) => this.transport.pull(from, this.clientId, PAGE_SIZE, init));
       applyChanges(staged, last.changes);
       cursor = last.nextCursor;
     } while (last.hasMore);
@@ -473,6 +514,8 @@ export class SyncClient {
   }
 
   private persist(): Promise<void> {
+    // Checked here as well: a disposed client must not overwrite what its successor stores.
+    if (this.disposed) return Promise.reject(new ClientDisposed());
     return this.storage.save({
       cursor: this.cursor,
       lastMutationId: this.lastMutationId,
