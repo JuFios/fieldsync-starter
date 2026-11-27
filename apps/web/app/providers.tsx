@@ -55,6 +55,7 @@ export function Providers({ children }: { children: ReactNode }) {
     // late result closed at once.
     let stopped = false;
     let opened: { client: SyncClient; storage: IdbSyncStorage } | undefined;
+    const onOnline = () => void opened?.client.sync();
     const onClosed = (reason: StorageClosedReason) => {
       if (stopped) return;
       if (reason === 'deleted') {
@@ -80,6 +81,8 @@ export function Providers({ children }: { children: ReactNode }) {
         opened = { client: c, storage };
         setClient(c);
         void c.sync();
+        // Back online: sync now instead of waiting for the backoff delay.
+        window.addEventListener('online', onOnline);
       } catch {
         // IndexedDB unavailable (some private modes) or refused: the app cannot keep any work.
         if (!stopped) setProblem('storage');
@@ -87,6 +90,7 @@ export function Providers({ children }: { children: ReactNode }) {
     })();
     return () => {
       stopped = true;
+      window.removeEventListener('online', onOnline);
       setClient(null);
       if (opened) {
         opened.client.dispose();
