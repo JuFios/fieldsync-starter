@@ -46,7 +46,7 @@ describe('mutation ids across a reload', () => {
     const storage = new MemoryStorage();
     const before = new SyncClient({ clientId: 'c1', transport: server, storage });
     try {
-      before.mutate('ticket.create', { id: TICKETS[0], siteId: SITE, title: 'First', description: '' });
+      await before.mutate('ticket.create', { id: TICKETS[0], siteId: SITE, title: 'First', description: '' });
       await before.sync();
     } finally {
       before.dispose();
@@ -54,7 +54,7 @@ describe('mutation ids across a reload', () => {
 
     const after = new SyncClient({ clientId: 'c1', transport: server, storage });
     try {
-      after.mutate('ticket.create', { id: TICKETS[1], siteId: SITE, title: 'Second', description: '' });
+      await after.mutate('ticket.create', { id: TICKETS[1], siteId: SITE, title: 'Second', description: '' });
       await after.sync();
       expect(server.pushed).toEqual([[1], [2]]);
     } finally {

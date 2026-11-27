@@ -199,6 +199,15 @@ function guard<T>(run: () => T): T {
   }
 }
 
+/** Runs asynchronous client code; anything it throws or rejects with becomes a {@link ClientError}. */
+async function guardAsync<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    throw new ClientError(err);
+  }
+}
+
 /**
  * The violations a client's divergence from the server's rows shows: `foreign-site-rows` for rows of
  * sites its user cannot access, and separately `divergence` for anything else (rows of its own sites
@@ -304,7 +313,7 @@ export class SimSystem {
           return simUuid(4, this.ids);
         });
         this.trace.push(`${label} act ${sim.name} ${action.name} ${canonicalJson(action.args)}`);
-        guard(() => sim.client.mutate(action.name, action.args));
+        await guardAsync(() => sim.client.mutate(action.name, action.args));
         this.queued.set(sim.name, (this.queued.get(sim.name) ?? 0) + 1);
         this.stats.add(`action:${step.intent}`);
         const target = targetOf(action);

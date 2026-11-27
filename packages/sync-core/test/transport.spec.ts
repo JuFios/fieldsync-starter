@@ -64,7 +64,7 @@ describe('SyncClient.syncError', () => {
     };
     const client = new SyncClient({ clientId: 'c', transport, storage: new MemoryStorage() });
     try {
-      client.mutate('ticket.delete', {
+      await client.mutate('ticket.delete', {
         id: '00000000-0000-4000-8000-000000000001',
         siteId: '33333333-3333-4333-8333-333333333333',
       });

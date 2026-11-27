@@ -174,13 +174,19 @@ export class SyncClient {
   private retryTimer?: TimerHandle;
   private inFlight: Promise<void> | undefined;
   private disposed = false;
+  /** Resolves once the stored state is loaded; every operation waits for it. */
+  readonly ready: Promise<void>;
 
   constructor(opts: SyncClientOptions) {
     this.clientId = opts.clientId;
     this.transport = opts.transport;
     this.storage = opts.storage;
     this.clock = opts.clock ?? systemClock;
-    const saved = this.storage.load();
+    this.ready = this.load();
+  }
+
+  private async load(): Promise<void> {
+    const saved = await this.storage.load();
     if (saved) {
       this.lastMutationId = saved.lastMutationId;
       this.nextMutationId = saved.lastMutationId + 1;
@@ -192,6 +198,7 @@ export class SyncClient {
         this.hasState = true;
       }
     }
+    this.emit();
   }
 
   get status(): SyncStatus {
@@ -226,10 +233,11 @@ export class SyncClient {
   }
 
   /**
-   * Queues a mutation and applies it optimistically. Throws a TypeError, without queueing anything,
-   * when `args` cannot be sent as JSON (a BigInt, a cycle); see {@link wireArgs}.
+   * Queues a mutation and applies it optimistically. Rejects with a TypeError, without queueing
+   * anything, when `args` cannot be sent as JSON (a BigInt, a cycle); see {@link wireArgs}.
    */
-  mutate(name: MutatorName, args: Record<string, unknown>): void {
+  async mutate(name: MutatorName, args: Record<string, unknown>): Promise<void> {
+    await this.ready;
     const mutation: Mutation = {
       id: this.nextMutationId,
       name,
@@ -275,6 +283,7 @@ export class SyncClient {
   }
 
   private async runSync(): Promise<void> {
+    await this.ready;
     this.setStatus('syncing');
     try {
       await this.push();
@@ -356,7 +365,7 @@ export class SyncClient {
     this.acknowledge(resp.lastMutationId);
     // Stored at once, not only after the next pull: after a reload, ids continue after the last one
     // the server handled, so a new mutation is never answered as a duplicate of an old one.
-    this.persist();
+    await this.persist();
     this.emit();
   }
 
@@ -372,7 +381,7 @@ export class SyncClient {
       applyChanges(this.base, resp.changes);
       this.cursor = resp.nextCursor;
       this.settle(resp);
-      this.persist();
+      await this.persist();
       this.emit();
       if (!resp.hasMore) break;
     }
@@ -437,12 +446,12 @@ export class SyncClient {
     this.cursor = cursor;
     this.hasState = true;
     this.settle(last);
-    this.persist();
+    await this.persist();
     this.emit();
   }
 
-  private persist(): void {
-    this.storage.save({
+  private persist(): Promise<void> {
+    return this.storage.save({
       cursor: this.cursor,
       lastMutationId: this.lastMutationId,
       base: Object.fromEntries(this.base),

@@ -60,7 +60,7 @@ describe('push batches', () => {
     try {
       // A control character takes six bytes in JSON ("\u0001"), so each mutation is about 30 KB.
       for (let n = 1; n <= 100; n += 1) {
-        client.mutate('ticket.create', {
+        await client.mutate('ticket.create', {
           id: ticketId(n),
           siteId: SITE,
           title: 'T',
@@ -79,12 +79,12 @@ describe('push batches', () => {
 });
 
 describe('mutate', () => {
-  it('refuses a mutation that cannot fit in one push, queueing nothing', () => {
+  it('refuses a mutation that cannot fit in one push, queueing nothing', async () => {
     const transport = new RecordingTransport();
     const client = new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
     try {
       const args = { id: ticketId(1), siteId: SITE, title: 'T', description: '', notes: 'x'.repeat(1_048_576) };
-      expect(() => client.mutate('ticket.create', args)).toThrow(TypeError);
+      await expect(client.mutate('ticket.create', args)).rejects.toThrow(TypeError);
       expect(client.pendingCount).toBe(0);
     } finally {
       client.dispose();

@@ -45,7 +45,8 @@ class ScriptedTransport {
 /** A client that synced before: it has a stored state, so it reads the log and never a snapshot. */
 function client(transport: ScriptedTransport): SyncClient {
   const storage = new MemoryStorage();
-  storage.save({ cursor: 0, lastMutationId: 0, base: {} });
+  // MemoryStorage stores synchronously; the client created next loads this state.
+  void storage.save({ cursor: 0, lastMutationId: 0, base: {} });
   return new SyncClient({ clientId: 'c1', transport, storage });
 }
 
@@ -59,7 +60,7 @@ describe('acknowledged mutations', () => {
     const transport = new ScriptedTransport();
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect(c.rows('ticket').map((t) => t.title)).toEqual(['Mine']);
     } finally {
@@ -82,7 +83,7 @@ describe('acknowledged mutations', () => {
     ];
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect(c.rows('ticket').map((t) => t.title)).toEqual(['Mine']);
     } finally {
@@ -104,7 +105,7 @@ describe('acknowledged mutations', () => {
     ];
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
         pending: 0,
@@ -125,7 +126,7 @@ describe('acknowledged mutations', () => {
       });
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
         pending: 1,

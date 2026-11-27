@@ -45,7 +45,7 @@ export default function TicketPage() {
     const typed = { title, description };
     const args = ticketEdit({ id, siteId }, seen, typed);
     if (!args) return;
-    client.mutate('ticket.update', args);
+    void client.mutate('ticket.update', args);
     setSeen(typed);
   }
 
@@ -66,7 +66,7 @@ export default function TicketPage() {
       <section>
         <h3>Status: {status}</h3>
         {ALLOWED_TRANSITIONS[status].map((to) => (
-          <button key={to} onClick={() => client.mutate('ticket.setStatus', { id, siteId, from: status, to })}>
+          <button key={to} onClick={() => void client.mutate('ticket.setStatus', { id, siteId, from: status, to })}>
             {to}
           </button>
         ))}
@@ -78,8 +78,8 @@ export default function TicketPage() {
           {parts.map((p) => (
             <li key={String(p.id)}>
               {String(p.name)} × {String(p.quantity)}{' '}
-              <button onClick={() => client.mutate('part.adjust', { id: p.id, siteId, delta: 1 })}>+</button>
-              <button onClick={() => client.mutate('part.adjust', { id: p.id, siteId, delta: -1 })}>−</button>
+              <button onClick={() => void client.mutate('part.adjust', { id: p.id, siteId, delta: 1 })}>+</button>
+              <button onClick={() => void client.mutate('part.adjust', { id: p.id, siteId, delta: -1 })}>−</button>
             </li>
           ))}
         </ul>
@@ -87,7 +87,7 @@ export default function TicketPage() {
         <button
           onClick={() => {
             if (!partName.trim()) return;
-            client.mutate('part.add', {
+            void client.mutate('part.add', {
               id: crypto.randomUUID(),
               ticketId: id,
               siteId,

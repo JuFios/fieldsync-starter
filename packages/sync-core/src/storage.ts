@@ -6,40 +6,46 @@ export interface Persisted {
   base: Record<string, Row>;
 }
 
+/**
+ * Where a client keeps its state between page loads. Asynchronous, as browser storage that can hold
+ * a client's data (IndexedDB) is.
+ */
 export interface SyncStorage {
-  load(): Persisted | null;
-  save(state: Persisted): void;
+  load(): Promise<Persisted | null>;
+  save(state: Persisted): Promise<void>;
 }
 
 export class MemoryStorage implements SyncStorage {
   private state: Persisted | null = null;
 
-  load(): Persisted | null {
-    return this.state ? structuredClone(this.state) : null;
+  load(): Promise<Persisted | null> {
+    return Promise.resolve(this.state ? structuredClone(this.state) : null);
   }
 
-  save(state: Persisted): void {
+  save(state: Persisted): Promise<void> {
     this.state = structuredClone(state);
+    return Promise.resolve();
   }
 }
 
 export class LocalStorageSyncStorage implements SyncStorage {
   constructor(private readonly key: string) {}
 
-  load(): Persisted | null {
+  load(): Promise<Persisted | null> {
     try {
       const raw = globalThis.localStorage.getItem(this.key);
-      return raw ? (JSON.parse(raw) as Persisted) : null;
+      return Promise.resolve(raw ? (JSON.parse(raw) as Persisted) : null);
     } catch {
-      return null;
+      return Promise.resolve(null);
     }
   }
 
-  save(state: Persisted): void {
+  save(state: Persisted): Promise<void> {
     try {
       globalThis.localStorage.setItem(this.key, JSON.stringify(state));
     } catch {
       // Storage may be full or unavailable; the client keeps working in memory.
     }
+    return Promise.resolve();
   }
 }

@@ -56,7 +56,7 @@ describeWithDb('change-log compaction', () => {
     ]);
     precondition((await collectAt(RETENTION_MS + DAY_MS)) > 0, 'the GC removed nothing');
     const mine = randomUUID();
-    offline.mutate('ticket.create', { id: mine, siteId: site, title: 'queued offline', description: '' });
+    await offline.mutate('ticket.create', { id: mine, siteId: site, title: 'queued offline', description: '' });
 
     await offline.sync();
 
