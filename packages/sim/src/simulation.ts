@@ -29,14 +29,19 @@ export type Step =
   | { kind: 'respond'; pick: number; fault: ResponseFault }
   | { kind: 'redeliver'; pick: number }
   | { kind: 'tick'; ms: number }
-  | { kind: 'link'; client: number; state: LinkState };
+  | { kind: 'link'; client: number; state: LinkState }
+  /** The server runs its change-log GC at the current virtual time. */
+  | { kind: 'compact' }
+  /** A client loses its link and is away for the profile's `awayMs` (longer than the retention). */
+  | { kind: 'away'; client: number };
 
 export type Violation =
   | { signature: 'divergence' | 'foreign-site-rows'; client: string; detail: Divergence }
   | { signature: 'rejected-mutation-500' | 'stuck-request' | 'livelock'; clients: string[]; detail: string }
   | { signature: 'client-error'; detail: string }
   | { signature: 'unexpected-rejection'; clients: string[]; detail: string }
-  | { signature: 'lost-edit'; detail: string[] };
+  | { signature: 'lost-edit'; detail: string[] }
+  | { signature: 'lost-mutation'; clients: string[]; detail: string };
 
 export interface RunResult {
   profile: string;
@@ -78,6 +83,10 @@ export function describeStep(step: Step): string {
       return `tick ${step.ms}ms`;
     case 'link':
       return `link c${step.client} ${step.state}`;
+    case 'compact':
+      return 'compact';
+    case 'away':
+      return `away c${step.client}`;
   }
 }
 
@@ -243,6 +252,8 @@ export class SimSystem {
   /** Every rejection with a code the profile does not expect. */
   private readonly unexpectedRejections: Array<{ client: string; code: string }> = [];
   private readonly lastWriter = new Map<string, string>();
+  /** Mutations each client queued (its `mutate` calls that returned): the server must handle every one. */
+  private readonly queued = new Map<string, number>();
   private ids = 0;
   private steps = 0;
 
@@ -294,6 +305,7 @@ export class SimSystem {
         });
         this.trace.push(`${label} act ${sim.name} ${action.name} ${canonicalJson(action.args)}`);
         guard(() => sim.client.mutate(action.name, action.args));
+        this.queued.set(sim.name, (this.queued.get(sim.name) ?? 0) + 1);
         this.stats.add(`action:${step.intent}`);
         const target = targetOf(action);
         if (target) {
@@ -342,6 +354,23 @@ export class SimSystem {
         const sim = this.client(step.client);
         this.trace.push(`${label} link ${sim.name} ${step.state}`);
         this.network.setLink(sim.name, step.state);
+        break;
+      }
+      case 'compact': {
+        const removed = await this.server.compact();
+        this.trace.push(`${label} compact removed=${removed}`);
+        this.stats.add('compactions');
+        this.stats.add('compactedEntries', removed);
+        break;
+      }
+      case 'away': {
+        // The client is cut off, then time passes without anything happening: its retry timers keep
+        // their places relative to the new time. It comes back with a later link step or the heal.
+        const sim = this.client(step.client);
+        this.trace.push(`${label} away ${sim.name} ${this.profile.awayMs}ms`);
+        this.network.setLink(sim.name, 'down');
+        await this.clock.jump(this.profile.awayMs, () => this.settle());
+        this.stats.add('away');
         break;
       }
     }
@@ -449,6 +478,21 @@ export class SimSystem {
         signature: 'unexpected-rejection',
         clients: [...new Set(this.unexpectedRejections.map((r) => r.client))],
         detail: this.unexpectedRejections.map((r) => `${r.client}: ${r.code}`).join(', '),
+      });
+    }
+    const handled = await this.server.handledMutations();
+    const lostMutations = checked.flatMap((sim) => {
+      const queued = this.queued.get(sim.name) ?? 0;
+      const last = handled.get(sim.client.clientId) ?? 0;
+      return queued === last && sim.client.pendingCount === 0
+        ? []
+        : [`${sim.name}: queued ${queued}, server handled up to ${last}`];
+    });
+    if (lostMutations.length > 0) {
+      violations.push({
+        signature: 'lost-mutation',
+        clients: lostMutations.map((d) => d.split(':')[0] as string),
+        detail: lostMutations.join('; '),
       });
     }
     const rows = await this.server.liveRows();
@@ -585,6 +629,8 @@ export class SimSystem {
     switch (event.kind) {
       case 'sent':
         this.stats.add('exchanges');
+        // A snapshot starts with a page without a watermark: a new client, or one that was reset.
+        if (event.path.startsWith('/sync/snapshot') && !event.path.includes('watermark=')) this.stats.add('snapshots');
         this.pushPaths.set(event.exchange, event.path.startsWith('/sync/push'));
         if (event.path.startsWith('/sync/push')) {
           const sent = sentPush(event.body);
@@ -595,6 +641,7 @@ export class SimSystem {
       case 'redelivered': {
         if (event.kind === 'delivered') this.stats.add(`requestFault:${event.fault}`);
         else this.stats.add('redelivered');
+        this.stats.add('resets', event.responses.filter((r) => r.status === 410).length);
         const errors = event.responses.flatMap((r) => r.errors);
         // A rejection either fails the request (a recorded MutationRejected) or is reported per mutation.
         this.stats.add('serverRejections', errors.filter((e) => e.startsWith('MutationRejected')).length);

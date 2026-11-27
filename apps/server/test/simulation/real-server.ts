@@ -2,7 +2,15 @@ import { Catch, HttpException, type ArgumentsHost, type INestApplication } from 
 import { HttpAdapterHost } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
-import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow } from '@fieldsync/sim';
+import {
+  SIM_RETENTION_MS,
+  type Fixtures,
+  type ServerError,
+  type SimRequest,
+  type SimResponse,
+  type SimServer,
+  type StoredRow,
+} from '@fieldsync/sim';
 import type { EntityName, Row } from '@fieldsync/sync-core';
 import { Agent, type Server } from 'node:http';
 import { Pool } from 'pg';
@@ -11,6 +19,7 @@ import { configureApp } from '../../src/app.factory';
 import { ProblemFilter } from '../../src/problem';
 import { AppModule } from '../../src/app.module';
 import { Clock } from '../../src/clock';
+import { GcService } from '../../src/gc.service';
 
 /** The application's own tables, in an order TRUNCATE accepts (it truncates them all at once anyway). */
 const TABLES = ['mutation_results', 'clients', 'change_log', 'entities', 'user_sites', 'users', 'sites'];
@@ -57,7 +66,7 @@ class RecordingExceptionFilter extends ProblemFilter {
 /**
  * The real server on a real database, as a {@link SimServer}: the production AppModule with only the
  * Clock replaced and the production app settings, called over real HTTP through supertest. Data
- * is reset between runs with TRUNCATE ... RESTART IDENTITY and a zero log head, so versions start at 1 for every run and
+ * is reset between runs with TRUNCATE ... RESTART IDENTITY and a zero log head and floor, so versions start at 1 for every run and
  * the physical row order is the same in every run of a seed.
  */
 export class RealServer implements SimServer {
@@ -84,8 +93,11 @@ export class RealServer implements SimServer {
     const env = {
       DATABASE_URL: databaseUrl,
       SEED_DEMO: 'false',
-      // The simulation drives no GC; keep the timer from firing during a long local search.
+      // The simulation runs the GC itself (compact steps); keep the timer from firing during a long
+      // local search.
       GC_INTERVAL_MS: String(2_147_483_647),
+      CHANGELOG_RETENTION_SECONDS: String(SIM_RETENTION_MS / 1000),
+      MUTATION_RESULT_RETENTION_SECONDS: String(SIM_RETENTION_MS / 1000),
       DB_POOL_MAX: '4',
     };
     const clock = new SimulatedClock();
@@ -124,6 +136,7 @@ export class RealServer implements SimServer {
     this.errors = [];
     await this.db.query(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY`);
     await this.db.query('UPDATE log_head SET version = 0');
+    await this.db.query('UPDATE log_floor SET version = 0');
     for (const site of fixtures.sites) {
       await this.db.query('INSERT INTO sites (id, name) VALUES ($1, $2)', [site.id, site.name]);
     }
@@ -153,6 +166,17 @@ export class RealServer implements SimServer {
     this.errors = [];
     const contentType = res.headers['content-type'] as string | undefined;
     return { status: res.status, contentType, body: res.text, serverErrors };
+  }
+
+  async compact(): Promise<number> {
+    return (await this.app.get(GcService).collect()).log;
+  }
+
+  async handledMutations(): Promise<Map<string, number>> {
+    const { rows } = await this.db.query<{ client_id: string; last_mutation_id: string }>(
+      `SELECT client_id, last_mutation_id FROM clients`,
+    );
+    return new Map(rows.map((r) => [r.client_id, Number(r.last_mutation_id)]));
   }
 
   async liveRows(): Promise<StoredRow[]> {

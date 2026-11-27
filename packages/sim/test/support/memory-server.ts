@@ -7,7 +7,16 @@ import {
   type MutatorTx,
   type Row,
 } from '@fieldsync/sync-core';
-import type { Fixtures, ServerError, SimRequest, SimResponse, SimServer, StoredRow, SimUser } from '../../src/types';
+import {
+  SIM_RETENTION_MS,
+  type Fixtures,
+  type ServerError,
+  type SimRequest,
+  type SimResponse,
+  type SimServer,
+  type StoredRow,
+  type SimUser,
+} from '../../src/types';
 
 /**
  * Defects the reference server can be told to have, so the engine's tests can show that the oracle
@@ -27,7 +36,11 @@ export type Defect =
   /** Rejects every edit of a ticket with INTERNAL instead of applying it. */
   | 'internal-rejection'
   /** An edit that leaves the description out empties it (like the original `ticket.update`). */
-  | 'blank-unsent-description';
+  | 'blank-unsent-description'
+  /** The GC removes old changes but never raises the floor, so nobody is reset (like the original GC, F-34). */
+  | 'compact-without-floor'
+  /** Reports no handled mutations to the oracle, as if every queued mutation was dropped by its client. */
+  | 'forget-handled';
 
 interface Entity {
   entity: EntityName;
@@ -39,6 +52,8 @@ interface Entity {
 
 interface LogEntry {
   version: number;
+  /** Virtual time of the write, for the GC. */
+  at: number;
   siteId: string;
   entity: EntityName;
   id: string;
@@ -64,6 +79,11 @@ export class MemoryServer implements SimServer {
   private fixtures: Fixtures = { sites: [], users: [] };
   private entities = new Map<string, Entity>();
   private log: LogEntry[] = [];
+  /** Highest version the GC removed: the log holds the versions after it, up to `head`. */
+  private floor = 0;
+  private head = 0;
+  /** The first row ever written (for the `drop-first-row` defect), kept when the GC removes its change. */
+  private first: { entity: EntityName; id: string } | undefined;
   private lastMutation = new Map<string, number>();
   private now: () => number = () => 0;
 
@@ -74,6 +94,9 @@ export class MemoryServer implements SimServer {
     this.users = new Map(fixtures.users.map((u) => [u.token, u]));
     this.entities = new Map();
     this.log = [];
+    this.floor = 0;
+    this.head = 0;
+    this.first = undefined;
     this.lastMutation = new Map();
     this.requests.length = 0;
     this.now = now;
@@ -86,6 +109,32 @@ export class MemoryServer implements SimServer {
         .filter((e) => !e.deleted && e.data)
         .map((e) => ({ entity: e.entity, id: e.id, siteId: e.siteId, data: e.data as Row })),
     );
+  }
+
+  /** Removes the oldest changes up to the first one within the retention, as the real GC does. */
+  compact(): Promise<number> {
+    const cutoff = this.now() - SIM_RETENTION_MS;
+    let removed = 0;
+    while (this.log[0] && this.log[0].at < cutoff) {
+      const gone = this.log.shift() as LogEntry;
+      if (!this.defects.has('compact-without-floor')) this.floor = gone.version;
+      removed += 1;
+    }
+    return Promise.resolve(removed);
+  }
+
+  handledMutations(): Promise<Map<string, number>> {
+    if (this.defects.has('forget-handled')) return Promise.resolve(new Map<string, number>());
+    return Promise.resolve(new Map(this.lastMutation));
+  }
+
+  private gone(): SimResponse {
+    return {
+      status: 410,
+      contentType: 'application/problem+json',
+      body: JSON.stringify({ status: 410, code: 'RESET_REQUIRED', detail: 'reset', details: { floor: this.floor } }),
+      serverErrors: [],
+    };
   }
 
   send(request: SimRequest): Promise<SimResponse> {
@@ -189,17 +238,18 @@ export class MemoryServer implements SimServer {
     for (const w of writes) {
       const key = `${w.entity}/${w.id}`;
       const siteId = w.row ? (w.row.siteId as string) : (target(w.entity, w.id)?.siteId ?? '');
-      const version = this.log.length + 1;
+      const version = (this.head += 1);
+      this.first ??= { entity: w.entity, id: w.id };
       const op = w.op === 'del' ? 'del' : 'put';
       const data = w.row ? (JSON.parse(JSON.stringify(w.row)) as Row) : null;
-      this.log.push({ version, siteId, entity: w.entity, id: w.id, op, data });
+      this.log.push({ version, at: this.now(), siteId, entity: w.entity, id: w.id, op, data });
       this.entities.set(key, { entity: w.entity, id: w.id, siteId, data, deleted: op === 'del' });
     }
   }
 
   /** Whether a defect hides this row from every read path. */
   private dropped(entity: EntityName, id: string): boolean {
-    return this.defects.has('drop-first-row') && entity === this.log[0]?.entity && id === this.log[0]?.id;
+    return this.defects.has('drop-first-row') && entity === this.first?.entity && id === this.first?.id;
   }
 
   private shown(entity: EntityName, data: Row | null): Row | null {
@@ -211,7 +261,8 @@ export class MemoryServer implements SimServer {
   /** Live rows of the user's sites in key order (site, entity, id), from the page key on; never compacted. */
   private snapshot(user: SimUser, params: URLSearchParams): SimResponse {
     const limit = Math.min(Math.max(Number(params.get('limit') ?? 500), 1), 500);
-    const watermark = params.has('watermark') ? Number(params.get('watermark')) : this.log.length;
+    const watermark = params.has('watermark') ? Number(params.get('watermark')) : this.head;
+    if (watermark < this.floor) return this.gone();
     const after = params.has('afterSite')
       ? `${params.get('afterSite')}/${params.get('afterEntity')}/${params.get('afterId')}`
       : undefined;
@@ -234,6 +285,7 @@ export class MemoryServer implements SimServer {
     const cursor = Number(params.get('cursor') ?? 0);
     const limit = Math.min(Math.max(Number(params.get('limit') ?? 500), 1), 500);
     const clientId = params.get('clientId');
+    if (cursor < this.floor) return this.gone();
     const sites = this.sites(user);
     const ignoreSites = this.defects.has('foreign-rows') && cursor > 0;
     const page = this.log
@@ -241,7 +293,7 @@ export class MemoryServer implements SimServer {
       .filter((e) => !this.dropped(e.entity, e.id))
       .filter((e) => ignoreSites || sites.has(e.siteId))
       .slice(0, limit);
-    const head = this.log.length;
+    const head = this.head;
     return json(200, {
       changes: page.map((e) => ({
         version: e.version,

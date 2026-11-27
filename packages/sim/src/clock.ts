@@ -62,6 +62,17 @@ export class SimClock {
   }
 
   /**
+   * Moves time forward by `ms` without firing anything: `setSystemTime` of fake-timers shifts every
+   * pending timer by the same amount (they stay relative), so a period away costs no thousands of
+   * retry timers. The code then settles.
+   */
+  async jump(ms: number, settle: () => Promise<void>): Promise<void> {
+    if (!Number.isFinite(ms) || ms < 0) throw new RangeError(`cannot jump by ${ms} ms`);
+    this.clock.setSystemTime(this.clock.now + ms);
+    await settle();
+  }
+
+  /**
    * Moves time to the next timer and fires it, then lets the code it started settle. Returns how far time moved, or `undefined` when no timer is set.
    */
   async advanceToNext(settle: () => Promise<void>): Promise<number | undefined> {
