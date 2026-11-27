@@ -17,7 +17,14 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
-import { MAX_PUSH_MUTATIONS, REJECTION_CODES } from '@fieldsync/sync-core';
+import {
+  asClientId,
+  asMutationId,
+  MAX_PUSH_MUTATIONS,
+  REJECTION_CODES,
+  type ClientId,
+  type ReceivedMutation,
+} from '@fieldsync/sync-core';
 import { PROBLEM_CODES } from './problem';
 import { IntegerIn } from './validation';
 
@@ -81,6 +88,22 @@ export class PushRequestDto {
   @ValidateNested({ each: true })
   @Type(() => MutationDto)
   mutations!: MutationDto[];
+}
+
+/**
+ * The client id of a validated request. A UUID may arrive in any case (`@IsUUID` accepts it, and it
+ * is the same id, RFC 9562 section 4), so it is lowered before it is taken for a client id.
+ */
+export function clientIdOf(value: string): ClientId {
+  return asClientId(value.toLowerCase());
+}
+
+/** A validated push body as the protocol types name it: its ids go on through their constructors. */
+export function pushRequestOf(body: PushRequestDto): { clientId: ClientId; mutations: ReceivedMutation[] } {
+  return {
+    clientId: clientIdOf(body.clientId),
+    mutations: body.mutations.map(({ id, name, args }) => ({ id: asMutationId(id), name, args })),
+  };
 }
 
 export class PullQueryDto {

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PullResponse, PushResponse, Row, SnapshotPage } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { Clock } from '../../src/clock';
@@ -37,7 +38,7 @@ describeWithDb('change-log GC under concurrency and failures', () => {
   const push = (api: Api, user: TestUser, clientId: string, mutations: Mutation[]) =>
     api.post<PushResponse>('/sync/push', { clientId, mutations }, user.token);
   const create = (id: number, siteId: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: randomUUID(), siteId, title, description: '' },
   });

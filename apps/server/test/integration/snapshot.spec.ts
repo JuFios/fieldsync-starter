@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PullResponse, PushResponse, Row, SnapshotPage } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import type { TestUser } from '../support/fixtures';
@@ -19,7 +20,7 @@ describeWithDb('GET /sync/snapshot', () => {
       user.token,
     );
   const create = (id: number, siteId: string, ticket: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: ticket, siteId, title, description: '' },
   });
@@ -72,7 +73,7 @@ describeWithDb('GET /sync/snapshot', () => {
     const tickets = [HIGH(1), LOW(1), LOW(2)];
     for (const [i, id] of tickets.entries()) await push(tech, client, [create(i + 1, mine, id, `T${i}`)]);
     await push(admin, randomUUID(), [create(1, other, randomUUID(), 'other site')]);
-    await push(tech, client, [{ id: 4, name: 'ticket.delete', args: { id: LOW(2), siteId: mine } }]);
+    await push(tech, client, [{ id: asMutationId(4), name: 'ticket.delete', args: { id: LOW(2), siteId: mine } }]);
     const head = await ctx.db.query<{ version: string }>('SELECT version FROM log_head');
 
     const first = await page(tech, { limit: 1 });
@@ -125,12 +126,12 @@ describeWithDb('GET /sync/snapshot', () => {
       if (n !== 1) return;
       // The first page read LOW(10) and LOW(11); the rest is still to come.
       const edit = (ticket: string, title: string): Mutation => ({
-        id: next(),
+        id: asMutationId(next()),
         name: 'ticket.update',
         args: { id: ticket, siteId: site, title },
       });
       const del = (ticket: string): Mutation => ({
-        id: next(),
+        id: asMutationId(next()),
         name: 'ticket.delete',
         args: { id: ticket, siteId: site },
       });
@@ -167,11 +168,17 @@ describeWithDb('GET /sync/snapshot', () => {
           const t = [...live][mid % live.size];
           if (roll === 1) {
             await push(tech, clientId, [
-              { id: (mid += 1), name: 'ticket.update', args: { id: t, siteId: site, title: `w${w} edit ${mid}` } },
+              {
+                id: asMutationId((mid += 1)),
+                name: 'ticket.update',
+                args: { id: t, siteId: site, title: `w${w} edit ${mid}` },
+              },
             ]);
           } else {
             live.delete(t);
-            await push(tech, clientId, [{ id: (mid += 1), name: 'ticket.delete', args: { id: t, siteId: site } }]);
+            await push(tech, clientId, [
+              { id: asMutationId((mid += 1)), name: 'ticket.delete', args: { id: t, siteId: site } },
+            ]);
           }
         }
       }

@@ -12,6 +12,7 @@ import {
   type Transport,
 } from '../src';
 import { ManualClock } from './support/manual-clock';
+import { CLIENT_ID } from './support/ids';
 
 const settle = () => new Promise((r) => setImmediate(r));
 
@@ -64,7 +65,13 @@ class StreamingTransport implements Transport {
 const clients: SyncClient[] = [];
 function client(transport: Transport, clock: ManualClock) {
   // Delays just below the ceiling: 999 ms, then 1998 ms, ...
-  const c = new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock, random: () => 0.999 });
+  const c = new SyncClient({
+    clientId: CLIENT_ID,
+    transport,
+    storage: new MemoryStorage(),
+    clock,
+    random: () => 0.999,
+  });
   clients.push(c);
   return c;
 }
@@ -206,7 +213,7 @@ describe('the notification stream of a client', () => {
 
   it('opens no stream when the client is not live', async () => {
     const t = new StreamingTransport();
-    const c = new SyncClient({ clientId: 'c1', transport: t, storage: new MemoryStorage(), live: false });
+    const c = new SyncClient({ clientId: CLIENT_ID, transport: t, storage: new MemoryStorage(), live: false });
     clients.push(c);
     await c.ready;
     expect(t.streams).toHaveLength(0);

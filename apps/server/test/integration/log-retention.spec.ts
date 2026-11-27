@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { Clock } from '../../src/clock';
@@ -33,7 +34,7 @@ describeWithDb('retention of tombstones and mutation results', () => {
   const push = (user: TestUser, clientId: string, mutations: Mutation[]) =>
     ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, user.token);
   const create = (id: number, siteId: string, ticket: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: ticket, siteId, title, description: '' },
   });
@@ -56,7 +57,7 @@ describeWithDb('retention of tombstones and mutation results', () => {
     const ticket = randomUUID();
     const client = randomUUID();
     await push(tech, client, [create(1, site, ticket, 'deleted long ago')]);
-    await push(tech, client, [{ id: 2, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
+    await push(tech, client, [{ id: asMutationId(2), name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
 
     const run = await collectAfterDays(PAST_EVERYTHING_DAYS);
 
@@ -71,7 +72,9 @@ describeWithDb('retention of tombstones and mutation results', () => {
     const tech = await ctx.fixtures.technician(site);
     const ticket = randomUUID();
     await push(tech, randomUUID(), [create(1, site, ticket, 'deleted')]);
-    await push(tech, randomUUID(), [{ id: 1, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
+    await push(tech, randomUUID(), [
+      { id: asMutationId(1), name: 'ticket.delete', args: { id: ticket, siteId: site } },
+    ]);
     await collectAfterDays(PAST_EVERYTHING_DAYS);
     // Someone tries to create a ticket under the old id: refused, so nothing new exists under it.
     const create2 = await push(tech, randomUUID(), [create(1, site, ticket, 'new ticket, old id')]);
@@ -79,7 +82,7 @@ describeWithDb('retention of tombstones and mutation results', () => {
 
     // An offline client still holds a delete of the old ticket; it arrives now and finds nothing.
     const stale = await push(tech, randomUUID(), [
-      { id: 1, name: 'ticket.delete', args: { id: ticket, siteId: site } },
+      { id: asMutationId(1), name: 'ticket.delete', args: { id: ticket, siteId: site } },
     ]);
 
     expect(stale.body.results[0]?.status).toBe('applied');
@@ -94,7 +97,9 @@ describeWithDb('retention of tombstones and mutation results', () => {
     await holder.mutate('ticket.create', { id: ticket, siteId: site, title: 'held', description: '' });
     await holder.sync();
     precondition(rowsById(holder, 'ticket').has(ticket), 'the holder does not have the ticket');
-    await push(tech, randomUUID(), [{ id: 1, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
+    await push(tech, randomUUID(), [
+      { id: asMutationId(1), name: 'ticket.delete', args: { id: ticket, siteId: site } },
+    ]);
 
     await collectAfterDays(PAST_EVERYTHING_DAYS);
 
@@ -107,7 +112,11 @@ describeWithDb('retention of tombstones and mutation results', () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);
     const client = randomUUID();
-    const bad: Mutation = { id: 1, name: 'ticket.update', args: { id: randomUUID(), siteId: site, title: 'x' } };
+    const bad: Mutation = {
+      id: asMutationId(1),
+      name: 'ticket.update',
+      args: { id: randomUUID(), siteId: site, title: 'x' },
+    };
     precondition((await push(tech, client, [bad])).body.results[0].status === 'rejected', 'not rejected');
 
     await collectAfterDays(LOG_RETENTION_DAYS + 1);

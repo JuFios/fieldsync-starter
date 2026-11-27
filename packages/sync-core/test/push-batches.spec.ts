@@ -8,6 +8,7 @@ import {
   type SnapshotPage,
   type Transport,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 
@@ -56,7 +57,7 @@ function ticketId(n: number): string {
 describe('push batches', () => {
   it('splits a queue of long mutations into bodies the server accepts, in order', async () => {
     const transport = new RecordingTransport();
-    const client = new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+    const client = new SyncClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage() });
     try {
       // A control character takes six bytes in JSON ("\u0001"), so each mutation is about 30 KB.
       for (let n = 1; n <= 100; n += 1) {
@@ -81,7 +82,7 @@ describe('push batches', () => {
 describe('mutate', () => {
   it('refuses a mutation that cannot fit in one push, queueing nothing', async () => {
     const transport = new RecordingTransport();
-    const client = new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+    const client = new SyncClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage() });
     try {
       const args = { id: ticketId(1), siteId: SITE, title: 'T', description: '', notes: 'x'.repeat(1_048_576) };
       await expect(client.mutate('ticket.create', args)).rejects.toThrow(TypeError);

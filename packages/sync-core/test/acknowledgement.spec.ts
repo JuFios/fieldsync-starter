@@ -8,7 +8,9 @@ import {
   type PushRequest,
   type PushResponse,
   type SnapshotPage,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
@@ -47,7 +49,7 @@ class ScriptedTransport {
 function client(transport: ScriptedTransport): SyncClient {
   const storage = new MemoryStorage();
   storeState(storage, { cursor: 0, lastMutationId: 0, base: {} });
-  return new SyncClient({ clientId: 'c1', transport, storage });
+  return new SyncClient({ clientId: CLIENT_ID, transport, storage });
 }
 
 /**
@@ -77,7 +79,7 @@ describe('acknowledged mutations', () => {
           changes: [],
           nextCursor: asVersion(2),
           hasMore: true,
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
           head: asVersion(3),
         }),
     ];
@@ -99,7 +101,7 @@ describe('acknowledged mutations', () => {
           changes: [ticketChange(3)],
           nextCursor: asVersion(3),
           hasMore: false,
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
           head: asVersion(3),
         }),
     ];
@@ -138,7 +140,7 @@ describe('acknowledged mutations', () => {
             changes: [ticketChange(3)],
             nextCursor: asVersion(3),
             hasMore: false,
-            lastMutationId: 1,
+            lastMutationId: asMutationId(1),
             head: asVersion(3),
           }),
       ];

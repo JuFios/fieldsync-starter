@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { MutationRejected, type Mutation } from '@fieldsync/sync-core';
+import { MutationRejected, type Mutation, asMutationId } from '@fieldsync/sync-core';
 import { Db } from '../../src/db';
 import { applyMutation } from '../../src/server-tx';
 import { describeWithDb, useIntegration } from '../support/integration';
@@ -11,7 +11,7 @@ describeWithDb('arguments Postgres cannot store', () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);
     const id = randomUUID();
-    const m: Mutation = { id: 1, name: 'ticket.create', args: { id, siteId: site, ...text } };
+    const m: Mutation = { id: asMutationId(1), name: 'ticket.create', args: { id, siteId: site, ...text } };
     const result = ctx.server.app.get(Db).tx((c) => applyMutation(c, { id: tech.id, role: tech.role }, m, new Date()));
     return { id, site, result };
   }

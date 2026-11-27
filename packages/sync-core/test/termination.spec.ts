@@ -7,7 +7,9 @@ import {
   type PushResponse,
   type SnapshotPage,
   type Transport,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -59,7 +61,7 @@ afterEach(() => {
   for (const c of clients.splice(0)) c.dispose();
 });
 function client(transport: Transport, storage = new MemoryStorage()) {
-  const c = new SyncClient({ clientId: 'c1', transport, storage, live: false });
+  const c = new SyncClient({ clientId: CLIENT_ID, transport, storage, live: false });
   clients.push(c);
   return c;
 }
@@ -98,7 +100,7 @@ describe('a client restarted before its first state arrived (№5)', () => {
       push: (req) =>
         Promise.resolve({
           results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       // The pull after the push never answers: the page closes before the client has a state.
       pull: () => new Promise<PullResponse>(() => undefined),

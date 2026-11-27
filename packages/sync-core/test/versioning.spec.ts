@@ -5,14 +5,22 @@ import {
   PROTOCOL_VERSION,
   SyncClient,
   TransportError,
+  type PullResponse,
   type PushRequest,
   type PushResponse,
   type Transport,
+  asClientId,
+  asMutationId,
+  type ClientId,
+  type LastMutationId,
 } from '../src';
 import { ManualClock } from './support/manual-clock';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const OLD_ID = asClientId('0000000a-0000-4000-8000-000000000001');
+const NEW_ID = asClientId('0000000a-0000-4000-8000-000000000002');
+const UNEXPECTED_ID = asClientId('0000000a-0000-4000-8000-000000000003');
 const tooOld = () =>
   new TransportError(400, 'CLIENT_UPDATE_REQUIRED', 'update', { min: PROTOCOL_VERSION + 1, max: PROTOCOL_VERSION + 1 });
 
@@ -20,16 +28,16 @@ const clients: SyncClient[] = [];
 afterEach(() => {
   for (const c of clients.splice(0)) c.dispose();
 });
-function client(transport: Transport, storage: MemoryStorage, clock = new ManualClock(), newIds?: string[]) {
+function client(transport: Transport, storage: MemoryStorage, clock = new ManualClock(), newIds?: ClientId[]) {
   const ids = newIds ?? [];
   const c = new SyncClient({
-    clientId: 'old-id',
+    clientId: OLD_ID,
     transport,
     storage,
     clock,
     live: false,
     random: () => 0.5,
-    newClientId: () => ids.shift() ?? 'unexpected-id',
+    newClientId: () => ids.shift() ?? UNEXPECTED_ID,
   });
   clients.push(c);
   return c;
@@ -156,13 +164,13 @@ describe('the indicator', () => {
 });
 
 /**
- * A server that lost mutations of client `old-id` after 2 (it expects 3, the client sends 4): it
+ * A server that lost mutations of client OLD_ID after 2 (it expects 3, the client sends 4): it
  * answers 409 until the id is retired, then serves the new id.
  */
 class GapServer implements Transport {
   readonly pushes: PushRequest[] = [];
-  readonly retired: string[] = [];
-  private readonly last = new Map<string, number>([['old-id', 2]]);
+  readonly retired: ClientId[] = [];
+  private readonly last = new Map<ClientId, LastMutationId>([[OLD_ID, asMutationId(2)]]);
 
   push(req: PushRequest): Promise<PushResponse> {
     this.pushes.push(structuredClone(req));
@@ -182,7 +190,7 @@ class GapServer implements Transport {
     return Promise.resolve({ results, lastMutationId: this.last.get(req.clientId) ?? 0 });
   }
 
-  pull(cursor: number) {
+  pull(cursor: number): Promise<PullResponse> {
     return Promise.resolve({
       changes: [],
       nextCursor: asVersion(cursor),
@@ -196,7 +204,7 @@ class GapServer implements Transport {
     return Promise.resolve({ watermark: asVersion(0), head: asVersion(0), rows: [], next: null });
   }
 
-  retire(clientId: string) {
+  retire(clientId: ClientId) {
     this.retired.push(clientId);
     return Promise.resolve({ lastMutationId: this.last.get(clientId) ?? 0 });
   }
@@ -204,11 +212,11 @@ class GapServer implements Transport {
 
 describe('recovery from a 409', () => {
   async function queueUnder(storage: MemoryStorage, ids: number[]) {
-    await storage.ensureClientId('old-id');
+    await storage.ensureClientId(OLD_ID);
     await storage.commit({ meta: { cursor: asVersion(0) } });
     for (const n of ids) {
       // Each mutation gets exactly the id n: what is missing in between was lost with the old queue.
-      await storage.commit({ meta: { nextMutationIdAtLeast: n } });
+      await storage.commit({ meta: { nextMutationIdAtLeast: asMutationId(n) } });
       await storage.enqueue({
         name: 'ticket.create',
         args: { id: id(n), siteId: SITE, title: `m${n}`, description: '' },
@@ -221,20 +229,20 @@ describe('recovery from a 409', () => {
     const storage = new MemoryStorage();
     await queueUnder(storage, [4, 5]);
     const server = new GapServer();
-    const c = client(server, storage, new ManualClock(), ['new-id']);
+    const c = client(server, storage, new ManualClock(), [NEW_ID]);
     await c.sync();
 
-    expect(server.retired).toEqual(['old-id']);
+    expect(server.retired).toEqual([OLD_ID]);
     expect(server.pushes.map((p) => [p.clientId, p.mutations.map((m) => m.id)])).toEqual([
-      ['old-id', [4, 5]],
-      ['new-id', [1, 2]],
+      [OLD_ID, [4, 5]],
+      [NEW_ID, [1, 2]],
     ]);
     expect({ id: c.clientId, status: c.status, pending: c.pendingCount }).toEqual({
-      id: 'new-id',
+      id: NEW_ID,
       status: 'idle',
       pending: 0,
     });
-    expect((await storage.load()).meta).toMatchObject({ clientId: 'new-id', retiring: null, nextMutationId: 3 });
+    expect((await storage.load()).meta).toMatchObject({ clientId: NEW_ID, retiring: null, nextMutationId: 3 });
   });
 
   it('does not send again a mutation the server handled under the old id', async () => {
@@ -242,7 +250,7 @@ describe('recovery from a 409', () => {
     // Ids 2 to 4 are queued; the server handled 2 already (its answer was lost), and misses 3.
     await queueUnder(storage, [2, 4]);
     const server = new GapServer();
-    const c = client(server, storage, new ManualClock(), ['new-id']);
+    const c = client(server, storage, new ManualClock(), [NEW_ID]);
     await c.sync();
     expect(server.pushes.at(-1)?.mutations.map((m) => m.args.title)).toEqual(['m4']);
   });
@@ -250,12 +258,12 @@ describe('recovery from a 409', () => {
   it('finishes a recovery a reload interrupted before the old id was retired', async () => {
     const storage = new MemoryStorage();
     await queueUnder(storage, [4]);
-    await storage.commit({ meta: { retiring: 'old-id' } });
+    await storage.commit({ meta: { retiring: OLD_ID } });
     const server = new GapServer();
-    const c = client(server, storage, new ManualClock(), ['new-id']);
+    const c = client(server, storage, new ManualClock(), [NEW_ID]);
     await c.sync();
-    expect(server.retired).toEqual(['old-id']);
+    expect(server.retired).toEqual([OLD_ID]);
     // Nothing is sent under the old id any more.
-    expect(server.pushes.map((p) => p.clientId)).toEqual(['new-id']);
+    expect(server.pushes.map((p) => p.clientId)).toEqual([NEW_ID]);
   });
 });

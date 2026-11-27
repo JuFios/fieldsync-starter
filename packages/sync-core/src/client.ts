@@ -12,11 +12,16 @@ import {
 } from './storage';
 import { RESET_REQUIRED, TransportError, type RequestOptions, type Transport } from './transport';
 import {
+  asClientId,
+  asLastMutationId,
+  asMutationId,
   asVersion,
   MAX_PUSH_BODY_BYTES,
   MAX_PUSH_MUTATIONS,
   PROTOCOL_VERSION,
+  type ClientId,
   type EntityName,
+  type LastMutationId,
   type Mutation,
   type MutatorName,
   type PullResponse,
@@ -140,7 +145,7 @@ const LONGEST_ID = Number.MAX_SAFE_INTEGER;
 
 export interface SyncClientOptions {
   /** The client id to take when the storage holds none yet (its first start); otherwise a new UUID. */
-  clientId?: string;
+  clientId?: ClientId;
   transport: Transport;
   storage: SyncStorage;
   /** Time and timers; defaults to the system clock. */
@@ -155,7 +160,7 @@ export interface SyncClientOptions {
   /** Random numbers in [0, 1) for the jitter of retries; defaults to `Math.random`. */
   random?: () => number;
   /** New client ids (the first one, and one after a 409); defaults to random UUIDs. */
-  newClientId?: () => string;
+  newClientId?: () => ClientId;
   /**
    * The other tabs of the user on the same storage (see {@link BrowserTabs}); by default the client
    * is alone. Only the leading tab talks to the server.
@@ -255,9 +260,9 @@ export class SyncClient {
   private readonly random: () => number;
   /** Failed syncs in a row: the exponent of the next retry delay. */
   private failures = 0;
-  private readonly initialClientId: string | undefined;
+  private readonly initialClientId: ClientId | undefined;
   private readonly live: boolean;
-  private readonly newClientId: () => string;
+  private readonly newClientId: () => ClientId;
   private readonly tabs: TabCoordinator;
   /**
    * Whether this tab leads: only the leader pushes, pulls and keeps the stream open, so the tabs of
@@ -268,10 +273,11 @@ export class SyncClient {
   private unsubscribeTabs: () => void = () => undefined;
   /** The stream's watchdog and reconnect delay, cleared on dispose. */
   private readonly streamTimers = new Set<TimerHandle>();
-  private id = '';
+  /** '' until the stored state is loaded. */
+  private id: ClientId | '' = '';
   private base = new Map<string, Row>();
   private cursor: Version = asVersion(0);
-  private lastMutationId = 0;
+  private lastMutationId: LastMutationId = 0;
   private pending: StoredMutation[] = [];
   /** UTF-8 bytes of each queued mutation's JSON, by queue position, for splitting the queue into pushes. */
   private readonly bytes = new Map<number, number>();
@@ -319,7 +325,7 @@ export class SyncClient {
   }
 
   /** The client id the server knows this client by ('' until `ready`). */
-  get clientId(): string {
+  get clientId(): ClientId | '' {
     return this.id;
   }
 
@@ -431,7 +437,7 @@ export class SyncClient {
   /** Set when the server refused this protocol version: no request is made until the app is updated. */
   private updateRequired: UpdateRequired | null = null;
   /** A client id being given up after a 409 (stored, so a restart finishes the recovery). */
-  private retiring: string | null = null;
+  private retiring: ClientId | null = null;
 
   get status(): SyncStatus {
     return this.currentStatus;
@@ -779,8 +785,9 @@ export class SyncClient {
    * is stored first (a restart finishes the recovery), then {@link recover}.
    */
   private async giveUpClientId(): Promise<void> {
-    this.retiring = this.id;
-    await this.commit({ meta: { retiring: this.id } });
+    const old = this.loadedClientId();
+    this.retiring = old;
+    await this.commit({ meta: { retiring: old } });
     await this.recover();
   }
 
@@ -807,6 +814,12 @@ export class SyncClient {
     this.bytes.clear();
     this.lastMutationId = 0;
     this.emit();
+  }
+
+  /** The client id, which every sync has: it runs only once the stored state is loaded. */
+  private loadedClientId(): ClientId {
+    if (this.id === '') throw new Error('The sync client has no client id yet');
+    return this.id;
   }
 
   /** Bytes of a push body with no mutations. */
@@ -857,8 +870,9 @@ export class SyncClient {
     this.rejected = stored.rejections.map(({ seq: _seq, ...rejection }) => rejection);
     const batch = this.nextBatch();
     if (batch.length === 0) return;
+    const clientId = this.loadedClientId();
     const resp = await this.request((init) =>
-      this.transport.push({ clientId: this.id, mutations: batch.map((q) => q.mutation) }, init),
+      this.transport.push({ clientId, mutations: batch.map((q) => q.mutation) }, init),
     );
     const sent = new Map(batch.map((q) => [q.mutation.id, q]));
     const done = new Set<number>();
@@ -884,13 +898,13 @@ export class SyncClient {
         updated.push({ ...queued, appliedAt: r.version });
       }
     }
-    const lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+    const lastMutationId = asLastMutationId(Math.max(this.lastMutationId, resp.lastMutationId));
     // Stored at once, with the last id the server handled: after a reload, ids continue after it, so
     // a new mutation is never answered as a duplicate of an old one (F-32).
     await this.commit({
       pending: { put: updated, delete: [...done] },
       rejections: { add: rejections },
-      meta: { lastMutationId, nextMutationIdAtLeast: lastMutationId + 1 },
+      meta: { lastMutationId, nextMutationIdAtLeast: asMutationId(lastMutationId + 1) },
     });
     const replaced = new Map(updated.map((q) => [q.seq, q]));
     this.pending = this.pending.filter((q) => !done.has(q.seq)).map((q) => replaced.get(q.seq) ?? q);
@@ -908,7 +922,8 @@ export class SyncClient {
     let target: Version | undefined;
     for (;;) {
       const from = this.cursor;
-      const resp = await this.request((init) => this.transport.pull(from, this.id, PAGE_SIZE, init));
+      const clientId = this.loadedClientId();
+      const resp = await this.request((init) => this.transport.pull(from, clientId, PAGE_SIZE, init));
       const settled = this.settled(resp, resp.nextCursor);
       const put: Array<[string, Row]> = [];
       const removed: string[] = [];
@@ -938,7 +953,7 @@ export class SyncClient {
    * whose effect the client then has.
    */
   private settled(resp: PullResponse, cursor: Version) {
-    const lastMutationId = Math.max(this.lastMutationId, resp.lastMutationId);
+    const lastMutationId = asLastMutationId(Math.max(this.lastMutationId, resp.lastMutationId));
     const dropped = this.pending
       .filter((q) => {
         if (q.appliedAt !== undefined) return q.appliedAt <= cursor;
@@ -948,10 +963,10 @@ export class SyncClient {
         return !resp.hasMore && q.mutation.id <= resp.lastMutationId;
       })
       .map((q) => q.seq);
-    return { dropped, meta: { lastMutationId, nextMutationIdAtLeast: lastMutationId + 1 } };
+    return { dropped, meta: { lastMutationId, nextMutationIdAtLeast: asMutationId(lastMutationId + 1) } };
   }
 
-  private apply(settled: { dropped: number[]; meta: { lastMutationId: number } }): void {
+  private apply(settled: { dropped: number[]; meta: { lastMutationId: LastMutationId } }): void {
     const dropped = new Set(settled.dropped);
     this.pending = this.pending.filter((q) => !dropped.has(q.seq));
     this.lastMutationId = settled.meta.lastMutationId;
@@ -998,7 +1013,8 @@ export class SyncClient {
     let last: PullResponse;
     do {
       const from = cursor;
-      last = await this.request((init) => this.transport.pull(from, this.id, PAGE_SIZE, init));
+      const clientId = this.loadedClientId();
+      last = await this.request((init) => this.transport.pull(from, clientId, PAGE_SIZE, init));
       applyChanges(staged, last.changes);
       cursor = last.nextCursor;
       // Once the log is read up to the point of consistency the staged rows are one state of the
@@ -1052,6 +1068,6 @@ export class SyncClient {
 }
 
 /** A new client id: a random UUID (browsers expose it in secure contexts only, see README). */
-function randomClientId(): string {
-  return globalThis.crypto.randomUUID();
+function randomClientId(): ClientId {
+  return asClientId(globalThis.crypto.randomUUID());
 }

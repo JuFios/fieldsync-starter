@@ -10,7 +10,9 @@ import {
   type PushRequest,
   type PushResponse,
   type Transport,
+  type LastMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 let ticketCount = 0;
@@ -30,7 +32,7 @@ class StrictServer {
   gaps = 0;
   /** Requests from a tab that did not lead when it sent them. */
   fromFollowers = 0;
-  private readonly last = new Map<string, number>();
+  private readonly last = new Map<string, LastMutationId>();
 
   transport(tab: string, leads: () => boolean = () => true): Transport {
     const sent = (kind: string) => {
@@ -80,7 +82,7 @@ function tab(name: string, server: StrictServer, storage: MemoryStorage, group: 
   // The server checks that a request comes from the tab that leads at that moment.
   const self: { client?: SyncClient } = {};
   const transport = server.transport(name, () => self.client?.isLeader ?? false);
-  const c = new SyncClient({ clientId: 'c1', transport, storage, tabs: group.tab(), live: false });
+  const c = new SyncClient({ clientId: CLIENT_ID, transport, storage, tabs: group.tab(), live: false });
   self.client = c;
   clients.push(c);
   return c;

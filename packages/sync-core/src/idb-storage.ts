@@ -11,7 +11,17 @@ import {
   type SyncMeta,
   type SyncStorage,
 } from './storage';
-import { asVersion, type Row, type Version } from './types';
+import {
+  asMutationId,
+  asVersion,
+  isClientId,
+  isLastMutationId,
+  isMutationId,
+  type ClientId,
+  type LastMutationId,
+  type Row,
+  type Version,
+} from './types';
 
 /** The version of the client's local schema (IndexedDB version); each step below upgrades by one. */
 export const LOCAL_SCHEMA_VERSION = 1;
@@ -39,8 +49,8 @@ type WriteTx = IDBPTransaction<SyncDb, ['meta', 'base', 'pending', 'rejections']
  * (`fs_client_id`); it never kept its queue.
  */
 export interface LegacyState {
-  clientId: string | null;
-  lastMutationId: number;
+  clientId: ClientId | null;
+  lastMutationId: LastMutationId;
 }
 
 /** Where the state of a client before IndexedDB is found, and how it is removed once imported. */
@@ -51,7 +61,6 @@ export interface LegacySource {
 
 const LEGACY_STATE_KEY = 'fs_state';
 const LEGACY_CLIENT_ID_KEY = 'fs_client_id';
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The original client's `localStorage` entries, read defensively (they come from an older app and
@@ -66,16 +75,18 @@ export function localStorageLegacy(storage: Pick<Storage, 'getItem' | 'removeIte
       const rawId = storage.getItem(LEGACY_CLIENT_ID_KEY);
       const rawState = storage.getItem(LEGACY_STATE_KEY);
       if (rawId === null && rawState === null) return null;
-      let lastMutationId = 0;
+      let lastMutationId: LastMutationId = 0;
       try {
         const parsed: unknown = rawState === null ? null : JSON.parse(rawState);
         const last =
           parsed !== null && typeof parsed === 'object' ? (parsed as { lastMutationId?: unknown }).lastMutationId : 0;
-        if (typeof last === 'number' && Number.isSafeInteger(last) && last >= 0) lastMutationId = last;
+        // The id after it must be a mutation id too: it is the one the next mutation gets.
+        if (isMutationId(last) && isMutationId(last + 1)) lastMutationId = last;
       } catch {
         // A damaged state keeps nothing but the id; the server's answers raise the last id again.
       }
-      return { clientId: rawId !== null && UUID.test(rawId) ? rawId.toLowerCase() : null, lastMutationId };
+      const clientId = rawId?.toLowerCase();
+      return { clientId: isClientId(clientId) ? clientId : null, lastMutationId };
     },
     remove() {
       storage.removeItem(LEGACY_STATE_KEY);
@@ -98,7 +109,7 @@ const STEPS = [
       clientId: legacy?.clientId ?? null,
       cursor: null,
       lastMutationId: legacy?.lastMutationId ?? 0,
-      nextMutationId: (legacy?.lastMutationId ?? 0) + 1,
+      nextMutationId: asMutationId((legacy?.lastMutationId ?? 0) + 1),
       updateRequired: null,
       retiring: null,
       ...(legacy ? { legacyImported: true } : {}),
@@ -150,8 +161,13 @@ async function writeAll<T>(tx: { done: Promise<void>; abort(): void }, work: () 
 function isMeta(value: unknown): value is SyncMeta {
   if (value === null || typeof value !== 'object') return false;
   const m = value as Record<string, unknown>;
-  const count = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
-  return (m.clientId === null || typeof m.clientId === 'string') && count(m.lastMutationId) && count(m.nextMutationId);
+  const clientIdOrNull = (id: unknown) => id === null || isClientId(id);
+  return (
+    clientIdOrNull(m.clientId) &&
+    clientIdOrNull(m.retiring) &&
+    isLastMutationId(m.lastMutationId) &&
+    isMutationId(m.nextMutationId)
+  );
 }
 
 /** A stored cursor that is not a version (edited or damaged storage) cannot be pulled from: no state. */
@@ -252,7 +268,7 @@ export class IdbSyncStorage implements SyncStorage {
     return { pending, rejections };
   }
 
-  async ensureClientId(candidate: string): Promise<string> {
+  async ensureClientId(candidate: ClientId): Promise<ClientId> {
     const tx = this.db.transaction('meta', 'readwrite', { durability: 'strict' });
     return writeAll(tx, async () => {
       const meta = await tx.store.get(META_KEY);
@@ -275,7 +291,8 @@ export class IdbSyncStorage implements SyncStorage {
       };
       // The key path `seq` is generated: the record is stored without it.
       const seq = await tx.objectStore('pending').add(draft as StoredMutation);
-      await tx.objectStore('meta').put({ ...meta, nextMutationId: meta.nextMutationId + 1 }, META_KEY);
+      const nextMutationId = asMutationId(meta.nextMutationId + 1);
+      await tx.objectStore('meta').put({ ...meta, nextMutationId }, META_KEY);
       return { ...draft, seq };
     });
   }
@@ -320,7 +337,7 @@ export class IdbSyncStorage implements SyncStorage {
     for (const r of change.rejections?.add ?? []) work.push(rejections.add(r as StoredRejection));
   }
 
-  async restartClient(clientId: string, lastHandled: number): Promise<void> {
+  async restartClient(clientId: ClientId, lastHandled: LastMutationId): Promise<void> {
     const tx = this.db.transaction(['meta', 'pending'], 'readwrite', { durability: 'strict' });
     await writeAll(tx, async () => {
       const [meta, queue] = await Promise.all([
@@ -330,11 +347,10 @@ export class IdbSyncStorage implements SyncStorage {
       if (!meta) throw new Error('The stored client state is missing');
       const restarted = restartedQueue(queue, lastHandled);
       const renumbered = restarted.filter((q) => q.appliedAt === undefined && !q.awaitingPull).length;
+      const nextMutationId = asMutationId(renumbered + 1);
       await Promise.all([
         ...restarted.map((q) => tx.objectStore('pending').put(q)),
-        tx
-          .objectStore('meta')
-          .put({ ...meta, clientId, lastMutationId: 0, nextMutationId: renumbered + 1, retiring: null }, META_KEY),
+        tx.objectStore('meta').put({ ...meta, clientId, lastMutationId: 0, nextMutationId, retiring: null }, META_KEY),
       ]);
     });
   }

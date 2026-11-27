@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { Clock } from '../../src/clock';
@@ -25,7 +26,7 @@ describeWithDb('change-log compaction', () => {
   const push = (user: TestUser, clientId: string, mutations: Mutation[]) =>
     ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, user.token);
   const create = (id: number, siteId: string, ticket: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: ticket, siteId, title, description: '' },
   });
@@ -52,7 +53,7 @@ describeWithDb('change-log compaction', () => {
     const writer = randomUUID();
     await push(tech, writer, [create(1, site, theirs, 'written while offline')]);
     await push(tech, writer, [
-      { id: 2, name: 'ticket.update', args: { id: theirs, siteId: site, title: 'edited while offline' } },
+      { id: asMutationId(2), name: 'ticket.update', args: { id: theirs, siteId: site, title: 'edited while offline' } },
     ]);
     precondition((await collectAt(RETENTION_MS + DAY_MS)) > 0, 'the GC removed nothing');
     const mine = randomUUID();

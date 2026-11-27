@@ -1,4 +1,4 @@
-import { asVersion, type MemoryStorage, type Row } from '../../src';
+import { asLastMutationId, asMutationId, asVersion, type MemoryStorage, type Row } from '../../src';
 
 /**
  * Puts a state into a memory storage, as a client that synced before left it: a cursor, the last
@@ -12,8 +12,8 @@ export function storeState(
   void storage.commit({
     meta: {
       cursor: asVersion(state.cursor),
-      lastMutationId: state.lastMutationId,
-      nextMutationIdAtLeast: state.lastMutationId + 1,
+      lastMutationId: asLastMutationId(state.lastMutationId),
+      nextMutationIdAtLeast: asMutationId(state.lastMutationId + 1),
     },
     base: { put: Object.entries(state.base) },
   });

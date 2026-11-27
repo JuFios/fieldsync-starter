@@ -3,6 +3,8 @@ import {
   mutatorNamed,
   type EntityName,
   type MutatorTx,
+  type ClientId,
+  type MutationId,
   type ReceivedMutation,
   type Row,
 } from '@fieldsync/sync-core';
@@ -191,8 +193,8 @@ export async function applyMutation(c: Sql, user: AuthUser, m: ReceivedMutation,
 
 /** How a mutation ended, as {@link finishMutation} records it. */
 export interface MutationRecord {
-  clientId: string;
-  mutationId: number;
+  clientId: ClientId;
+  mutationId: MutationId;
   status: 'applied' | 'rejected';
   code: string | null;
   message: string | null;

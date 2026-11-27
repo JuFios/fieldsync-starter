@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation } from '@fieldsync/sync-core';
 import { describeWithDb, useIntegration } from '../support/integration';
 
@@ -13,7 +14,7 @@ describeWithDb('server time', () => {
     const tech = await ctx.fixtures.technician(site);
     const id = randomUUID();
     const mutation: Mutation = {
-      id: 1,
+      id: asMutationId(1),
       name: 'ticket.create',
       args: { id, siteId: site, title: 'T', description: '' },
     };

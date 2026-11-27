@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import type { TestUser } from '../support/fixtures';
@@ -12,7 +13,7 @@ describeWithDb('client retirement', () => {
   const ctx = useIntegration();
 
   const create = (id: number, siteId: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: randomUUID(), siteId, title, description: '' },
   });

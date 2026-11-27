@@ -1,4 +1,5 @@
 import { asVersion, MemoryStorage, SyncClient, type PullResponse, type Transport } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 /**
  * A notification that arrives while a sync is running must lead to another pull: the running one may
@@ -26,7 +27,7 @@ describe('a notification during a sync', () => {
         return page;
       },
     };
-    const client = new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+    const client = new SyncClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage() });
     try {
       await client.sync(); // snapshot, then the log from its watermark (pull 1)
       const running = client.sync(); // pull 2 reads head 1, then waits

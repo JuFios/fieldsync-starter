@@ -8,7 +8,9 @@ import {
   type PushResponse,
   type SnapshotPage,
   type Transport,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
@@ -35,7 +37,7 @@ describe('a disposed client', () => {
       return new Promise<Response>(() => undefined);
     };
     const client = new SyncClient({
-      clientId: 'c1',
+      clientId: CLIENT_ID,
       transport: new HttpTransport('http://server.test', 'token', fetchImpl),
       storage: new MemoryStorage(),
     });
@@ -58,18 +60,18 @@ describe('a disposed client', () => {
           changes: [],
           nextCursor: asVersion(0),
           hasMore: false,
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
           head: asVersion(0),
         }),
       snapshot: () => Promise.resolve(EMPTY),
     };
     const storage = new RecordingStorage();
-    const client = new SyncClient({ clientId: 'c1', transport, storage });
+    const client = new SyncClient({ clientId: CLIENT_ID, transport, storage });
     await client.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'A', description: '' });
     await settle();
 
     client.dispose();
-    answer({ results: [{ id: 1, status: 'applied' }], lastMutationId: 1 });
+    answer({ results: [{ id: asMutationId(1), status: 'applied' }], lastMutationId: asMutationId(1) });
     await settle();
 
     expect(storage.saves).toEqual([]);

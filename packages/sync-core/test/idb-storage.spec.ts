@@ -11,10 +11,14 @@ import {
   type SnapshotPage,
   type StorageClosedReason,
   type Transport,
+  asClientId,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
-const LEGACY_ID = '6f1b1e5c-8a4e-4c1e-9d6f-0a2b3c4d5e6f';
+const LEGACY_ID = asClientId('6f1b1e5c-8a4e-4c1e-9d6f-0a2b3c4d5e6f');
+const OTHER_ID = asClientId('22222222-2222-4222-8222-222222222222');
 let dbCount = 0;
 /** A database name of its own for each test. */
 const fresh = () => `fieldsync-test-${(dbCount += 1)}`;
@@ -68,7 +72,7 @@ describe('IdbSyncStorage', () => {
   it('keeps the queue, the rejections, the rows and the cursor across a reopen (a reload)', async () => {
     const name = fresh();
     const first = await open(name);
-    await first.ensureClientId('client-a');
+    await first.ensureClientId(CLIENT_ID);
     const queued = await first.enqueue({ name: 'ticket.create', args: { id: ticket(1) }, queuedAt: 't0' });
     await first.commit({
       meta: { cursor: asVersion(9), lastMutationId: 0 },
@@ -79,7 +83,7 @@ describe('IdbSyncStorage', () => {
 
     const second = await open(name);
     const state = await second.load();
-    expect(state.meta).toMatchObject({ clientId: 'client-a', cursor: 9, nextMutationId: 2 });
+    expect(state.meta).toMatchObject({ clientId: CLIENT_ID, cursor: 9, nextMutationId: 2 });
     expect(state.base).toEqual(new Map([['ticket/x', { id: 'x' }]]));
     expect(state.pending).toEqual([queued]);
     expect(state.rejections).toEqual([
@@ -89,8 +93,8 @@ describe('IdbSyncStorage', () => {
 
   it('keeps the first client id it is given', async () => {
     const storage = await open(fresh());
-    await expect(storage.ensureClientId('a')).resolves.toBe('a');
-    await expect(storage.ensureClientId('b')).resolves.toBe('a');
+    await expect(storage.ensureClientId(CLIENT_ID)).resolves.toBe(CLIENT_ID);
+    await expect(storage.ensureClientId(OTHER_ID)).resolves.toBe(CLIENT_ID);
   });
 
   it('gives every mutation its own id, also from two connections at once (two tabs)', async () => {
@@ -128,8 +132,8 @@ describe('IdbSyncStorage', () => {
 
   it('raises the next mutation id, never lowers it', async () => {
     const storage = await open(fresh());
-    await storage.commit({ meta: { nextMutationIdAtLeast: 8 } });
-    await storage.commit({ meta: { nextMutationIdAtLeast: 3 } });
+    await storage.commit({ meta: { nextMutationIdAtLeast: asMutationId(8) } });
+    await storage.commit({ meta: { nextMutationIdAtLeast: asMutationId(3) } });
     expect((await storage.load()).meta.nextMutationId).toBe(8);
   });
 
@@ -148,11 +152,11 @@ describe('IdbSyncStorage', () => {
 
   it('restarts under a new client id: handled mutations wait for a pull, the rest is renumbered', async () => {
     const storage = await open(fresh());
-    await storage.ensureClientId('old');
+    await storage.ensureClientId(CLIENT_ID);
     for (let i = 0; i < 4; i += 1) await storage.enqueue({ name: 'ticket.create', args: { n: i }, queuedAt: 't' });
-    await storage.restartClient('new', 2);
+    await storage.restartClient(OTHER_ID, asMutationId(2));
     const { meta, pending } = await storage.load();
-    expect(meta).toMatchObject({ clientId: 'new', lastMutationId: 0, nextMutationId: 3, retiring: null });
+    expect(meta).toMatchObject({ clientId: OTHER_ID, lastMutationId: 0, nextMutationId: 3, retiring: null });
     expect(pending.map((q) => [q.mutation.id, q.awaitingPull ?? false])).toEqual([
       [1, true],
       [2, true],
@@ -171,6 +175,21 @@ describe('IdbSyncStorage', () => {
 
     const { meta: loaded } = await (await open(name)).load();
     expect(loaded).toMatchObject({ cursor: null, lastMutationId: 7, nextMutationId: 8 });
+  });
+
+  it.each([
+    ['a client id that is not a lower-case UUID', { clientId: 'C1' }],
+    ['a client id being retired that is not one', { retiring: 'old-id' }],
+    ['a negative last mutation id', { lastMutationId: -1 }],
+    ['a next mutation id of 0', { nextMutationId: 0 }],
+  ])('refuses a stored state with %s instead of syncing under it', async (_case, damage) => {
+    const name = fresh();
+    (await open(name)).close();
+    const raw = await openDB(name, LOCAL_SCHEMA_VERSION);
+    await raw.put('meta', { ...((await raw.get('meta', 'state')) as object), ...damage }, 'state');
+    raw.close();
+
+    await expect((await open(name)).load()).rejects.toThrow('The stored client state is damaged');
   });
 
   describe('the original client in localStorage', () => {
@@ -209,6 +228,16 @@ describe('IdbSyncStorage', () => {
         { clientId: null, lastMutationId: 4 },
       ],
       ['a negative last id', { fs_state: '{"lastMutationId":-1}' }, { clientId: null, lastMutationId: 0 }],
+      [
+        'a last id that no mutation id can follow',
+        { fs_state: `{"lastMutationId":${Number.MAX_SAFE_INTEGER}}` },
+        { clientId: null, lastMutationId: 0, nextMutationId: 1 },
+      ],
+      [
+        'an id in upper case (the same UUID)',
+        { fs_client_id: LEGACY_ID.toUpperCase() },
+        { clientId: LEGACY_ID, lastMutationId: 0 },
+      ],
     ])('copes with %s', async (_case, entries, expected) => {
       const storage = await open(fresh(), { legacy: localStorageLegacy(legacyStore(entries)) });
       expect((await storage.load()).meta).toMatchObject(expected);
@@ -262,7 +291,7 @@ describe('IdbSyncStorage', () => {
 
   it('serves a client across a reload: the queue is sent after the reload', async () => {
     const name = fresh();
-    const before = new SyncClient({ clientId: 'c1', transport: offline, storage: await open(name) });
+    const before = new SyncClient({ clientId: CLIENT_ID, transport: offline, storage: await open(name) });
     await before.mutate('ticket.create', { id: ticket(1), siteId: SITE, title: 'Offline', description: '' });
     before.dispose();
 
@@ -272,7 +301,7 @@ describe('IdbSyncStorage', () => {
         pushed.push(...req.mutations.map((m) => m.id));
         return Promise.resolve({
           results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         });
       },
       pull: (): Promise<PullResponse> =>
@@ -280,13 +309,13 @@ describe('IdbSyncStorage', () => {
           changes: [],
           nextCursor: asVersion(0),
           hasMore: false,
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
           head: asVersion(0),
         }),
       snapshot: (): Promise<SnapshotPage> =>
         Promise.resolve({ watermark: asVersion(0), head: asVersion(0), rows: [], next: null }),
     };
-    const after = new SyncClient({ clientId: 'c1', transport: online, storage: await open(name) });
+    const after = new SyncClient({ clientId: CLIENT_ID, transport: online, storage: await open(name) });
     try {
       await after.ready;
       expect(after.rows('ticket').map((t) => t.title)).toEqual(['Offline']);

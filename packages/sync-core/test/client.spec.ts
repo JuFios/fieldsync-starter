@@ -7,9 +7,12 @@ import {
   type SyncClientOptions,
   type TimerHandle,
   type Transport,
+  type LastMutationId,
+  asMutationId,
 } from '../src';
 import type { SyncClock } from '../src';
 import type { PullResponse, PushRequest, PushResponse, SnapshotPage } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 /** The snapshot of an empty server. */
 const EMPTY_SNAPSHOT: SnapshotPage = { watermark: asVersion(0), head: asVersion(0), rows: [], next: null };
@@ -108,7 +111,7 @@ class HangingTransport implements Transport {
  */
 class FakeServer {
   readonly applied: Array<{ clientId: string; id: number; title: unknown }> = [];
-  private readonly last = new Map<string, number>();
+  private readonly last = new Map<string, LastMutationId>();
 
   transport(): Transport {
     return {
@@ -183,7 +186,7 @@ function newClient(opts: SyncClientOptions): SyncClient {
 }
 
 function makeClient(transport: Transport = new OfflineTransport()): SyncClient {
-  return newClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+  return newClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage() });
 }
 
 afterEach(() => {
@@ -245,7 +248,13 @@ describe('SyncClient', () => {
     const clock = new ManualClock();
     const transport = new OfflineTransport();
     // Half of the first ceiling (1 s): the retry comes after 500 ms.
-    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock, random: () => 0.5 });
+    const client = newClient({
+      clientId: CLIENT_ID,
+      transport,
+      storage: new MemoryStorage(),
+      clock,
+      random: () => 0.5,
+    });
     await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
     await client.sync();
     expect(client.rows('ticket')[0]?.createdAt).toBe('2030-01-01T00:00:00.000Z');
@@ -286,7 +295,13 @@ describe('SyncClient', () => {
       snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
     // Just below the ceiling: delays of about 1, 2, 4, 8 s.
-    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock, random: () => 0.999 });
+    const client = newClient({
+      clientId: CLIENT_ID,
+      transport,
+      storage: new MemoryStorage(),
+      clock,
+      random: () => 0.999,
+    });
     await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
     await client.sync();
     const start = clock.now();
@@ -338,14 +353,14 @@ describe('SyncClient', () => {
             message: 'Status is now "done"',
             details,
           })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       pull: () =>
         Promise.resolve({
           changes: [],
           nextCursor: asVersion(0),
           hasMore: false,
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
           head: asVersion(0),
         }),
       snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
@@ -379,7 +394,7 @@ describe('SyncClient', () => {
   it('gives up on a request that never answers and retries', async () => {
     const clock = new ManualClock();
     const transport = new HangingTransport();
-    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
+    const client = newClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage(), clock });
     await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
     precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
     // The push starts once the client read its queue; its timeout runs from then.
@@ -400,12 +415,12 @@ describe('SyncClient', () => {
 
   it('keeps unsynced mutations across a reload', async () => {
     const storage = new MemoryStorage();
-    const before = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+    const before = newClient({ clientId: CLIENT_ID, transport: new OfflineTransport(), storage });
     await before.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Written offline', description: '' });
     await before.sync();
     before.dispose(); // the page goes away
 
-    const after = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
+    const after = newClient({ clientId: CLIENT_ID, transport: new OfflineTransport(), storage });
     await after.ready;
     expect(after.pendingCount).toBe(1);
     expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
@@ -414,8 +429,8 @@ describe('SyncClient', () => {
   it('does not lose mutations when two tabs share one clientId', async () => {
     const server = new FakeServer();
     const storage = new MemoryStorage();
-    const tabA = newClient({ clientId: 'c1', transport: server.transport(), storage });
-    const tabB = newClient({ clientId: 'c1', transport: server.transport(), storage });
+    const tabA = newClient({ clientId: CLIENT_ID, transport: server.transport(), storage });
+    const tabB = newClient({ clientId: CLIENT_ID, transport: server.transport(), storage });
     await tabA.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab A', description: '' });
     await tabA.sync();
     await tabB.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab B', description: '' });

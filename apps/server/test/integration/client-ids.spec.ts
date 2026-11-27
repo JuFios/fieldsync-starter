@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { MutationRejected, type Mutation, type PushResponse } from '@fieldsync/sync-core';
+import {
+  MutationRejected,
+  type Mutation,
+  type PullResponse,
+  type PushResponse,
+  asMutationId,
+} from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { Db } from '../../src/db';
 import { applyMutation } from '../../src/server-tx';
@@ -10,11 +16,11 @@ import { describeWithDb, useIntegration } from '../support/integration';
 describeWithDb('client-generated ids', () => {
   const ctx = useIntegration();
 
-  const push = (user: TestUser, mutations: Mutation[], clientId = randomUUID()) =>
+  const push = (user: TestUser, mutations: Mutation[], clientId: string = randomUUID()) =>
     ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, user.token);
 
   const create = (id: string, siteId: string, title: string): Mutation => ({
-    id: 1,
+    id: asMutationId(1),
     name: 'ticket.create',
     args: { id, siteId, title, description: '' },
   });
@@ -72,7 +78,7 @@ describeWithDb('client-generated ids', () => {
     const id = randomUUID();
     const setup = await push(
       tech,
-      [create(id, site, 'Deleted'), { id: 2, name: 'ticket.delete', args: { id, siteId: site } }],
+      [create(id, site, 'Deleted'), { id: asMutationId(2), name: 'ticket.delete', args: { id, siteId: site } }],
       clientId,
     );
     precondition(setup.status === 201, `setup push answered ${setup.status}`);
@@ -106,16 +112,40 @@ describeWithDb('client-generated ids', () => {
     const part = randomUUID();
     const setup = await push(tech, [
       create(ticket, site, 'Pump'),
-      { id: 2, name: 'part.add', args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 1 } },
+      {
+        id: asMutationId(2),
+        name: 'part.add',
+        args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 1 },
+      },
     ]);
     precondition(setup.status === 201, `setup push answered ${setup.status}`);
 
     const res = await push(tech, [
-      { id: 1, name: 'part.add', args: { id: part, ticketId: ticket, siteId: site, name: 'Valve', quantity: 5 } },
+      {
+        id: asMutationId(1),
+        name: 'part.add',
+        args: { id: part, ticketId: ticket, siteId: site, name: 'Valve', quantity: 5 },
+      },
     ]);
     expect(res.status === 201 && res.body.results[0]?.status === 'applied').toBe(false);
     const { rows } = await ctx.db.query(`SELECT data FROM entities WHERE entity = 'part' AND id = $1`, [part]);
     expect(rows).toEqual([{ data: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 1 } }]);
+  });
+
+  it('takes a client id written in another case as the same id (RFC 9562)', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const clientId = randomUUID();
+    const upper = clientId.toUpperCase();
+    const first = await push(tech, [create(randomUUID(), site, 'Once')], upper);
+    expect(first.body.results).toMatchObject([{ id: 1, status: 'applied' }]);
+    const copy = await push(tech, [create(randomUUID(), site, 'Once')], clientId);
+    expect(copy.body.results).toMatchObject([{ id: 1, status: 'duplicate' }]);
+
+    const pulled = await ctx.api.get<PullResponse>(`/sync/pull?cursor=0&clientId=${upper}`, tech.token);
+    expect({ status: pulled.status, last: pulled.body.lastMutationId }).toEqual({ status: 200, last: 1 });
+    const retired = await ctx.api.request('DELETE', `/sync/clients/${upper}`, { token: tech.token });
+    expect({ status: retired.status, body: retired.body }).toEqual({ status: 200, body: { lastMutationId: 1 } });
   });
 
   it('rejects a create whose id is taken with ID_CONFLICT', async () => {

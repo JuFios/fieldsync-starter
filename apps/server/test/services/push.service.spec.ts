@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { MutationRejected, rejectWith, type ReceivedMutation } from '@fieldsync/sync-core';
+import { MutationRejected, rejectWith, type ReceivedMutation, asMutationId, asClientId } from '@fieldsync/sync-core';
 import { Clock } from '../../src/clock';
 import { Db } from '../../src/db';
 import { ProblemException } from '../../src/problem';
@@ -15,11 +15,15 @@ const finish = jest.mocked(finishMutation);
 
 const NOW = new Date('2026-11-26T12:00:00.000Z');
 const USER = { id: 'user-1', role: 'technician' as const };
-const CLIENT = '0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b';
+const CLIENT = asClientId('0b7f3c1e-2a4d-4e5f-8a6b-7c8d9e0f1a2b');
 const NORTH = 'site-north';
 const ENTRY: LogEntry = { siteId: NORTH, entity: 'ticket', id: 't1', op: 'put', data: { title: 'T' } };
 
-const mutation = (id: number): ReceivedMutation => ({ id, name: 'ticket.setStatus', args: { id: 't1' } });
+const mutation = (id: number): ReceivedMutation => ({
+  id: asMutationId(id),
+  name: 'ticket.setStatus',
+  args: { id: 't1' },
+});
 
 /**
  * The clients and mutation_results tables as the SQL of the push sees them: answers the statements

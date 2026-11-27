@@ -1,8 +1,11 @@
 import { createParser } from 'eventsource-parser';
 import {
+  isLastMutationId,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
+  type ClientId,
   type EntityName,
+  type LastMutationId,
   type PullResponse,
   type PushRequest,
   type PushResponse,
@@ -81,7 +84,7 @@ export interface RequestOptions {
 
 export interface Transport {
   push(req: PushRequest, init?: RequestOptions): Promise<PushResponse>;
-  pull(cursor: number, clientId: string, limit?: number, init?: RequestOptions): Promise<PullResponse>;
+  pull(cursor: number, clientId: ClientId, limit?: number, init?: RequestOptions): Promise<PullResponse>;
   /** One page of a snapshot of the live state (see {@link SnapshotPage}). */
   snapshot(req: SnapshotRequest, init?: RequestOptions): Promise<SnapshotPage>;
   /**
@@ -95,7 +98,7 @@ export interface Transport {
    * with the last mutation id handled under it, which no later request changes. Optional: without it
    * a client cannot recover from a 409 and reports it.
    */
-  retire?(clientId: string, init?: RequestOptions): Promise<{ lastMutationId: number }>;
+  retire?(clientId: ClientId, init?: RequestOptions): Promise<{ lastMutationId: LastMutationId }>;
 }
 
 const ENTITIES: readonly EntityName[] = ['ticket', 'part'];
@@ -158,7 +161,7 @@ export class HttpTransport implements Transport {
     return (await res.json()) as PushResponse;
   }
 
-  async pull(cursor: number, clientId: string, limit = 500, init: RequestOptions = {}): Promise<PullResponse> {
+  async pull(cursor: number, clientId: ClientId, limit = 500, init: RequestOptions = {}): Promise<PullResponse> {
     const qs = new URLSearchParams({ cursor: String(cursor), clientId, limit: String(limit) });
     const res = await this.fetchImpl(`${this.baseUrl}/sync/pull?${qs.toString()}`, {
       ...signalOf(init),
@@ -202,7 +205,7 @@ export class HttpTransport implements Transport {
     }
   }
 
-  async retire(clientId: string, init: RequestOptions = {}): Promise<{ lastMutationId: number }> {
+  async retire(clientId: ClientId, init: RequestOptions = {}): Promise<{ lastMutationId: LastMutationId }> {
     const res = await this.fetchImpl(`${this.baseUrl}/sync/clients/${encodeURIComponent(clientId)}`, {
       ...signalOf(init),
       method: 'DELETE',
@@ -212,7 +215,7 @@ export class HttpTransport implements Transport {
     const body: unknown = await res.json();
     const last =
       body !== null && typeof body === 'object' ? (body as { lastMutationId?: unknown }).lastMutationId : undefined;
-    if (typeof last !== 'number' || !Number.isSafeInteger(last) || last < 0) {
+    if (!isLastMutationId(last)) {
       throw new TransportError(res.status, 'BAD_RESPONSE', 'retire failed: no last mutation id');
     }
     return { lastMutationId: last };

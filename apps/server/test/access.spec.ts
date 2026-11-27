@@ -1,4 +1,4 @@
-import { MutationRejected, type Mutation } from '@fieldsync/sync-core';
+import { MutationRejected, type Mutation, asMutationId } from '@fieldsync/sync-core';
 import { accessibleSites, authorize } from '../src/access';
 
 const SITE_A = '00000000-0000-4000-8000-0000000000a1';
@@ -25,7 +25,7 @@ function fakeDb(allSites: string[], assigned: Record<string, string[]>) {
 const db = fakeDb([SITE_A, SITE_B], { [TECH.id]: [SITE_A] });
 
 const setStatus = (args: Record<string, unknown>): Mutation => ({
-  id: 1,
+  id: asMutationId(1),
   name: 'ticket.setStatus',
   args: { id: 'x', status: 'done', ...args },
 });

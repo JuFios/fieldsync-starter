@@ -13,6 +13,61 @@ export function asVersion(n: number): Version {
   return n as Version;
 }
 
+/**
+ * The id a client gives one of its mutations: 1, 2, 3, … per client id. Branded like
+ * {@link Version}; on the wire it is a plain JSON number.
+ */
+export type MutationId = number & { readonly __brand: 'MutationId' };
+
+/** Whether a value is a mutation id: a positive integer that JSON carries exactly. */
+export function isMutationId(value: unknown): value is MutationId {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+/** A mutation id from a number, see {@link isMutationId}. Throws a RangeError otherwise. */
+export function asMutationId(n: number): MutationId {
+  if (!isMutationId(n)) throw new RangeError(`not a mutation id: ${n}`);
+  return n;
+}
+
+/**
+ * The last mutation id handled for a client id, 0 while there is none. A union with the literal and
+ * not a brand of its own: it is a mutation id as soon as it is not 0, with no conversion between the
+ * two, and no other number (a {@link Version}, a count) can take its place.
+ */
+export type LastMutationId = MutationId | 0;
+
+/** Whether a value is a {@link LastMutationId}: 0 or a mutation id. */
+export function isLastMutationId(value: unknown): value is LastMutationId {
+  return value === 0 || isMutationId(value);
+}
+
+/** A {@link LastMutationId} from a number, see {@link isLastMutationId}. Throws a RangeError otherwise. */
+export function asLastMutationId(n: number): LastMutationId {
+  if (!isLastMutationId(n)) throw new RangeError(`not a last mutation id: ${n}`);
+  return n;
+}
+
+/**
+ * The id of a client installation: a UUID in lower case, the form `crypto.randomUUID` and
+ * PostgreSQL write. A UUID in another case is the same id (RFC 9562, section 4), so whoever takes
+ * one from outside lowers it first. Branded so that no other string can take its place.
+ */
+export type ClientId = string & { readonly __brand: 'ClientId' };
+
+const LOWER_CASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether a value is a client id, see {@link ClientId}. */
+export function isClientId(value: unknown): value is ClientId {
+  return typeof value === 'string' && LOWER_CASE_UUID.test(value);
+}
+
+/** A client id from a string, see {@link isClientId}. Throws a RangeError otherwise. */
+export function asClientId(value: string): ClientId {
+  if (!isClientId(value)) throw new RangeError(`not a client id (a UUID in lower case): ${value}`);
+  return value;
+}
+
 export type Row = Record<string, unknown>;
 
 export type MutatorName =
@@ -20,7 +75,7 @@ export type MutatorName =
 
 export interface Mutation {
   /** Strictly increasing per client, starting at 1. */
-  id: number;
+  id: MutationId;
   name: MutatorName;
   args: Record<string, unknown>;
 }
@@ -75,13 +130,13 @@ export type MutationResult =
    * `version` is the change-log version of the mutation's last change: a client has the mutation's
    * effect once its cursor reaches it. Absent when the mutation changed nothing.
    */
-  | { id: number; status: 'applied'; version?: Version }
+  | { id: MutationId; status: 'applied'; version?: Version }
   /**
    * The server had this mutation id already, so it applied nothing now; `version` as for `applied`
    * (absent too when the original result has expired, see the change-log retention).
    */
-  | { id: number; status: 'duplicate'; version?: Version }
-  | ({ id: number; status: 'rejected' } & Rejection);
+  | { id: MutationId; status: 'duplicate'; version?: Version }
+  | ({ id: MutationId; status: 'rejected' } & Rejection);
 
 export type MutationStatus = MutationResult['status'];
 
@@ -96,20 +151,20 @@ export const MAX_PUSH_BODY_BYTES = 1_048_576;
 export const MAX_PUSH_MUTATIONS = 100;
 
 export interface PushRequest {
-  clientId: string;
+  clientId: ClientId;
   mutations: Mutation[];
 }
 
 /** A mutation as the server receives it: any name may arrive, unknown ones are rejected. */
 export interface ReceivedMutation {
-  id: number;
+  id: MutationId;
   name: string;
   args: Record<string, unknown>;
 }
 
 export interface PushResponse {
   results: MutationResult[];
-  lastMutationId: number;
+  lastMutationId: LastMutationId;
 }
 
 export interface Change {
@@ -125,7 +180,7 @@ export interface PullResponse {
   changes: Change[];
   nextCursor: Version;
   hasMore: boolean;
-  lastMutationId: number;
+  lastMutationId: LastMutationId;
   /**
    * The head of the log in the database snapshot this page was read from; `lastMutationId` comes from
    * the same snapshot. Every change up to it is on this page or a later one. A client that keeps

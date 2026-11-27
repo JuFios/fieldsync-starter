@@ -1497,6 +1497,7 @@ The fix belongs to the access-control change; this change adds the known-defect 
 | `packages/sync-core/test/client.spec.ts` "retries and stamps optimistic rows…" | The client gets `random: () => 0.5` and the retry comes after 500 ms instead of 5 s | Retries use exponential backoff with jitter (task 3.3.3) instead of a fixed 5 s |
 | `packages/sync-core/test/client.spec.ts` F-10, F-11, F-13 | Known defects become regular tests; F-10 waits for `ready`, F-13 uses the client's clock and checks the `TIMEOUT` error | Fixed by the offline-client change |
 | `e2e/ticket-sharing.spec.ts` | Expects `synced · 0 pending` instead of `idle · 0 pending` | The status line shows the indicator of task 3.3.3 |
+| `packages/sync-core/test/client.spec.ts` (all that name a client or answer with ids), `apps/server/test/access.spec.ts` | The client id `c1` becomes a UUID constant, and the mutation ids of fake answers and mutations are built with `asMutationId`; no assertion changed | Mutation and client ids are branded types, so a version cannot stand in for a mutation id; a client id is a lower-case UUID (the server has accepted UUIDs only since F-29) |
 | `apps/server/test/access.spec.ts` | Tests renamed to what they check; the fake answers per query; admin and missing-`siteId` cases added | F-04 |
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
 | `apps/server/test/sync.integration.spec.ts` | Removed; replaced by `test/integration/sync.characterization.spec.ts` | F-05 |

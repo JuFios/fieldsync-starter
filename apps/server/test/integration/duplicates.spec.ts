@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import type { TestUser } from '../support/fixtures';
@@ -21,8 +22,16 @@ describeWithDb('parallel duplicates of one mutation', () => {
     const ticket = randomUUID();
     const part = randomUUID();
     const res = await push(user, randomUUID(), [
-      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'Pump', description: '' } },
-      { id: 2, name: 'part.add', args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity } },
+      {
+        id: asMutationId(1),
+        name: 'ticket.create',
+        args: { id: ticket, siteId: site, title: 'Pump', description: '' },
+      },
+      {
+        id: asMutationId(2),
+        name: 'part.add',
+        args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity },
+      },
     ]);
     precondition(res.status === 201, `setup push answered ${res.status}`);
     return part;
@@ -42,7 +51,7 @@ describeWithDb('parallel duplicates of one mutation', () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const part = await partWithQuantity(tech, site, 1);
       const clientId = randomUUID();
-      const adjust: Mutation = { id: 1, name: 'part.adjust', args: { id: part, siteId: site, delta: 1 } };
+      const adjust: Mutation = { id: asMutationId(1), name: 'part.adjust', args: { id: part, siteId: site, delta: 1 } };
       const answers = await Promise.all(Array.from({ length: COPIES }, () => push(tech, clientId, [adjust])));
       const outcome = {
         round,
@@ -59,7 +68,7 @@ describeWithDb('parallel duplicates of one mutation', () => {
     const tech = await ctx.fixtures.technician(site);
     const part = await partWithQuantity(tech, site, 1);
     const clientId = randomUUID();
-    const tooMuch: Mutation = { id: 1, name: 'part.adjust', args: { id: part, siteId: site, delta: -5 } };
+    const tooMuch: Mutation = { id: asMutationId(1), name: 'part.adjust', args: { id: part, siteId: site, delta: -5 } };
     const answers = await Promise.all(Array.from({ length: COPIES }, () => push(tech, clientId, [tooMuch])));
     const rejection = {
       status: 201,
@@ -84,7 +93,7 @@ describeWithDb('parallel duplicates of one mutation', () => {
     const tech = await ctx.fixtures.technician(site);
     const part = await partWithQuantity(tech, site, 1);
     const clientId = randomUUID();
-    const tooMuch: Mutation = { id: 1, name: 'part.adjust', args: { id: part, siteId: site, delta: -5 } };
+    const tooMuch: Mutation = { id: asMutationId(1), name: 'part.adjust', args: { id: part, siteId: site, delta: -5 } };
     const first = await push(tech, clientId, [tooMuch]);
     const retry = await push(tech, clientId, [tooMuch]);
     expect(retry.body).toEqual(first.body);
@@ -95,7 +104,11 @@ describeWithDb('parallel duplicates of one mutation', () => {
     const tech = await ctx.fixtures.technician(site);
     const part = await partWithQuantity(tech, site, 1);
     const clientId = randomUUID();
-    const adjust = (id: number): Mutation => ({ id, name: 'part.adjust', args: { id: part, siteId: site, delta: id } });
+    const adjust = (id: number): Mutation => ({
+      id: asMutationId(id),
+      name: 'part.adjust',
+      args: { id: part, siteId: site, delta: id },
+    });
     // A retry that adds the next mutations races the original request.
     const answers = await Promise.all([
       push(tech, clientId, [adjust(1)]),

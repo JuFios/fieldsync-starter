@@ -1,4 +1,14 @@
-import type { Mutation, MutatorName, Rejection, Row, Version } from './types';
+import {
+  asMutationId,
+  type ClientId,
+  type LastMutationId,
+  type Mutation,
+  type MutationId,
+  type MutatorName,
+  type Rejection,
+  type Row,
+  type Version,
+} from './types';
 
 /**
  * The format version of a queued mutation (`StoredMutation.v`): what its name and arguments mean.
@@ -47,17 +57,17 @@ export interface UpdateRequired {
 /** The client's own state next to the server's rows. */
 export interface SyncMeta {
   /** Null until the client picked one (on its first start). */
-  clientId: string | null;
+  clientId: ClientId | null;
   /** Null while the client has no state read from the server: it then starts with a snapshot. */
   cursor: Version | null;
   /** The last mutation id the server handled for `clientId`. */
-  lastMutationId: number;
+  lastMutationId: LastMutationId;
   /** The id the next queued mutation gets. */
-  nextMutationId: number;
+  nextMutationId: MutationId;
   /** Set when the server refused the protocol version this client speaks. */
   updateRequired: UpdateRequired | null;
   /** A client id being given up after a 409 (see `SyncClient`); cleared once it is retired. */
-  retiring: string | null;
+  retiring: ClientId | null;
 }
 
 /** Everything a client keeps. */
@@ -82,7 +92,7 @@ export interface NewMutation {
  * `nextMutationId` only grows: `nextMutationIdAtLeast` raises it, never lowers it.
  */
 export interface StateChange {
-  meta?: Partial<Omit<SyncMeta, 'clientId' | 'nextMutationId'>> & { nextMutationIdAtLeast?: number };
+  meta?: Partial<Omit<SyncMeta, 'clientId' | 'nextMutationId'>> & { nextMutationIdAtLeast?: MutationId };
   base?: {
     /** Remove every row first (a snapshot replaces the state). */
     replace?: boolean;
@@ -109,7 +119,7 @@ export interface SyncStorage {
   /** The queue and the rejections only (what other tabs add to), without reading every row. */
   loadQueue(): Promise<Pick<StoredState, 'pending' | 'rejections'>>;
   /** The client id: the stored one, or else `candidate`, which is then stored. */
-  ensureClientId(candidate: string): Promise<string>;
+  ensureClientId(candidate: ClientId): Promise<ClientId>;
   /**
    * Gives the mutation the next id and queue position and stores it, in one transaction: two tabs on
    * one storage never give two mutations the same id.
@@ -121,12 +131,19 @@ export interface SyncStorage {
    * id up to `lastHandled` were handled under the old id and wait for a pull; the others are
    * renumbered from 1, in queue order, under the new id. One transaction.
    */
-  restartClient(clientId: string, lastHandled: number): Promise<void>;
+  restartClient(clientId: ClientId, lastHandled: LastMutationId): Promise<void>;
   close(): void;
 }
 
 function emptyMeta(): SyncMeta {
-  return { clientId: null, cursor: null, lastMutationId: 0, nextMutationId: 1, updateRequired: null, retiring: null };
+  return {
+    clientId: null,
+    cursor: null,
+    lastMutationId: 0,
+    nextMutationId: asMutationId(1),
+    updateRequired: null,
+    retiring: null,
+  };
 }
 
 /** What a state change does to the meta record (shared by the storages). */
@@ -134,18 +151,20 @@ export function changedMeta(meta: SyncMeta, change: StateChange['meta']): SyncMe
   if (!change) return meta;
   const { nextMutationIdAtLeast, ...rest } = change;
   const next = { ...meta, ...rest };
-  if (nextMutationIdAtLeast !== undefined) next.nextMutationId = Math.max(next.nextMutationId, nextMutationIdAtLeast);
+  if (nextMutationIdAtLeast !== undefined && nextMutationIdAtLeast > next.nextMutationId) {
+    next.nextMutationId = nextMutationIdAtLeast;
+  }
   return next;
 }
 
 /** The queue after a restart under a new client id (shared by the storages, see `restartClient`). */
-export function restartedQueue(pending: readonly StoredMutation[], lastHandled: number): StoredMutation[] {
+export function restartedQueue(pending: readonly StoredMutation[], lastHandled: LastMutationId): StoredMutation[] {
   let id = 0;
   return pending.map((q) => {
     if (q.appliedAt !== undefined || q.awaitingPull) return q;
     if (q.mutation.id <= lastHandled) return { ...q, awaitingPull: true };
     id += 1;
-    return { ...q, mutation: { ...q.mutation, id } };
+    return { ...q, mutation: { ...q.mutation, id: asMutationId(id) } };
   });
 }
 
@@ -176,7 +195,7 @@ export class MemoryStorage implements SyncStorage {
     return Promise.resolve(structuredClone({ pending: this.pending, rejections: this.rejections }));
   }
 
-  ensureClientId(candidate: string): Promise<string> {
+  ensureClientId(candidate: ClientId): Promise<ClientId> {
     this.meta.clientId ??= candidate;
     return Promise.resolve(this.meta.clientId);
   }
@@ -189,7 +208,7 @@ export class MemoryStorage implements SyncStorage {
       mutation: { id: this.meta.nextMutationId, name: entry.name, args: structuredClone(entry.args) },
       queuedAt: entry.queuedAt,
     };
-    this.meta.nextMutationId += 1;
+    this.meta.nextMutationId = asMutationId(this.meta.nextMutationId + 1);
     this.pending.push(stored);
     return Promise.resolve(structuredClone(stored));
   }
@@ -211,10 +230,11 @@ export class MemoryStorage implements SyncStorage {
     return Promise.resolve();
   }
 
-  restartClient(clientId: string, lastHandled: number): Promise<void> {
+  restartClient(clientId: ClientId, lastHandled: LastMutationId): Promise<void> {
     this.pending = restartedQueue(this.pending, lastHandled);
     const renumbered = this.pending.filter((q) => q.appliedAt === undefined && !q.awaitingPull).length;
-    this.meta = { ...this.meta, clientId, lastMutationId: 0, nextMutationId: renumbered + 1, retiring: null };
+    const nextMutationId = asMutationId(renumbered + 1);
+    this.meta = { ...this.meta, clientId, lastMutationId: 0, nextMutationId, retiring: null };
     return Promise.resolve();
   }
 

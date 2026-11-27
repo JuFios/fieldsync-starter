@@ -16,7 +16,10 @@ import {
   type SnapshotRequest,
   type SyncStatus,
   type Transport,
+  asLastMutationId,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
@@ -75,13 +78,19 @@ const pulled =
     head = hasMore ? nextCursor + 1 : nextCursor,
   ) =>
   () =>
-    Promise.resolve({ changes, nextCursor: asVersion(nextCursor), hasMore, lastMutationId, head: asVersion(head) });
+    Promise.resolve({
+      changes,
+      nextCursor: asVersion(nextCursor),
+      hasMore,
+      lastMutationId: asLastMutationId(lastMutationId),
+      head: asVersion(head),
+    });
 
 const clients: SyncClient[] = [];
 function client(transport: Transport, stored?: { cursor: number; lastMutationId: number; base: Record<string, Row> }) {
   const storage = new MemoryStorage();
   if (stored) storeState(storage, stored);
-  const c = new SyncClient({ clientId: 'c1', transport, storage });
+  const c = new SyncClient({ clientId: CLIENT_ID, transport, storage });
   clients.push(c);
   return { client: c, storage };
 }
@@ -203,7 +212,7 @@ describe('SyncClient snapshots', () => {
           results: req.mutations
             .filter((m) => m.id === 1)
             .map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(20) })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       );
       t.pulls.push(() => Promise.reject(reset()));
@@ -234,7 +243,12 @@ describe('SyncClient snapshots', () => {
       await c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
       await c.sync();
       // Next time the copy is answered as a duplicate whose result has expired, and the pull is reset.
-      t.pushes.push(() => Promise.resolve({ results: [{ id: 1, status: 'duplicate' as const }], lastMutationId: 1 }));
+      t.pushes.push(() =>
+        Promise.resolve({
+          results: [{ id: asMutationId(1), status: 'duplicate' as const }],
+          lastMutationId: asMutationId(1),
+        }),
+      );
       t.pulls.push(() => Promise.reject(reset()), pulled([], 40, 1));
       t.snapshots.push(page(40, [{ entity: 'part', id: PART, siteId: SITE, data: part(5) }]));
 
@@ -249,7 +263,7 @@ describe('SyncClient snapshots', () => {
       t.pushes.push((req) =>
         Promise.resolve({
           results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(50) })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       );
       // The snapshot was read before the mutation's change (watermark 40), and the log after it is interrupted.
@@ -276,7 +290,7 @@ describe('SyncClient snapshots', () => {
             code: 'NOT_FOUND' as const,
             message: 'gone',
           })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       );
       t.pulls.push(() => Promise.reject(reset()), pulled([], 9, 1));

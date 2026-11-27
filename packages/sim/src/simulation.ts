@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  asClientId,
   HttpTransport,
   MemoryStorage,
   SyncClient,
@@ -378,7 +379,7 @@ export class SimSystem {
           stream: (onEvent, init) => this.openStream(device, onEvent, init),
         };
         return new SyncClient({
-          clientId: simUuid(3, index + 1),
+          clientId: asClientId(simUuid(3, index + 1)),
           transport,
           storage: device.storage,
           tabs: device.group.tab(),

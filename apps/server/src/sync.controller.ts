@@ -27,12 +27,14 @@ import { PushService } from './push.service';
 import { SnapshotService } from './snapshot.service';
 import { StreamService } from './stream.service';
 import {
+  clientIdOf,
   ClientParamsDto,
   ProblemDto,
   PullQueryDto,
   PullResponseDto,
   PushRequestDto,
   PushResponseDto,
+  pushRequestOf,
   RetiredClientDto,
   SnapshotPageDto,
   SnapshotQueryDto,
@@ -98,7 +100,7 @@ export class SyncController {
     type: ProblemDto,
   })
   push(@Req() req: AuthedRequest, @Body() body: PushRequestDto) {
-    return this.pushService.push(req.user, body);
+    return this.pushService.push(req.user, pushRequestOf(body));
   }
 
   @Delete('sync/clients/:clientId')
@@ -117,7 +119,7 @@ export class SyncController {
   })
   @Header('Cache-Control', 'no-store')
   retire(@Req() req: AuthedRequest, @Param() params: ClientParamsDto) {
-    return this.pushService.retire(req.user, params.clientId);
+    return this.pushService.retire(req.user, clientIdOf(params.clientId));
   }
 
   @Get('sync/pull')
@@ -139,7 +141,8 @@ export class SyncController {
   // Sync answers are the user's data and change with every write: never stored by a cache.
   @Header('Cache-Control', 'no-store')
   pull(@Req() req: AuthedRequest, @Query() query: PullQueryDto) {
-    return this.pullService.pull(req.user, query.cursor, query.limit, query.clientId);
+    const clientId = query.clientId === undefined ? undefined : clientIdOf(query.clientId);
+    return this.pullService.pull(req.user, query.cursor, query.limit, clientId);
   }
 
   @Get('sync/snapshot')
