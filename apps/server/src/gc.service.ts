@@ -18,7 +18,10 @@ export interface GcRun {
   results: number;
   /** The floor of the log after the run (as read when no batch ran): pulls with a cursor below it are reset. */
   floor: number;
-  /** True when another GC (in this process or another instance) held the log, so this run did nothing. */
+  /**
+   * True when this run did nothing: another GC (in this process or another instance) held the log,
+   * or the application is shutting down (then `floor` is 0, not read).
+   */
   skipped: boolean;
 }
 
@@ -66,8 +69,8 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     const timer = setInterval(
       () => {
-        // A run that takes longer than the interval is not started twice.
-        if (this.running) return;
+        // A run that takes longer than the interval is not started twice, and none starts on shutdown.
+        if (this.running || this.stopping) return;
         void this.collect().catch((e: Error) => this.logger.error(e.message));
       },
       this.config.get('GC_INTERVAL_MS', { infer: true }),
@@ -98,6 +101,8 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async run(): Promise<GcRun> {
+    // No query once the application shuts down: the pool closes after onModuleDestroy.
+    if (this.stopping) return { log: 0, tombstones: 0, results: 0, floor: 0, skipped: true };
     // The cutoffs come from the same clock that stamps created_at, see Clock.
     const now = this.clock.now().getTime();
     const logCutoff = new Date(now - this.config.get('CHANGELOG_RETENTION_SECONDS', { infer: true }) * 1000);

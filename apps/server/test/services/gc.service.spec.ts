@@ -218,6 +218,18 @@ describe('GcService', () => {
     });
   });
 
+  describe('after onModuleDestroy', () => {
+    it('starts no run and touches no database', async () => {
+      script({ floor: 0, batches: [] });
+      gc.onModuleInit();
+      await gc.onModuleDestroy();
+      await expect(gc.collect()).resolves.toMatchObject({ log: 0, skipped: true });
+      await jest.advanceTimersByTimeAsync(120_000);
+      expect(db.query).not.toHaveBeenCalled();
+      expect(db.tx).not.toHaveBeenCalled();
+    });
+  });
+
   describe('onModuleInit', () => {
     it('registers the GC as a named interval with the configured period', async () => {
       script({
