@@ -103,7 +103,7 @@ export interface Profile {
   linkStates: Readonly<Record<LinkState, number>>;
   /** Users sometimes type text the server must reject (empty, too long, unstorable characters). */
   invalidText: boolean;
-  /** Longest time a `tick` step lets pass, in ms (the client retries after 5 s). */
+  /** Longest time a `tick` step lets pass, in ms (a client first retries within a second, then backs off). */
   maxTickMs: number;
   /**
    * How long an `away` step keeps a client away, in ms of virtual time: longer than the server's

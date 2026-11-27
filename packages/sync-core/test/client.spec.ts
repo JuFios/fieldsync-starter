@@ -244,20 +244,69 @@ describe('SyncClient', () => {
   it('retries and stamps optimistic rows on the clock it is given', async () => {
     const clock = new ManualClock();
     const transport = new OfflineTransport();
-    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
+    // Half of the first ceiling (1 s): the retry comes after 500 ms.
+    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock, random: () => 0.5 });
     await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
     await client.sync();
     expect(client.rows('ticket')[0]?.createdAt).toBe('2030-01-01T00:00:00.000Z');
     expect(transport.pushedIds).toHaveLength(1);
     expect(clock.pendingTimers).toBe(1);
 
-    await clock.advance(4_999);
+    await clock.advance(499);
     expect(transport.pushedIds).toHaveLength(1);
     await clock.advance(1);
     expect(transport.pushedIds).toHaveLength(2);
 
     client.dispose();
     expect(clock.pendingTimers).toBe(0);
+  });
+
+  it('waits longer after each failure in a row, and starts over after a success', async () => {
+    const clock = new ManualClock();
+    let online = false;
+    const pushes: number[] = [];
+    const transport: Transport = {
+      push: (req) => {
+        pushes.push(clock.now());
+        return online
+          ? Promise.resolve({
+              results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
+              lastMutationId: req.mutations.at(-1)?.id ?? 0,
+            })
+          : Promise.reject(new Error('offline'));
+      },
+      pull: () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(0),
+          hasMore: false,
+          lastMutationId: 0,
+          head: asVersion(0),
+        }),
+      snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
+    };
+    // Just below the ceiling: delays of about 1, 2, 4, 8 s.
+    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock, random: () => 0.999 });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
+    await client.sync();
+    const start = clock.now();
+    // Each step is exactly the next expected delay; a retry then fires at its end.
+    for (const delay of [998, 1, 1997, 1, 3995, 1]) await clock.advance(delay);
+    expect(pushes.map((t) => t - start)).toEqual([0, 999, 999 + 1998, 999 + 1998 + 3996]);
+
+    online = true;
+    await clock.advance(10_000);
+    expect(client.status).toBe('idle');
+    online = false;
+    const before = pushes.length;
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'B', description: '' });
+    await client.sync();
+    expect(pushes).toHaveLength(before + 1);
+    // The first delay again (999 ms), not the fifth.
+    await clock.advance(998);
+    expect(pushes).toHaveLength(before + 1);
+    await clock.advance(1);
+    expect(pushes).toHaveLength(before + 2);
   });
 
   it('numbers local mutations sequentially', async () => {

@@ -199,6 +199,21 @@ function guard<T>(run: () => T): T {
   }
 }
 
+/**
+ * A small seeded generator of numbers in [0, 1) (mulberry32), for the clients' retry jitter. Runs
+ * must replay to the same trace, so the clients cannot use Math.random.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /** Runs asynchronous client code; anything it throws or rejects with becomes a {@link ClientError}. */
 async function guardAsync<T>(run: () => Promise<T>): Promise<T> {
   try {
@@ -285,6 +300,8 @@ export class SimSystem {
         storage: new MemoryStorage(),
         clock: this.clock.view(spec.skewMs),
         requestTimeoutMs: profile.requestTimeoutMs,
+        // The jitter of retries, reproducible: the same sequence for this client in every run.
+        random: mulberry32(index + 1),
       });
       return { name, user, client };
     });

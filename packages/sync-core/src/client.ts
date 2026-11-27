@@ -1,3 +1,4 @@
+import { backoffDelay, DEFAULT_BACKOFF, type BackoffPolicy } from './backoff';
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
 import {
@@ -126,6 +127,10 @@ export interface SyncClientOptions {
    * waits as long as the transport does.
    */
   requestTimeoutMs?: number;
+  /** Delays between retries; see {@link DEFAULT_BACKOFF}. */
+  backoff?: BackoffPolicy;
+  /** Random numbers in [0, 1) for the jitter of retries; defaults to `Math.random`. */
+  random?: () => number;
 }
 
 class MapTx implements MutatorTx {
@@ -200,6 +205,10 @@ export class SyncClient {
   private readonly storage: SyncStorage;
   private readonly clock: SyncClock;
   private readonly requestTimeoutMs: number;
+  private readonly backoff: BackoffPolicy;
+  private readonly random: () => number;
+  /** Failed syncs in a row: the exponent of the next retry delay. */
+  private failures = 0;
   private readonly initialClientId: string | undefined;
   private id = '';
   private base = new Map<string, Row>();
@@ -219,7 +228,7 @@ export class SyncClient {
   private rejected: RejectedMutation[] = [];
   private lastError: SyncError | undefined;
   private changeCount = 0;
-  private retryTimer?: TimerHandle;
+  private retryTimer: TimerHandle | undefined;
   private inFlight: Promise<void> | undefined;
   /**
    * A sync was asked for while one was running: run another once it ends. The running one may have
@@ -240,6 +249,8 @@ export class SyncClient {
     this.storage = opts.storage;
     this.clock = opts.clock ?? systemClock;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.backoff = opts.backoff ?? DEFAULT_BACKOFF;
+    this.random = opts.random ?? Math.random;
     this.initialClientId = opts.clientId;
     this.ready = this.load();
   }
@@ -458,6 +469,7 @@ export class SyncClient {
         await this.reload();
       }
       this.lastError = undefined;
+      this.failures = 0;
       this.setStatus('idle');
     } catch (err) {
       // A disposed client has nobody to report to and nothing to retry.
@@ -465,7 +477,7 @@ export class SyncClient {
       this.lastError = syncErrorOf(err);
       // What the server said was not stored: the client is not in sync, whatever the network does.
       this.setStatus(err instanceof StorageFailure ? 'error' : 'offline');
-      this.scheduleRetry();
+      this.scheduleRetry(err);
     }
   }
 
@@ -666,10 +678,20 @@ export class SyncClient {
     this.emit();
   }
 
-  private scheduleRetry(): void {
+  /**
+   * Retries after a failed sync, with exponential backoff and full jitter (see {@link backoffDelay}):
+   * never sooner than a `Retry-After` the server sent. A successful sync resets the delay.
+   */
+  private scheduleRetry(err: unknown): void {
     if (this.disposed) return;
     if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
-    this.retryTimer = this.clock.setTimeout(() => void this.sync(), 5000);
+    const retryAfterMs = err instanceof TransportError ? (err.retryAfterSeconds ?? 0) * 1000 : 0;
+    const delay = backoffDelay(this.failures, this.backoff, this.random, retryAfterMs);
+    this.failures += 1;
+    this.retryTimer = this.clock.setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.sync();
+    }, delay);
   }
 
   private emit(): void {
