@@ -6,6 +6,7 @@ import { DeleteOrphanParts1795910400000 } from './1795910400000-delete-orphan-pa
 import { ClientIdUuid1795996800000 } from './1795996800000-client-id-uuid';
 import { LogFloor1796083200000 } from './1796083200000-log-floor';
 import { LogLifecycleIndexes1796169600000 } from './1796169600000-log-lifecycle-indexes';
+import { KeepTombstones1796256000000 } from './1796256000000-keep-tombstones';
 
 /** All migrations, oldest first. Listed explicitly so the build output needs no file globbing. */
 export const MIGRATIONS = [
@@ -17,4 +18,5 @@ export const MIGRATIONS = [
   ClientIdUuid1795996800000,
   LogFloor1796083200000,
   LogLifecycleIndexes1796169600000,
+  KeepTombstones1796256000000,
 ];

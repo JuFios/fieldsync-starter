@@ -21,10 +21,10 @@ const SETTINGS = {
 interface Script {
   floorTaken?: boolean;
   floor: number;
-  batches: Array<{ stop: number | null; full: boolean; young: boolean; removed?: [number, number, number] }>;
+  batches: Array<{ stop: number | null; full: boolean; young: boolean; removed?: [number, number] }>;
   expired?: number[];
-  /** Tombstones and applied results below the floor, removed after the batches. */
-  belowFloor?: { tombstones?: number[]; results?: number[] };
+  /** Applied results below the floor, removed after the batches. */
+  belowFloor?: number[];
 }
 
 describe('GcService', () => {
@@ -70,20 +70,16 @@ describe('GcService', () => {
       if (sql.includes('DELETE FROM change_log')) {
         const b = batches.shift();
         if (!b) return Promise.reject(new Error('no batch scripted'));
-        const [log, tombstones, results] = b.removed ?? [0, 0, 0];
+        const [log, results] = b.removed ?? [0, 0];
         floor = b.stop ?? floor;
-        return Promise.resolve(
-          result([{ log: String(log), tombstones: String(tombstones), results: String(results) }]),
-        );
+        return Promise.resolve(result([{ log: String(log), results: String(results) }]));
       }
       return Promise.reject(new Error(`unexpected query: ${sql}`));
     });
     const expired = [...(s.expired ?? [0])];
-    const tombstones = [...(s.belowFloor?.tombstones ?? [0])];
-    const results = [...(s.belowFloor?.results ?? [0])];
+    const results = [...(s.belowFloor ?? [0])];
     db.query.mockImplementation((sql) => {
       if (sql.includes('FROM log_floor')) return Promise.resolve(result([{ version: String(floor) }]));
-      if (sql.includes('DELETE FROM entities')) return Promise.resolve(result([], tombstones.shift() ?? 0));
       if (sql.includes("status = 'applied'")) return Promise.resolve(result([], results.shift() ?? 0));
       if (sql.includes('version IS NULL')) return Promise.resolve(result([], expired.shift() ?? 0));
       return Promise.reject(new Error(`unexpected query: ${sql}`));
@@ -95,13 +91,12 @@ describe('GcService', () => {
       script({
         floor: 10,
         batches: [
-          { stop: 110, full: true, young: false, removed: [100, 3, 90] },
-          { stop: 150, full: true, young: true, removed: [40, 1, 30] },
+          { stop: 110, full: true, young: false, removed: [100, 90] },
+          { stop: 150, full: true, young: true, removed: [40, 30] },
         ],
       });
       await expect(gc.collect()).resolves.toEqual({
         log: 140,
-        tombstones: 4,
         results: 120,
         floor: 150,
         skipped: false,
@@ -121,14 +116,14 @@ describe('GcService', () => {
     });
 
     it('stops after a batch that is not full: the log after it is empty', async () => {
-      script({ floor: 0, batches: [{ stop: 40, full: false, young: false, removed: [40, 0, 0] }] });
+      script({ floor: 0, batches: [{ stop: 40, full: false, young: false, removed: [40, 0] }] });
       await expect(gc.collect()).resolves.toMatchObject({ log: 40, floor: 40 });
       expect(db.tx).toHaveBeenCalledTimes(1);
     });
 
     it('removes nothing and keeps the floor when the oldest change is within the retention', async () => {
       script({ floor: 7, batches: [{ stop: 7, full: true, young: true }] });
-      await expect(gc.collect()).resolves.toEqual({ log: 0, tombstones: 0, results: 0, floor: 7, skipped: false });
+      await expect(gc.collect()).resolves.toEqual({ log: 0, results: 0, floor: 7, skipped: false });
       expect(db.inTx.query.mock.calls.some(([sql]) => sql.includes('DELETE FROM change_log'))).toBe(false);
     });
 
@@ -139,7 +134,7 @@ describe('GcService', () => {
 
     it('does nothing when another GC holds the floor', async () => {
       script({ floorTaken: true, floor: 42, batches: [] });
-      await expect(gc.collect()).resolves.toEqual({ log: 0, tombstones: 0, results: 0, floor: 42, skipped: true });
+      await expect(gc.collect()).resolves.toEqual({ log: 0, results: 0, floor: 42, skipped: true });
       expect(db.inTx.query).toHaveBeenCalledTimes(1);
       expect(db.query.mock.calls.some(([sql]) => sql.includes('DELETE'))).toBe(false);
     });
@@ -152,25 +147,26 @@ describe('GcService', () => {
       expect(expired[0][1]).toEqual([new Date('2026-11-26T10:00:00.000Z'), 100]);
     });
 
-    it('removes tombstones and applied results left below the floor, in batches', async () => {
-      script({
-        floor: 500,
-        batches: [{ stop: null, full: false, young: false }],
-        belowFloor: { tombstones: [100, 3], results: [100, 100, 0] },
-      });
-      await expect(gc.collect()).resolves.toMatchObject({ tombstones: 103, results: 200, floor: 500 });
+    it('removes applied results left below the floor, in batches', async () => {
+      script({ floor: 500, batches: [{ stop: null, full: false, young: false }], belowFloor: [100, 100, 0] });
+      await expect(gc.collect()).resolves.toMatchObject({ results: 200, floor: 500 });
       const below = db.query.mock.calls.filter(([sql]) => sql.includes('version <= $1'));
       expect(below.map(([, params]) => params)).toEqual([
-        [500, 100],
-        [500, 100],
         [500, 100],
         [500, 100],
         [500, 100],
       ]);
     });
 
+    it('never removes a tombstone: a deleted id stays taken', async () => {
+      script({ floor: 0, batches: [{ stop: 50, full: false, young: false, removed: [50, 0] }], belowFloor: [0] });
+      await gc.collect();
+      const statements = [...db.query.mock.calls, ...db.inTx.query.mock.calls].map(([sql]) => sql);
+      expect(statements.filter((sql) => /DELETE FROM entities/.test(sql))).toEqual([]);
+    });
+
     it('joins a run already in progress instead of starting a second one', async () => {
-      script({ floor: 0, batches: [{ stop: 5, full: false, young: false, removed: [5, 0, 0] }] });
+      script({ floor: 0, batches: [{ stop: 5, full: false, young: false, removed: [5, 0] }] });
       const [a, b] = [gc.collect(), gc.collect()];
       expect(a).toBe(b);
       await expect(a).resolves.toMatchObject({ log: 5 });
@@ -191,8 +187,8 @@ describe('GcService', () => {
       script({
         floor: 0,
         batches: [
-          { stop: 100, full: true, young: false, removed: [100, 0, 0] },
-          { stop: 200, full: true, young: false, removed: [100, 0, 0] },
+          { stop: 100, full: true, young: false, removed: [100, 0] },
+          { stop: 200, full: true, young: false, removed: [100, 0] },
         ],
       });
       let release: () => void = () => undefined;
