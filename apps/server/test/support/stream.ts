@@ -54,10 +54,10 @@ export function openStream(port: number, headers: Record<string, string>): Promi
 }
 
 /** Polls `check` every 20 ms until it returns true or `ms` pass; returns its last result. */
-export async function eventually(check: () => boolean, ms: number): Promise<boolean> {
+export async function eventually(check: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
-    if (check()) return true;
+    if (await check()) return true;
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
