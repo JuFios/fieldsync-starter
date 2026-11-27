@@ -106,6 +106,8 @@ export interface StateChange {
  */
 export interface SyncStorage {
   load(): Promise<StoredState>;
+  /** The queue and the rejections only (what other tabs add to), without reading every row. */
+  loadQueue(): Promise<Pick<StoredState, 'pending' | 'rejections'>>;
   /** The client id: the stored one, or else `candidate`, which is then stored. */
   ensureClientId(candidate: string): Promise<string>;
   /**
@@ -168,6 +170,10 @@ export class MemoryStorage implements SyncStorage {
         rejections: this.rejections,
       }),
     );
+  }
+
+  loadQueue(): Promise<Pick<StoredState, 'pending' | 'rejections'>> {
+    return Promise.resolve(structuredClone({ pending: this.pending, rejections: this.rejections }));
   }
 
   ensureClientId(candidate: string): Promise<string> {

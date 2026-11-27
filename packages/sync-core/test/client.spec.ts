@@ -382,6 +382,8 @@ describe('SyncClient', () => {
     const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
     await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
     precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
+    // The push starts once the client read its queue; its timeout runs from then.
+    await new Promise((resolve) => setImmediate(resolve));
 
     await clock.advance(DEFAULT_REQUEST_TIMEOUT_MS - 1);
     expect(client.status).toBe('syncing');

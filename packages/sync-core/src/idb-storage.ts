@@ -242,6 +242,16 @@ export class IdbSyncStorage implements SyncStorage {
     };
   }
 
+  async loadQueue(): Promise<Pick<StoredState, 'pending' | 'rejections'>> {
+    const tx = this.db.transaction(['pending', 'rejections'], 'readonly');
+    const [pending, rejections] = await Promise.all([
+      tx.objectStore('pending').getAll(),
+      tx.objectStore('rejections').getAll(),
+      tx.done,
+    ]);
+    return { pending, rejections };
+  }
+
   async ensureClientId(candidate: string): Promise<string> {
     const tx = this.db.transaction('meta', 'readwrite', { durability: 'strict' });
     return writeAll(tx, async () => {

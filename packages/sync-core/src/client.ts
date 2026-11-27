@@ -1,6 +1,7 @@
 import { backoffDelay, DEFAULT_BACKOFF, type BackoffPolicy } from './backoff';
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
+import { soloTab, type TabCoordinator, type TabMessage } from './tabs';
 import {
   MUTATION_FORMAT_VERSION,
   type StateChange,
@@ -87,6 +88,12 @@ function syncErrorOf(err: unknown): SyncError {
   return { status: 0, code: err instanceof RequestTimeout ? 'TIMEOUT' : 'NETWORK' };
 }
 
+const STATUSES: readonly SyncStatus[] = ['idle', 'syncing', 'loading', 'offline', 'error', 'update-required'];
+
+function isSyncStatus(value: string): value is SyncStatus {
+  return (STATUSES as readonly string[]).includes(value);
+}
+
 /** The server will not apply this client id's next mutation: a gap in its ids, or a retired id. */
 function isClientGone(err: unknown): boolean {
   return err instanceof TransportError && (err.code === 'MUTATION_OUT_OF_ORDER' || err.code === 'CLIENT_RETIRED');
@@ -149,6 +156,11 @@ export interface SyncClientOptions {
   random?: () => number;
   /** New client ids (the first one, and one after a 409); defaults to random UUIDs. */
   newClientId?: () => string;
+  /**
+   * The other tabs of the user on the same storage (see {@link BrowserTabs}); by default the client
+   * is alone. Only the leading tab talks to the server.
+   */
+  tabs?: TabCoordinator;
   /**
    * Keep the notification stream open (if the transport has one) and sync on every poke; on by
    * default. Off, the client syncs only when asked to.
@@ -246,6 +258,14 @@ export class SyncClient {
   private readonly initialClientId: string | undefined;
   private readonly live: boolean;
   private readonly newClientId: () => string;
+  private readonly tabs: TabCoordinator;
+  /**
+   * Whether this tab leads: only the leader pushes, pulls and keeps the stream open, so the tabs of
+   * one client id never send its queue at the same time. A follower queues its mutations in the
+   * shared storage and shows what the leader stores (F-11).
+   */
+  private leader = false;
+  private unsubscribeTabs: () => void = () => undefined;
   /** The stream's watchdog and reconnect delay, cleared on dispose. */
   private readonly streamTimers = new Set<TimerHandle>();
   private id = '';
@@ -292,8 +312,9 @@ export class SyncClient {
     this.initialClientId = opts.clientId;
     this.live = opts.live ?? true;
     this.newClientId = opts.newClientId ?? randomClientId;
+    this.tabs = opts.tabs ?? soloTab();
     this.ready = this.load().then(() => {
-      if (this.live && !this.broken && this.transport.stream) void this.runStream();
+      if (this.leader) this.startStream();
     });
   }
 
@@ -324,12 +345,85 @@ export class SyncClient {
         this.updateRequired ??= { version: PROTOCOL_VERSION, min: PROTOCOL_VERSION + 1, max: PROTOCOL_VERSION + 1 };
       }
       if (this.updateRequired) this.currentStatus = 'update-required';
+      this.unsubscribeTabs = this.tabs.subscribe((message) => void this.onTabMessage(message));
+      this.leader = await this.tabs.claim(this.life.signal, () => void this.takeOver());
     } catch (err) {
       this.broken = new StorageFailure(err);
       this.lastError = syncErrorOf(this.broken);
       this.currentStatus = 'error';
     }
     this.emit();
+  }
+
+  /** Whether this tab leads (see `tabs`). */
+  get isLeader(): boolean {
+    return this.leader;
+  }
+
+  private startStream(): void {
+    if (this.live && !this.broken && !this.disposed && this.transport.stream) void this.runStream();
+  }
+
+  /** The tab that led went away: this one leads now, from what is stored, and sends what waits. */
+  private async takeOver(): Promise<void> {
+    if (this.disposed) return;
+    this.leader = true;
+    await this.reloadState(true).catch(() => undefined);
+    this.startStream();
+    void this.sync();
+  }
+
+  /**
+   * Reads the stored state again (another tab changed it). The rows and the cursor are only reread
+   * when another tab may have written them, that is when this one does not lead.
+   */
+  private async reloadState(everything: boolean): Promise<void> {
+    const state = everything ? await this.storage.load() : { ...(await this.storage.loadQueue()), meta: undefined };
+    if (this.disposed) return;
+    if (state.meta) {
+      this.id = state.meta.clientId ?? this.id;
+      this.lastMutationId = state.meta.lastMutationId;
+      this.retiring = state.meta.retiring;
+      if (state.meta.cursor !== null) {
+        this.cursor = state.meta.cursor;
+        this.base = state.base;
+        this.hasState = true;
+      }
+    }
+    this.pending = state.pending;
+    this.rejected = state.rejections.map(({ seq: _seq, ...rejection }) => rejection);
+    this.emit();
+  }
+
+  /** Reads the queue and the rejections as stored (other tabs add to them). */
+  private async readQueue(): Promise<Awaited<ReturnType<SyncStorage['loadQueue']>>> {
+    let stored: Awaited<ReturnType<SyncStorage['loadQueue']>>;
+    try {
+      stored = await this.storage.loadQueue();
+    } catch (err) {
+      throw new StorageFailure(err);
+    }
+    if (this.disposed) throw new ClientDisposed();
+    return stored;
+  }
+
+  private async onTabMessage(message: TabMessage): Promise<void> {
+    if (this.disposed) return;
+    switch (message.kind) {
+      case 'enqueued':
+      case 'changed':
+        await this.reloadState(!this.leader).catch(() => undefined);
+        if (this.leader && message.kind === 'enqueued') void this.start();
+        return;
+      case 'sync':
+        if (this.leader) void this.sync();
+        return;
+      case 'status':
+        if (this.leader || !isSyncStatus(message.status)) return;
+        this.lastError = message.error ?? undefined;
+        this.setStatus(message.status);
+        return;
+    }
   }
 
   /** Set when the storage could not be read: the client cannot work. */
@@ -414,9 +508,11 @@ export class SyncClient {
       throw failure;
     }
     if (this.disposed) return;
-    this.pending.push(queued);
+    // A read of the queue since may already hold it.
+    if (!this.pending.some((q) => q.seq === queued.seq)) this.pending.push(queued);
     this.emit();
-    void this.start();
+    if (this.leader) void this.start();
+    else this.tabs.post({ kind: 'enqueued' });
   }
 
   /** Removes every kept rejection (the user has seen them). */
@@ -446,6 +542,14 @@ export class SyncClient {
    * the retry timer runs the next), and resolves when that one ends.
    */
   sync(): Promise<void> {
+    if (!this.leader) {
+      // The leading tab syncs for every tab; a follower that is not ready yet knows no leader.
+      return this.ready.then(() => {
+        if (this.leader) return this.sync();
+        this.tabs.post({ kind: 'sync' });
+        return undefined;
+      });
+    }
     const running = this.inFlight;
     if (!running) return this.start();
     this.again = true;
@@ -482,6 +586,9 @@ export class SyncClient {
     for (const timer of this.streamTimers) this.clock.clearTimeout(timer);
     this.streamTimers.clear();
     this.listeners.clear();
+    // Aborting `life` gave up leadership (or the place in line); another tab takes over.
+    this.unsubscribeTabs();
+    this.tabs.close();
   }
 
   /**
@@ -608,6 +715,7 @@ export class SyncClient {
       throw new StorageFailure(err);
     }
     if (this.disposed) throw new ClientDisposed();
+    this.tabs.post({ kind: 'changed' });
   }
 
   private async runSync(): Promise<void> {
@@ -736,6 +844,12 @@ export class SyncClient {
   }
 
   private async push(): Promise<void> {
+    // The queue as stored: other tabs of the user add to it (see `tabs`), and a push must send every
+    // mutation up to the last one it sends, or the server sees a gap. The batch is taken in the same
+    // step as the read, with no await between, so no mutation queued meanwhile slips into it.
+    const stored = await this.readQueue();
+    this.pending = stored.pending;
+    this.rejected = stored.rejections.map(({ seq: _seq, ...rejection }) => rejection);
     const batch = this.nextBatch();
     if (batch.length === 0) return;
     const resp = await this.request((init) =>
@@ -903,6 +1017,10 @@ export class SyncClient {
   private setStatus(status: SyncStatus): void {
     if (this.currentStatus === status) return;
     this.currentStatus = status;
+    if (this.leader) {
+      const error = this.lastError ? { status: this.lastError.status, code: this.lastError.code } : null;
+      this.tabs.post({ kind: 'status', status, error });
+    }
     this.emit();
   }
 

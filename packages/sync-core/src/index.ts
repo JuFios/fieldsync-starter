@@ -7,3 +7,4 @@ export * from './idb-storage';
 export * from './transport';
 export * from './client';
 export * from './namespace';
+export * from './tabs';

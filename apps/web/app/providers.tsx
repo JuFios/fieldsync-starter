@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  BrowserTabs,
   databaseNameFor,
   deleteSyncDatabases,
   HttpTransport,
@@ -67,16 +68,15 @@ export function Providers({ children }: { children: ReactNode }) {
       try {
         // One database per user (F-40). The original client's id and last mutation id move into it
         // from localStorage, where the token signed in now was stored next to them.
-        const storage = await IdbSyncStorage.open(await databaseNameFor(token), {
-          legacy: localStorageLegacy(localStorage),
-          onClosed,
-        });
+        const name = await databaseNameFor(token);
+        const storage = await IdbSyncStorage.open(name, { legacy: localStorageLegacy(localStorage), onClosed });
         if (stopped) {
           storage.close();
           return;
         }
-        // The client keeps the notification stream open itself, with the token in a header.
-        const c = new SyncClient({ transport: new HttpTransport(API, token), storage });
+        // The user's tabs share the database; the one that leads talks to the server and keeps the
+        // notification stream open (with the token in a header), the others follow it.
+        const c = new SyncClient({ transport: new HttpTransport(API, token), storage, tabs: new BrowserTabs(name) });
         opened = { client: c, storage };
         setClient(c);
         void c.sync();
