@@ -27,7 +27,7 @@ test('a ticket created by one technician appears for another technician of the s
     await alicePage.getByRole('button', { name: 'Create' }).click();
 
     await expect(alicePage.getByRole('link', { name: title })).toBeVisible();
-    await expect(alicePage.getByText('idle · 0 pending')).toBeVisible();
+    await expect(alicePage.getByText('synced · 0 pending')).toBeVisible();
     await expect(bobPage.getByRole('link', { name: title })).toBeVisible();
     await expect(bobPage.getByRole('link', { name: title })).toHaveCount(1);
   } finally {

@@ -7,12 +7,14 @@ import {
   type StoredMutation,
   type StoredRejection,
   type SyncStorage,
+  type UpdateRequired,
 } from './storage';
 import { RESET_REQUIRED, TransportError, type RequestOptions, type Transport } from './transport';
 import {
   asVersion,
   MAX_PUSH_BODY_BYTES,
   MAX_PUSH_MUTATIONS,
+  PROTOCOL_VERSION,
   type EntityName,
   type Mutation,
   type MutatorName,
@@ -27,7 +29,16 @@ import {
  * retrying. `loading`: the client is reading a snapshot of the server's state (it has none yet, or its cursor
  * fell behind the collected part of the change log); its view still shows the previous state.
  */
-export type SyncStatus = 'idle' | 'syncing' | 'loading' | 'offline' | 'error';
+export type SyncStatus = 'idle' | 'syncing' | 'loading' | 'offline' | 'error' | 'update-required';
+
+/**
+ * What the status line shows (task 3.3.3): `synced` (nothing waits for the server), `pending` (local
+ * changes are not applied yet), `offline` (the server cannot be reached), `rejected` (the server
+ * refused changes; they are listed until dismissed), plus `loading` (reading a snapshot), `error` (the
+ * local storage refuses writes) and `update-required` (the server no longer speaks this app's
+ * protocol: the app has to be updated; the queue is kept for the updated app).
+ */
+export type SyncIndicator = 'synced' | 'pending' | 'offline' | 'rejected' | 'loading' | 'error' | 'update-required';
 
 /** Changes and snapshot rows per request. */
 const PAGE_SIZE = 500;
@@ -74,6 +85,11 @@ function syncErrorOf(err: unknown): SyncError {
   }
   if (err instanceof StorageFailure) return { status: 0, code: 'STORAGE' };
   return { status: 0, code: err instanceof RequestTimeout ? 'TIMEOUT' : 'NETWORK' };
+}
+
+/** The server will not apply this client id's next mutation: a gap in its ids, or a retired id. */
+function isClientGone(err: unknown): boolean {
+  return err instanceof TransportError && (err.code === 'MUTATION_OUT_OF_ORDER' || err.code === 'CLIENT_RETIRED');
 }
 
 function isResetRequired(err: unknown): boolean {
@@ -131,6 +147,8 @@ export interface SyncClientOptions {
   backoff?: BackoffPolicy;
   /** Random numbers in [0, 1) for the jitter of retries; defaults to `Math.random`. */
   random?: () => number;
+  /** New client ids (the first one, and one after a 409); defaults to random UUIDs. */
+  newClientId?: () => string;
   /**
    * Keep the notification stream open (if the transport has one) and sync on every poke; on by
    * default. Off, the client syncs only when asked to.
@@ -227,6 +245,7 @@ export class SyncClient {
   private failures = 0;
   private readonly initialClientId: string | undefined;
   private readonly live: boolean;
+  private readonly newClientId: () => string;
   /** The stream's watchdog and reconnect delay, cleared on dispose. */
   private readonly streamTimers = new Set<TimerHandle>();
   private id = '';
@@ -272,6 +291,7 @@ export class SyncClient {
     this.random = opts.random ?? Math.random;
     this.initialClientId = opts.clientId;
     this.live = opts.live ?? true;
+    this.newClientId = opts.newClientId ?? randomClientId;
     this.ready = this.load().then(() => {
       if (this.live && !this.broken && this.transport.stream) void this.runStream();
     });
@@ -285,7 +305,7 @@ export class SyncClient {
   private async load(): Promise<void> {
     try {
       const state = await this.storage.load();
-      this.id = state.meta.clientId ?? (await this.storage.ensureClientId(this.initialClientId ?? newClientId()));
+      this.id = state.meta.clientId ?? (await this.storage.ensureClientId(this.initialClientId ?? this.newClientId()));
       this.lastMutationId = state.meta.lastMutationId;
       this.pending = state.pending;
       this.rejected = state.rejections.map(({ seq: _seq, ...rejection }) => rejection);
@@ -294,6 +314,16 @@ export class SyncClient {
         this.base = state.base;
         this.hasState = true;
       }
+      this.retiring = state.meta.retiring;
+      // A refusal of an older protocol than this code speaks is history: the app was updated.
+      const refused = state.meta.updateRequired;
+      if (refused && refused.version < PROTOCOL_VERSION) await this.storage.commit({ meta: { updateRequired: null } });
+      else this.updateRequired = refused;
+      // A queue written by a newer app holds formats this code cannot send.
+      if (this.pending.some((q) => q.v > MUTATION_FORMAT_VERSION)) {
+        this.updateRequired ??= { version: PROTOCOL_VERSION, min: PROTOCOL_VERSION + 1, max: PROTOCOL_VERSION + 1 };
+      }
+      if (this.updateRequired) this.currentStatus = 'update-required';
     } catch (err) {
       this.broken = new StorageFailure(err);
       this.lastError = syncErrorOf(this.broken);
@@ -304,6 +334,10 @@ export class SyncClient {
 
   /** Set when the storage could not be read: the client cannot work. */
   private broken: StorageFailure | undefined;
+  /** Set when the server refused this protocol version: no request is made until the app is updated. */
+  private updateRequired: UpdateRequired | null = null;
+  /** A client id being given up after a 409 (stored, so a restart finishes the recovery). */
+  private retiring: string | null = null;
 
   get status(): SyncStatus {
     return this.currentStatus;
@@ -311,6 +345,26 @@ export class SyncClient {
 
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  /** See {@link SyncIndicator}. */
+  get indicator(): SyncIndicator {
+    switch (this.currentStatus) {
+      case 'update-required':
+      case 'error':
+      case 'loading':
+      case 'offline':
+        return this.currentStatus;
+      case 'idle':
+      case 'syncing':
+        if (this.rejected.length > 0) return 'rejected';
+        return this.pending.length > 0 ? 'pending' : 'synced';
+    }
+  }
+
+  /** The protocol range the server accepts, once it refused this app's version; null otherwise. */
+  get updateRequiredBy(): UpdateRequired | null {
+    return this.updateRequired;
   }
 
   get rejections(): readonly RejectedMutation[] {
@@ -408,7 +462,8 @@ export class SyncClient {
         const again = this.again;
         this.again = false;
         // After a failed sync the retry timer runs the next one, with its delay.
-        const failed = this.currentStatus === 'offline' || this.currentStatus === 'error';
+        // Nor after a sync that cannot run (an update is required): it would only start again at once.
+        const failed = ['offline', 'error', 'update-required'].includes(this.currentStatus);
         if ((again || this.unsent().length > 0) && !failed) void this.start();
       });
     }
@@ -557,10 +612,17 @@ export class SyncClient {
 
   private async runSync(): Promise<void> {
     await this.ready;
-    if (this.disposed || this.broken) return;
+    if (this.disposed || this.broken || this.updateRequired) return;
     this.setStatus('syncing');
     try {
-      await this.push();
+      if (this.retiring !== null) await this.recover();
+      await this.push().catch(async (err: unknown) => {
+        // The server misses mutations of this client id (a lost queue) or the id was given up: the
+        // client continues under a new id and sends what is left.
+        if (!isClientGone(err) || !this.transport.retire) throw err;
+        await this.giveUpClientId();
+        await this.push();
+      });
       if (this.hasState) {
         await this.pull().catch(async (err: unknown) => {
           if (!isResetRequired(err)) throw err;
@@ -576,10 +638,62 @@ export class SyncClient {
       // A disposed client has nobody to report to and nothing to retry.
       if (this.disposed) return;
       this.lastError = syncErrorOf(err);
+      if (err instanceof TransportError && err.code === 'CLIENT_UPDATE_REQUIRED') {
+        await this.requireUpdate(err);
+        return;
+      }
       // What the server said was not stored: the client is not in sync, whatever the network does.
       this.setStatus(err instanceof StorageFailure ? 'error' : 'offline');
       this.scheduleRetry(err);
     }
+  }
+
+  /**
+   * The server refused this protocol version: stored, so a reload does not try again, and no request
+   * is made until the app is updated (its next version clears it). The queue stays for that app.
+   */
+  private async requireUpdate(err: TransportError): Promise<void> {
+    const range = (n: unknown) => (typeof n === 'number' && Number.isSafeInteger(n) ? n : PROTOCOL_VERSION + 1);
+    this.updateRequired = { version: PROTOCOL_VERSION, min: range(err.details?.min), max: range(err.details?.max) };
+    this.setStatus('update-required');
+    await this.commit({ meta: { updateRequired: this.updateRequired } }).catch(() => undefined);
+  }
+
+  /**
+   * Starts the recovery from a 409 MUTATION_OUT_OF_ORDER (or a retired id): the server misses
+   * mutations of this client id that the client no longer has, and renumbering them under the same id
+   * could let a late copy of an old request apply one twice. The id is given up instead: the intent
+   * is stored first (a restart finishes the recovery), then {@link recover}.
+   */
+  private async giveUpClientId(): Promise<void> {
+    this.retiring = this.id;
+    await this.commit({ meta: { retiring: this.id } });
+    await this.recover();
+  }
+
+  /**
+   * Retires the old id on the server (nothing new is applied under it from then on, so no late copy
+   * can apply), then continues under a new id: unsent mutations up to the last id the server handled
+   * under the old one were applied and wait for a pull; the others are renumbered from 1.
+   */
+  private async recover(): Promise<void> {
+    const old = this.retiring;
+    const retire = this.transport.retire?.bind(this.transport);
+    if (old === null || !retire) return;
+    const { lastMutationId } = await this.request((init) => retire(old, init));
+    const fresh = this.newClientId();
+    try {
+      await this.storage.restartClient(fresh, lastMutationId);
+    } catch (err) {
+      throw new StorageFailure(err);
+    }
+    const state = await this.storage.load();
+    this.id = fresh;
+    this.retiring = null;
+    this.pending = state.pending;
+    this.bytes.clear();
+    this.lastMutationId = 0;
+    this.emit();
   }
 
   /** Bytes of a push body with no mutations. */
@@ -815,6 +929,6 @@ export class SyncClient {
 }
 
 /** A new client id: a random UUID (browsers expose it in secure contexts only, see README). */
-function newClientId(): string {
+function randomClientId(): string {
   return globalThis.crypto.randomUUID();
 }

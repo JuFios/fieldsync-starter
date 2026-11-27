@@ -90,6 +90,12 @@ export interface Transport {
    * client without it learns of changes only when it syncs.
    */
   stream?(onEvent: (event: StreamEvent) => void, init?: RequestOptions): Promise<void>;
+  /**
+   * Retires a client id of the user (after a 409): the server applies nothing new under it. Resolves
+   * with the last mutation id handled under it, which no later request changes. Optional: without it
+   * a client cannot recover from a 409 and reports it.
+   */
+  retire?(clientId: string, init?: RequestOptions): Promise<{ lastMutationId: number }>;
 }
 
 const ENTITIES: readonly EntityName[] = ['ticket', 'part'];
@@ -194,6 +200,22 @@ export class HttpTransport implements Transport {
     } finally {
       reader.releaseLock();
     }
+  }
+
+  async retire(clientId: string, init: RequestOptions = {}): Promise<{ lastMutationId: number }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/sync/clients/${encodeURIComponent(clientId)}`, {
+      ...signalOf(init),
+      method: 'DELETE',
+      headers: this.headers(),
+    });
+    if (!res.ok) throw await errorOf('retire', res);
+    const body: unknown = await res.json();
+    const last =
+      body !== null && typeof body === 'object' ? (body as { lastMutationId?: unknown }).lastMutationId : undefined;
+    if (typeof last !== 'number' || !Number.isSafeInteger(last) || last < 0) {
+      throw new TransportError(res.status, 'BAD_RESPONSE', 'retire failed: no last mutation id');
+    }
+    return { lastMutationId: last };
   }
 
   async snapshot(req: SnapshotRequest, init: RequestOptions = {}): Promise<SnapshotPage> {
