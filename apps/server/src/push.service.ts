@@ -1,5 +1,6 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
+  asVersion,
   MutationRejected,
   type MutationResult,
   type PushResponse,
@@ -139,7 +140,7 @@ export class PushService {
       entries,
       at,
     });
-    if (result.status === 'applied' && version !== undefined) result = { ...result, version };
+    if (result.status === 'applied' && version !== undefined) result = { ...result, version: asVersion(version) };
     return { result, touched: [...new Set(entries.map((e) => e.siteId))] };
   }
 
@@ -174,6 +175,6 @@ export class PushService {
     const version = stored?.version;
     return version === null || version === undefined
       ? { id, status: 'duplicate' }
-      : { id, status: 'duplicate', version: Number(version) };
+      : { id, status: 'duplicate', version: asVersion(Number(version)) };
   }
 }

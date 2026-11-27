@@ -1,4 +1,12 @@
-import { MemoryStorage, SyncClient, type PullResponse, type PushRequest, type PushResponse } from '../src';
+import {
+  asVersion,
+  MemoryStorage,
+  SyncClient,
+  type PullResponse,
+  type PushRequest,
+  type PushResponse,
+  type SnapshotPage,
+} from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKETS = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
@@ -11,14 +19,18 @@ class OfflinePullServer {
   push(req: PushRequest): Promise<PushResponse> {
     this.pushed.push(req.mutations.map((m) => m.id));
     const results = req.mutations.map((m) => {
-      if (m.id <= this.last) return { id: m.id, status: 'duplicate' as const, version: m.id };
+      if (m.id <= this.last) return { id: m.id, status: 'duplicate' as const, version: asVersion(m.id) };
       this.last = m.id;
-      return { id: m.id, status: 'applied' as const, version: m.id };
+      return { id: m.id, status: 'applied' as const, version: asVersion(m.id) };
     });
     return Promise.resolve({ results, lastMutationId: this.last });
   }
 
   pull(): Promise<PullResponse> {
+    return Promise.reject(new Error('offline'));
+  }
+
+  snapshot(): Promise<SnapshotPage> {
     return Promise.reject(new Error('offline'));
   }
 }

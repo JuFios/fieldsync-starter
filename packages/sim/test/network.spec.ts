@@ -13,6 +13,14 @@ class CountingServer implements SimServer {
     return Promise.resolve([]);
   }
 
+  compact(): Promise<number> {
+    return Promise.resolve(0);
+  }
+
+  handledMutations(): Promise<Map<string, number>> {
+    return Promise.resolve(new Map<string, number>());
+  }
+
   send(request: SimRequest): Promise<SimResponse> {
     this.received.push(request);
     const body = JSON.stringify({ handled: this.received.length });

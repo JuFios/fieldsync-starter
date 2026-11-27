@@ -105,6 +105,8 @@ describe('simulation engine (against the in-memory reference server)', () => {
       ['client code that throws', 'rejections', 'corrupt-status', 'client-error'],
       ['an edit of the title that empties the description', 'baseline', 'blank-unsent-description', 'lost-edit'],
       ['a rejection the actions of the profile cannot cause', 'baseline', 'internal-rejection', 'unexpected-rejection'],
+      ['a GC that removes changes without a floor (F-34)', 'baseline', 'compact-without-floor', 'divergence'],
+      ['mutations the server never handled', 'baseline', 'forget-handled', 'lost-mutation'],
       [
         'an INTERNAL rejection even where rejections are expected',
         'rejections',

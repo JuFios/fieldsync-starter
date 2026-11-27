@@ -18,6 +18,7 @@ export function describeViolation(v: Violation): string {
     case 'stuck-request':
     case 'livelock':
     case 'client-error':
+    case 'lost-mutation':
       return `${label}: ${v.detail}`;
     case 'lost-edit':
       return `${label}: ${v.detail.slice(0, 5).join('; ')}${v.detail.length > 5 ? `; +${v.detail.length - 5}` : ''}`;

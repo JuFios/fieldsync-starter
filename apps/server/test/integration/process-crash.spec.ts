@@ -52,10 +52,11 @@ describeWithDb('a server process killed in the middle of a mutation', () => {
   }, 180_000);
 
   afterEach(() => {
+    child?.kill('SIGCONT');
     child?.kill('SIGKILL');
   });
 
-  async function startServer(): Promise<string> {
+  async function startServer(env: Record<string, string> = {}): Promise<string> {
     const port = await freePort();
     child = spawn(process.execPath, ['dist/main.js'], {
       cwd: SERVER_DIR,
@@ -66,6 +67,7 @@ describeWithDb('a server process killed in the middle of a mutation', () => {
         SEED_DEMO: 'false',
         // Long enough that the transaction is still waiting when the process is killed.
         DB_LOCK_TIMEOUT_MS: '60000',
+        ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -162,5 +164,91 @@ describeWithDb('a server process killed in the middle of a mutation', () => {
     expect(await snapshot()).toEqual(before);
     const again = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations: [edit] }, tech.token);
     expect(again.body.results?.[0]?.status).toBe('applied');
+  }, 60_000);
+
+  /** Appends log entries written 30 days ago, with versions from the head, and returns the first version. */
+  async function oldEntries(n: number): Promise<number> {
+    const site = await ctx.fixtures.site();
+    // Collect what earlier tests left, so that these entries are the oldest part of the log.
+    await ctx.db.query(`DELETE FROM change_log`);
+    await ctx.db.query(`UPDATE log_floor SET version = (SELECT version FROM log_head)`);
+    const { rows } = await ctx.db.query<{ first: string }>(
+      `WITH head AS (UPDATE log_head SET version = version + $2 WHERE id = 1 RETURNING version)
+       INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
+       SELECT head.version - $2 + g, $1, 'ticket', gen_random_uuid(), 'put', '{}', now() - interval '30 days'
+         FROM head, generate_series(1, $2) g
+       RETURNING (SELECT version - $2 + 1 FROM head) AS first`,
+      [site, n],
+    );
+    return Number(rows[0].first);
+  }
+
+  const gcState = async () => ({
+    floor: (await ctx.db.query<{ version: string }>('SELECT version FROM log_floor')).rows[0].version,
+    log: (await ctx.db.query<{ n: string }>('SELECT count(*) AS n FROM change_log')).rows[0].n,
+  });
+
+  const serverSessions = async (where: string) =>
+    (
+      await ctx.db.query(
+        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'fieldsync-server' AND ${where}`,
+      )
+    ).rowCount ?? 0;
+
+  it('leaves the log and its floor untouched when the server dies in the middle of a GC batch', async () => {
+    const first = await oldEntries(50);
+    const before = await gcState();
+    const holder = await ctx.db.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT version FROM change_log WHERE version = $1 FOR UPDATE', [first]);
+      // The GC runs every second; its first batch stops at the locked row inside its DELETE.
+      await startServer({ GC_INTERVAL_MS: '1000' });
+      await waitFor(
+        async () => (await serverSessions(`wait_event_type = 'Lock' AND query LIKE '%DELETE FROM change_log%'`)) > 0,
+        'the GC batch to wait for the locked row',
+      );
+      const killed = child as ChildProcess;
+      const exited = new Promise((r) => killed.once('exit', r));
+      killed.kill('SIGKILL');
+      await exited;
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+    await waitFor(async () => (await serverSessions(`state <> 'idle'`)) === 0, 'the killed GC session to end');
+    expect(await gcState()).toEqual(before);
+  }, 60_000);
+
+  it('rolls a GC batch back when the server stops between the batch and its commit', async () => {
+    const first = await oldEntries(50);
+    const before = await gcState();
+    const holder = await ctx.db.connect();
+    let stopped: ChildProcess | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT version FROM change_log WHERE version = $1 FOR UPDATE', [first]);
+      await startServer({ GC_INTERVAL_MS: '1000', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '500' });
+      await waitFor(
+        async () => (await serverSessions(`wait_event_type = 'Lock' AND query LIKE '%DELETE FROM change_log%'`)) > 0,
+        'the GC batch to wait for the locked row',
+      );
+      // The process freezes (SIGSTOP); once the row is free its statement finishes, and its session
+      // sits idle in the transaction, holding the batch's locks, with nobody to commit it.
+      if (!child) throw new Error('the server is not running');
+      child.kill('SIGSTOP');
+      stopped = child;
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+    await waitFor(
+      async () => (await serverSessions(`state = 'idle in transaction'`)) > 0,
+      'the frozen GC session to sit idle in its transaction',
+    );
+    // Postgres ends the idle session after idle_in_transaction_session_timeout and rolls it back.
+    await waitFor(async () => (await serverSessions(`state LIKE 'idle in transaction%'`)) === 0, 'the session to end');
+    expect(await gcState()).toEqual(before);
+    stopped?.kill('SIGCONT');
   }, 60_000);
 });

@@ -1,4 +1,4 @@
-import { HttpTransport, MemoryStorage, SyncClient, TransportError, type Transport } from '../src';
+import { asVersion, HttpTransport, MemoryStorage, SyncClient, TransportError, type Transport } from '../src';
 
 function answer(status: number, body: string, headers: Record<string, string> = {}): typeof fetch {
   return () => Promise.resolve(new Response(body, { status, headers }));
@@ -52,7 +52,8 @@ describe('SyncClient.syncError', () => {
         fail
           ? Promise.reject(new TransportError(409, 'MUTATION_OUT_OF_ORDER', 'push failed', { expected: 2 }))
           : Promise.resolve({ results: [], lastMutationId: 0 }),
-      pull: () => Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: 0 }),
+      pull: () => Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 0 }),
+      snapshot: () => Promise.resolve({ watermark: asVersion(0), rows: [], next: null }),
     };
     const client = new SyncClient({ clientId: 'c', transport, storage: new MemoryStorage() });
     try {
@@ -74,6 +75,7 @@ describe('SyncClient.syncError', () => {
     const transport: Transport = {
       push: () => Promise.reject(new TypeError('fetch failed')),
       pull: () => Promise.reject(new TypeError('fetch failed')),
+      snapshot: () => Promise.reject(new TypeError('fetch failed')),
     };
     const client = new SyncClient({ clientId: 'c', transport, storage: new MemoryStorage() });
     try {

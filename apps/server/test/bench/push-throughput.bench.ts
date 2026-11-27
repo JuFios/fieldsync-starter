@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { PushResponse } from '@fieldsync/sync-core';
+import { GcService } from '../../src/gc.service';
 import { describeWithDb, useIntegration } from '../support/integration';
 
 /**
@@ -12,13 +13,15 @@ import { describeWithDb, useIntegration } from '../support/integration';
 const CLIENTS = Number(process.env.BENCH_CLIENTS ?? 16);
 const MUTATIONS = Number(process.env.BENCH_MUTATIONS ?? 2000);
 const WARMUP = 200;
+/** Old change-log entries the GC collects while the clients push (`BENCH_BACKLOG`). */
+const BACKLOG = Number(process.env.BENCH_BACKLOG ?? 200_000);
 
 function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
 }
 
 describeWithDb('push throughput', () => {
-  const ctx = useIntegration();
+  const ctx = useIntegration({ GC_BATCH_SIZE: process.env.BENCH_GC_BATCH ?? '5000' });
 
   async function run(total: number, siteId: string, token: string): Promise<{ ms: number; latencies: number[] }> {
     const latencies: number[] = [];
@@ -74,5 +77,51 @@ describeWithDb('push throughput', () => {
       `SELECT count(*) AS n, count(DISTINCT version) AS distinct FROM change_log`,
     );
     expect(rows[0]).toEqual({ n: String(WARMUP + latencies.length), distinct: String(WARMUP + latencies.length) });
+  }, 600_000);
+
+  it(`keeps pushing while the GC collects a backlog of ${BACKLOG} entries, and reports both`, async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    // The backlog is the oldest part of the log: what the first test wrote is gone as if collected.
+    await ctx.db.query(`DELETE FROM change_log`);
+    await ctx.db.query(`UPDATE log_floor SET version = (SELECT version FROM log_head)`);
+    await ctx.db.query(
+      `WITH head AS (UPDATE log_head SET version = version + $2 WHERE id = 1 RETURNING version)
+       INSERT INTO change_log (version, site_id, entity, entity_id, op, data, created_at)
+       SELECT head.version - $2 + g, $1, 'ticket', gen_random_uuid(), 'put', '{"title":"old"}', now() - interval '30 days'
+         FROM head, generate_series(1, $2) g`,
+      [site, BACKLOG],
+    );
+    await ctx.db.query('ANALYZE change_log');
+    await run(WARMUP, site, tech.token);
+
+    const gcStarted = performance.now();
+    const gc = ctx.server.app
+      .get(GcService)
+      .collect()
+      .then((r) => ({ ...r, ms: performance.now() - gcStarted }));
+    const { ms, latencies } = await run(MUTATIONS, site, tech.token);
+    const collected = await gc;
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const batches = Math.ceil(collected.log / Number(process.env.BENCH_GC_BATCH ?? 5000));
+    process.stdout.write(
+      `BENCH-GC ${JSON.stringify({
+        clients: CLIENTS,
+        mutations: latencies.length,
+        perSecond: Math.round((latencies.length / ms) * 1000),
+        p50Ms: Number(percentile(sorted, 50).toFixed(1)),
+        p95Ms: Number(percentile(sorted, 95).toFixed(1)),
+        p99Ms: Number(percentile(sorted, 99).toFixed(1)),
+        gcRemoved: collected.log,
+        gcMs: Math.round(collected.ms),
+        gcBatchMs: Number((collected.ms / Math.max(1, batches)).toFixed(1)),
+      })}\n`,
+    );
+
+    expect(collected.log).toBeGreaterThanOrEqual(BACKLOG);
+    const { rows } = await ctx.db.query<{ old: string }>(
+      `SELECT count(*) AS old FROM change_log WHERE created_at < now() - interval '7 days'`,
+    );
+    expect(rows[0].old).toBe('0');
   }, 600_000);
 });

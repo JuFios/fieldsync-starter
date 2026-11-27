@@ -4,6 +4,8 @@ import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsDefined,
+  IsIn,
   IsInt,
   IsObject,
   IsOptional,
@@ -12,6 +14,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { MAX_PUSH_MUTATIONS, REJECTION_CODES } from '@fieldsync/sync-core';
@@ -100,6 +103,45 @@ export class PullQueryDto {
   clientId?: string;
 }
 
+/** Most rows one snapshot page returns. */
+export const MAX_SNAPSHOT_LIMIT = 500;
+
+/** A page key is either complete (all three parts) or absent; a key needs its snapshot's watermark. */
+const hasKey = (o: SnapshotQueryDto): boolean =>
+  o.afterSite !== undefined || o.afterEntity !== undefined || o.afterId !== undefined;
+
+export class SnapshotQueryDto {
+  @ApiPropertyOptional({
+    description:
+      'The watermark of the first page of this snapshot; omit it for the first page. Required with a page key.',
+    minimum: 0,
+    maximum: MAX_WIRE_INTEGER,
+  })
+  @ValidateIf((o: SnapshotQueryDto) => hasKey(o) || o.watermark !== undefined)
+  @IsDefined({ message: '$property is required with a page key' })
+  @IntegerIn(0, MAX_WIRE_INTEGER)
+  watermark?: number;
+
+  @ApiPropertyOptional({ description: 'Site of the last row of the previous page (`next.siteId`).', format: 'uuid' })
+  @ValidateIf(hasKey)
+  @IsUUID()
+  afterSite?: string;
+
+  @ApiPropertyOptional({ description: 'Entity of the last row of the previous page.', enum: ['part', 'ticket'] })
+  @ValidateIf(hasKey)
+  @IsIn(['part', 'ticket'])
+  afterEntity?: 'part' | 'ticket';
+
+  @ApiPropertyOptional({ description: 'Id of the last row of the previous page.', format: 'uuid' })
+  @ValidateIf(hasKey)
+  @IsUUID()
+  afterId?: string;
+
+  @ApiPropertyOptional({ description: 'Most rows to return.', minimum: 1, maximum: MAX_SNAPSHOT_LIMIT, default: 500 })
+  @IntegerIn(1, MAX_SNAPSHOT_LIMIT)
+  limit: number = MAX_SNAPSHOT_LIMIT;
+}
+
 // Answers, for the OpenAPI description (the services return the sync-core types they mirror).
 
 export class MutationResultDto {
@@ -170,6 +212,49 @@ export class PullResponseDto {
 
   @ApiProperty({ description: 'The last mutation id the server handled for clientId (0 without one).' })
   lastMutationId!: number;
+}
+
+export class SnapshotRowDto {
+  @ApiProperty({ enum: ['ticket', 'part'] })
+  entity!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  siteId!: string;
+
+  @ApiProperty({ type: 'object', additionalProperties: true, description: 'The row.' })
+  data!: Record<string, unknown>;
+}
+
+export class SnapshotKeyDto {
+  @ApiProperty({ format: 'uuid' })
+  siteId!: string;
+
+  @ApiProperty({ enum: ['ticket', 'part'] })
+  entity!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+}
+
+export class SnapshotPageDto {
+  @ApiProperty({
+    description: 'Head of the change log when the snapshot started; pull from it after the last page.',
+  })
+  watermark!: number;
+
+  @ApiProperty({ type: [SnapshotRowDto], description: "Live rows of the user's sites, ordered by siteId, entity, id." })
+  rows!: SnapshotRowDto[];
+
+  @ApiProperty({
+    type: SnapshotKeyDto,
+    nullable: true,
+    description:
+      'Key of the last row; pass it as afterSite, afterEntity, afterId for the next page. Null on the last page.',
+  })
+  next!: SnapshotKeyDto | null;
 }
 
 export class ProblemDto {

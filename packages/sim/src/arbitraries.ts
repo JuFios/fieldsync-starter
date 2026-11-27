@@ -88,6 +88,8 @@ export function stepArb(profile: Profile): fc.Arbitrary<Step> {
     redeliver: fc.record({ kind: fc.constant('redeliver' as const), pick: fc.nat() }),
     tick: fc.record({ kind: fc.constant('tick' as const), ms: fc.integer({ min: 100, max: profile.maxTickMs }) }),
     link: fc.record({ kind: fc.constant('link' as const), client, state: weighted(profile.linkStates) }),
+    compact: fc.constant({ kind: 'compact' as const }),
+    away: fc.record({ kind: fc.constant('away' as const), client }),
   };
   const kinds = (Object.entries(profile.stepWeights) as Array<[Step['kind'], number]>).filter(([, w]) => w > 0);
   return fc.oneof(...kinds.map(([kind, weight]) => ({ weight, arbitrary: byKind[kind] })));

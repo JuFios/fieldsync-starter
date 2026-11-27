@@ -32,8 +32,11 @@ Protocol in brief:
 
 1. The client queues named mutations with a per-client monotonic id and applies them optimistically.
 2. `POST /sync/push` sends the queue; the server applies each mutation in a transaction.
-3. `GET /sync/pull?cursor=N&clientId=…` returns changes with `version > N` for accessible sites.
-4. `GET /sync/stream` emits `poke` events so clients pull promptly.
+3. `GET /sync/pull?cursor=N&clientId=…` returns changes with `version > N` for accessible sites;
+   a cursor below the collected part of the log is answered 410 `RESET_REQUIRED`.
+4. `GET /sync/snapshot` returns the live state page by page; a new client, and one that was reset,
+   starts from it and then pulls the log from its watermark.
+5. `GET /sync/stream` emits `poke` events so clients pull promptly.
 
 ## Running
 
@@ -148,7 +151,9 @@ errors.
 | `DB_STATEMENT_TIMEOUT_MS` | `15000` | 1–3600000 | Longest run of one statement on a server connection (`statement_timeout`); a page of the log or a mutation takes milliseconds |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `10000` | 1–3600000 | Postgres ends a server session that idles inside a transaction this long (`idle_in_transaction_session_timeout`), rolling it back and freeing its locks |
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
-| `CHANGELOG_RETENTION_SECONDS` | `604800` | ≥ 1 | Change-log entries older than this are deleted by the GC |
+| `CHANGELOG_RETENTION_SECONDS` | `604800` | 3600–2147483647 | Change-log entries older than this are removed by the GC, oldest first. A client whose cursor falls behind them is reset (410) and reloads from a snapshot. At least an hour: a snapshot must finish within the retention (see [3.3.6](#change-log-lifecycle-336)) |
+| `MUTATION_RESULT_RETENTION_SECONDS` | twice `CHANGELOG_RETENTION_SECONDS`, at least `1209600` | 3600–2147483647, ≥ `CHANGELOG_RETENTION_SECONDS` | Results of rejected mutations (and of applied ones that changed nothing) are kept this long, so a retried copy is answered with the same rejection; results of applied mutations go with the log entries of their changes |
+| `GC_BATCH_SIZE` | `5000` | 100–100000 | Most change-log entries one GC transaction removes |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
 | `JSON_BODY_LIMIT_BYTES` | `2097152` | 1048576–67108864 | Largest JSON request body. Never below the 1 MiB the client puts in one push (`MAX_PUSH_BODY_BYTES`), so its batches are not refused for their size |
 | `API_DOCS_ENABLED` | `false` | `true`, `false` | Serve the OpenAPI description at `/docs-json` and Swagger UI at `/docs`, without a token. Off by default so the API surface is not published by accident |
@@ -329,9 +334,8 @@ fast-check shrink them like any other step.
 
 ### Pending decision records
 
-Protocol correctness (3.3.1), offline-first client (3.3.3), partial replication (3.3.4), merge
-semantics (3.3.5), change-log lifecycle (3.3.6), schema evolution (3.3.7) and SSE authentication
-are recorded with the changes that implement them.
+Offline-first client (3.3.3), partial replication (3.3.4), schema evolution (3.3.7) and SSE
+authentication are recorded with the changes that implement them.
 
 ### Protocol correctness (3.3.1)
 
@@ -376,8 +380,8 @@ UPDATE`, after an `INSERT … ON CONFLICT DO NOTHING` for a new client), so para
 mutation queue up and the second sees the first one's result. `mutation_results` keeps the outcome
 of every mutation: a copy of an applied one is answered `duplicate` with the version of its change,
 a copy of a rejected one with the same rejection; only the client's owner gets these outcomes
-(F-33). Results are deleted with the change log they
-refer to (the same retention), after which such a client needs a reset anyway. Client ids are
+(F-33). The results of applied mutations are deleted with the log entries of
+their changes; rejections are kept longer (see [3.3.6](#change-log-lifecycle-336)). Client ids are
 UUIDs. Push stays `READ COMMITTED`: under `REPEATABLE READ` two copies of a new client's first
 mutation fail with 40001 on the `ON CONFLICT` insert.
 
@@ -406,10 +410,12 @@ retried copies), `pull-snapshot.spec.ts`, `stuck-transactions.spec.ts`, `process
 mutation applies when sent again), `lock-order.spec.ts`, and the simulation.
 
 **Remaining limitations.** Writes are serialized on the head for the last statement of each
-mutation, which bounds write throughput per database. A 409 needs the client to reset its queue,
-which comes with the log lifecycle work (3.3.6); until then the client reports it as `syncError`
-and keeps retrying with its usual delay. After the retention period a copy of a rejected mutation is answered `duplicate` without
-its reason.
+mutation, which bounds write throughput per database. A 409 means the client lost the mutations
+the server misses (a lost local queue); recovering from it needs a new client id and a server that
+refuses late copies under the old one, which comes with the durable client queue (3.3.3). Until then
+the client reports it as `syncError` and keeps retrying with its usual delay. After
+`MUTATION_RESULT_RETENTION_SECONDS` a copy of a rejected mutation is answered `duplicate` without its
+reason.
 
 ### Merge semantics (3.3.5)
 
@@ -450,6 +456,125 @@ Postgres, and the simulation's "no lost edits" property.
 **Remaining limitations.** The UI shows a rejection's code and message in the existing list;
 acting on it (keeping one of the two values, retrying a status change) is part of the frontend work
 (3.3.9). Two edits of one field always conflict, even when they could be merged as text.
+
+### Change-log lifecycle (3.3.6)
+
+**Context.** The original GC deleted change-log entries older than the retention and told nobody
+(F-34): a client whose cursor was older pulled an empty page and silently missed those changes for
+good, a new client pulled from 0 and never got the entities whose history was gone, and since a
+change's `created_at` is its mutation's clock reading taken before the commit, deleting by age could
+remove a newer version and keep an older one. Tombstones (deleted entities) were never removed. The
+task asks for compaction with a safe "full reload required" signal for clients whose cursor is too
+old, a snapshot instead of the history for new clients, and a modelled and tested client that was
+offline longer than the retention.
+
+**Options.**
+
+1. Delete by age without a signal (the original behaviour): loses changes.
+2. Compact to the latest change per entity (keep one row per entity in the log): the log never
+   shrinks below the number of entities, deletions must be kept forever, and every reader still
+   pages through all of it from 0.
+3. Retention plus a floor plus a snapshot: remove a prefix of the log older than the retention,
+   record the highest removed version (`log_floor`), answer cursors below it with a reset signal,
+   and serve the live state as a snapshot.
+4. Table partitioning of the log by range, dropping whole partitions: what PostgreSQL recommends
+   for bulk deletes of old data ("far faster than a bulk operation" and no VACUUM afterwards), but
+   "worthwhile only when a table would otherwise be very large", with the rule of thumb that it
+   exceeds the server's memory (PostgreSQL 16, 5.11). It also needs partitions created ahead of the
+   writers and makes the retention coarse.
+
+**Decision: option 3, with batched deletes.** The GC removes the log in prefixes by version: a
+batch is the next `GC_BATCH_SIZE` versions after the floor, cut before the first change younger than
+the cutoff, so a later version with an earlier timestamp is never removed while an older one is
+kept. One statement deletes the batch, the tombstones and the results of applied mutations whose
+versions it covers, and raises `log_floor`, in a transaction that first locks the `log_floor` row
+with `SKIP LOCKED`: a second GC (another instance, or a run that took longer than the interval)
+finds it taken and stops instead of waiting or removing the same rows. `log_floor` is a row of its
+own, not a column of `log_head`, so the GC never holds the row every writer updates. On shutdown the
+GC stops between batches and the application waits for the batch in progress before the database
+pool closes (NestJS lifecycle events).
+
+A pull with a cursor below the floor is answered **410 Gone** with the problem code
+`RESET_REQUIRED` and `details.floor`: the history after the cursor is gone for good, which is what
+RFC 9110 (15.5.11) defines 410 for; Google Calendar answers an invalidated sync token with 410
+("a full wipe of the client's store and a new full sync"), and Microsoft Graph signals a required
+full resynchronization the same way. 409 would also fit ("the user might be able to resolve the conflict and resubmit"), but
+says less. A 410 is heuristically cacheable (RFC 9110, 15.1), so it is sent with
+`Cache-Control: no-store`, as are the pull and snapshot answers.
+
+`GET /sync/snapshot` returns live rows of the user's sites in key order `(site_id, entity, id)`,
+at most 500 per page (keyset pagination through the index `entities_snapshot_idx`). The first page
+fixes the **watermark**, the head of the log read in the same `REPEATABLE READ` transaction; every
+next page passes it with the key of the previous page's last row, and after the last page the
+client pulls the log from the watermark.
+
+*Why snapshot plus tail converges, whatever is written meanwhile.* Pages are separate requests, so
+each shows its rows as they are when it is read, not as of the watermark W. A row that does not
+change after W reads the same in every page. Every change after W is in the log after W, in commit
+order and without gaps (decision record 3.3.1), so pulling from W ends every changed row at its
+last change: a row edited before or after its page, created behind the page cursor, deleted before
+its page, or (with partial replication) moved to another site is put right by the log. Rows of a
+page may already hold changes after W, which the log then replays; the client applies the snapshot
+and the log to a separate map and only then makes it its state, so a value replayed from the log
+over a newer one from a page never shows. The log after W must still exist when the client pulls
+it, that is W must not fall below the floor, which brings the next choice.
+
+*No lease on the watermark.* The floor only passes changes older than the retention, and every
+change after W committed after the snapshot started, so the floor reaches W only once the snapshot
+is older than the retention, less the longest transaction (bounded by `DB_STATEMENT_TIMEOUT_MS`) and
+the clock difference of the server instances. A snapshot that slow is answered 410 and starts over;
+one that finishes within the retention never is, so a slow client cannot be reset again and again.
+The retention is therefore at least an hour. A lease table (as the NestJS locks documentation
+describes for leases) would give the same guarantee with a write on every page of a `GET` and a way
+for a client to hold the log back forever by renewing it; it is needed only for compaction by size,
+which the task does not ask for.
+
+*The client* (`SyncClient`) without a stored state, or answered `RESET_REQUIRED`, shows the status
+`loading` and reads the snapshot and the tail. Its queue is kept: mutations whose effect the new
+state has (applied up to the cursor, or handled according to the last page's `lastMutationId`, which
+comes from the same database snapshot as the page) leave the queue, the others are replayed on top
+of the new state, and rejections stay listed. An interrupted snapshot leaves the previous state in
+place and starts over at the next sync; after three resets in one sync the client waits for its
+next retry.
+
+*Tombstones and results.* A tombstone goes with the log entry of its deletion: every client that
+could still hold the row has a cursor below the floor and is reset, so nobody needs it. After that
+its id is free: a `ticket.create` with it is a new ticket. Retried copies of the original create are
+still answered as duplicates, because the client's last mutation id is kept for good; so an id is
+protected against reuse while its deletion is within the retention. Results of applied mutations go
+with their log entries too (their `version` would point into the collected log). Rejections, and
+mutations that changed nothing, have no version; they are kept for `MUTATION_RESULT_RETENTION_SECONDS`
+(by default twice the log retention and at least 14 days, never less than the log retention), so a client reset after a week offline
+still learns why its queued mutations were rejected.
+
+**Consequences.** The log, the tombstones and the results are bounded by the retention. New clients
+read the live state, not the history. A client away longer than the retention reloads and keeps
+its queue. Costs: a reset client downloads its whole state again; the snapshot must finish within
+the retention; an id can be reused once its deletion is older than the retention.
+
+**NFRs, measured** (`npm run test:bench`, 16 clients, local Postgres 16, see [Indexes](#indexes) for
+the queries): one GC batch of 5000 versions takes about 10 ms; collecting a backlog of 200 000
+entries took about 0.4 s while the clients pushed. Push p95 rose from about 49 ms to 51–55 ms and
+p99 from about 70 ms to 80–100 ms during that collection; batches of 1000 or 2000 did not change it,
+since the GC and the writers share one database. In steady state the GC runs hourly and removes an
+hour of changes.
+
+**Evidence.** `log-compaction.spec.ts` (F-34), `snapshot.spec.ts` (pages, access, validation, 410,
+convergence with rows changed between pages and with four writers and four readers at once),
+`gc-concurrency.spec.ts` (a second instance collecting as fast as it can while writers push and
+readers pull or reset, two collectors at once, the collector's session killed in the middle of a
+batch, shutdown in the middle of a run, a slow snapshot), `process-crash.spec.ts` (the server process
+killed with SIGKILL, or frozen with SIGSTOP until Postgres ends its idle transaction, in the middle
+of a batch), `log-retention.spec.ts` (tombstones and results), unit tests of `GcService`,
+`SnapshotService`, `PullService` and of the client's reset and rebase (`snapshot.spec.ts` in
+`sync-core`), and the simulation's `compact` and `away` steps.
+
+**Remaining limitations.** Partitioning (option 4) is the documented way once the log outgrows the
+database server's memory. A client released before this change does not know `RESET_REQUIRED`: it
+keeps retrying the pull until it is updated (versioning of the protocol, 3.3.7). During a rolling
+update the old server's GC still deletes by age without raising the floor: stop the old instances
+(or their GC) before the new ones migrate the database. Reverting the migration removes the floor,
+so a revert needs every client to reload.
 
 ## Found issues
 
@@ -495,6 +620,7 @@ reproduce and fix it.
 | F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
 | F-32 | 8 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
 | F-33 | 4 | A client id is not bound to its user: another user can push under it and take the owner's next mutation id | Open (known defect) |
+| F-34 | 5 | The GC deletes the change log by age without a signal: stale clients skip changes, new clients miss entities, and the log gets holes | Fixed |
 
 ### F-01: pull access test mocked every query (category 10)
 
@@ -1075,6 +1201,34 @@ The fix belongs to the access-control change; this change adds the known-defect 
 - **Planned fix.** Answer 403 for a client id that belongs to another user, in push and pull. The
   web app then needs one client id per user in a browser (it shares one for every user today).
 
+### F-34: the change-log GC drops changes without telling anyone (category 5)
+
+- **What.** The GC deleted every change-log entry older than the retention, with nothing to mark
+  where the log now started. A pull with a cursor before the deleted entries answered 200 with the
+  changes that were left, as if nothing were missing. A new client pulled from 0 and got only the
+  entities whose history was still in the log. And `created_at` is the mutation's clock reading,
+  taken before its commit (or, in the original code, the start of its transaction), so it does not
+  grow with the version: deleting by age could remove a newer version and keep an older one.
+- **Why it is dangerous.** A client that was offline longer than the retention, which is exactly
+  the field technician's case, silently misses changes and never converges; a client installed after
+  the first GC run never sees older tickets; a hole in the log loses a change even for a client that
+  is up to date. Nobody is told.
+- **Reproduce.** `log-compaction.spec.ts`: "brings a client that was offline longer than the
+  retention up to date, queue included" and "gives a client that starts after the GC every live
+  entity of its sites" (production `SyncClient` over HTTP, the GC run at a later virtual time), and
+  "removes only a prefix of the log, even when a later version carries an earlier timestamp" (the
+  test holds a row so that the mutation that read the earlier time commits last). In the simulation,
+  the reference server's `compact-without-floor` defect shows up as `divergence`.
+- **Fix.** Decision record [3.3.6](#change-log-lifecycle-336): the GC removes prefixes by version and
+  raises `log_floor` in the same transaction; pulls below the floor get 410 `RESET_REQUIRED`;
+  `GET /sync/snapshot` and the client's reload; tombstones and results expire with the log. The
+  migration starts the floor below the oldest kept entry, so clients of a database the original GC
+  already pruned are reset instead of missing changes.
+- **Alternatives.** Compacting to the latest change per entity, or partitioning the log (see the
+  decision record); keeping the original GC and making clients reload on a timer, which still loses
+  changes between two reloads and reloads everyone needlessly.
+- **Commits.** `54c3486` (test), `f17f51d` (fix).
+
 ## Changes to starter tests
 
 | Starter test | Change | Reason |
@@ -1086,6 +1240,7 @@ The fix belongs to the access-control change; this change adds the known-defect 
 | `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Passes an `id`; the fake transaction implements `insert` and `now` | Protocol change of F-19: `ticket.create` requires a client-chosen id and writes through `MutatorTx.insert`; timestamps come from `MutatorTx.now` (F-20) |
 | `packages/sync-core/test/client.spec.ts` "shows a locally created ticket…", "numbers local mutations sequentially" | Every `ticket.create` passes an `id` | Protocol change of F-19 |
 | `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Reads the created row with optional chaining (`created?.status`) | `sync-core` compiles with `noUncheckedIndexedAccess`: an array element may be `undefined`, so the type checker rejects the unguarded access |
+| `packages/sync-core/test/client.spec.ts` `OfflineTransport` | Implements `snapshot` (it fails like the other requests) | Protocol change of F-34: a `Transport` also reads snapshots, and a client without a stored state starts with one |
 | `packages/sync-core/test/client.spec.ts` (all) | Clients are disposed in `afterEach`, not at the end of the test body: a failing assertion skipped `dispose()`, the client's retry timer stayed alive and Jest never exited | A failing test must fail, not hang |
 | `apps/server/test/access.spec.ts` | Tests renamed to what they check; the fake answers per query; admin and missing-`siteId` cases added | F-04 |
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
@@ -1150,6 +1305,8 @@ random) on an emptied database. Then:
    | `redeliver` | A stale copy of an earlier request reaches the server again |
    | `tick` | Virtual time advances (up to 8 s), firing due timers such as the client's 5 s retry |
    | `link` | A client's link goes down, comes back, or starts losing every answer |
+   | `compact` | The server runs its change-log GC at the current virtual time (the simulation runs with a retention of one hour) |
+   | `away` | A client's link goes down and two hours of virtual time pass at once (fake-timers `setSystemTime`: pending timers move with the time, so no thousand retries fire); after a `compact`, its cursor is behind the floor and the client is reset when it comes back |
 
 3. **Heal.** Every link comes back and faults stop. Requests and answers are delivered and time
    advances to the next timer until nothing is in transit and no client has pending mutations;
@@ -1192,6 +1349,10 @@ random) on an emptied database. Then:
   lost (it shows up only as `duplicate`) has no known place in that order and is not checked.
   Convergence alone cannot see such a loss: the client and the server run the same mutators, so
   both lose the edit the same way.
+- **No lost mutations** (category 5 and the reset). Every mutation a client queued was handled by
+  the server: its last mutation id, read straight from the `clients` table, equals the number of
+  mutations the client queued, and the queue is empty. A reset that dropped a queued mutation, or a
+  client that dropped one it was never answered for, shows up as `lost-mutation`.
 - **Determinism.** A seed run twice gives the same traces, byte for byte (compared by SHA-256), and
   replaying one run from its seed and path gives the same trace again. The trace holds only semantic facts:
   steps, requests and answers (status, body digest, the class and code of server-side exceptions),
@@ -1209,6 +1370,7 @@ Each violation has a **signature**:
 | `livelock` | a queue never drained for another reason | — |
 | `divergence` | a client's rows differ from the server's within its sites | — |
 | `client-error` | the client code threw (for example while computing its view) | — |
+| `lost-mutation` | a client's queue is empty but the server never handled some of its mutations | — |
 
 ### Profiles
 
@@ -1225,6 +1387,14 @@ it" and removes the signature from the profile. Each profile also has minimums f
 seed of its run statistics (every fault kind occurs, timers fire, clients write rows another client
 wrote last, the rejection profiles see rejections), so a profile cannot quietly stop exercising what
 it is for. Lowering a minimum needs a reason here.
+
+The log lifecycle change added `compact` (weight 4) and `away` (weight 3) to every profile, with
+minimums of 0.8 compactions, 0.5 periods away and 0.1 resets (410 answers) per seed, and lowered the
+minimum of writes to a row another client wrote last from 1.5 to 0.8 (1 to 0.6 with two sites): every
+client now starts from a snapshot and then the log, one exchange more before it sees the other
+clients' rows, and the two new steps take a share of the commands. Over 60 runs per profile from
+seed 1 the real server averaged 0.98 such writes (`baseline`), 1.3 compactions, 1.0 periods away and
+0.45 resets per run.
 
 ### Reproducing a failure
 
@@ -1302,7 +1472,23 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 
 ### Results
 
-After the protocol change, a local search of 1000 runs per profile from seed 20261126
+After the log lifecycle change, a local search of 1000 runs per profile from seed 20261127
+(`npm run sim -- --profile <name> --seed 20261127 --runs 1000`, one process per profile, about
+7 minutes) found no violation other than the known defects each profile tolerates: no divergence,
+lost edit, lost mutation or unexpected rejection, with compaction and clients away longer than the
+retention in every profile.
+
+| Profile | Runs without violations | Known-defect runs | Resets (410) per run | Compactions per run | Time per run |
+|---|---|---|---|---|---|
+| `baseline` | 1000 / 1000 | — | 0.38 | 1.49 | 432 ms |
+| `rejections` | 1000 / 1000 | — | 0.44 | 1.57 | 429 ms |
+| `multi-site` | 126 / 1000 | `foreign-site-rows` (F-07): 874 | 0.38 | 1.49 | 433 ms |
+| `full` | 137 / 1000 | `foreign-site-rows` (F-07): 729; `stuck-request` (F-13): 359 | 0.36 | 1.57 | 405 ms |
+
+The same search before the change (no compaction in the simulation) found the same known defects;
+the simulation could not see category 5 at all, since the GC never ran.
+
+Earlier, after the protocol change, a local search of 1000 runs per profile from seed 20261126
 (`npm run sim -- --profile all --seed 20261126 --runs 1000`, about 15 minutes in all, fast-check
 4.11.0) found no violation other than the known defects each profile tolerates. No run shows a
 divergence, a lost edit, an unexpected rejection or `rejected-mutation-500`:
@@ -1333,9 +1519,8 @@ hung request of F-13 together with F-23 and F-07).
   `commit-order.spec.ts`, `duplicates.spec.ts` and `lock-order.spec.ts`.
 - **One server instance**, and the notification stream is modelled as a `sync` step, not
   simulated.
-- **Not yet simulated:** page reloads and several tabs (the offline-client change), log compaction
-  and long offline periods (the log-lifecycle change), access changes and moving tickets (the
-  access-control change), two server instances (the observability change). Each of these changes
+- **Not yet simulated:** page reloads and several tabs (the offline-client change), access changes
+  and moving tickets (the access-control change), two server instances (the observability change). Each of these changes
   adds its events as new commands.
 - Traces are compared within one environment; a different Node.js or Postgres version may change
   response bodies (for example error messages) and with them the trace digest, but not whether a
@@ -1348,9 +1533,25 @@ Not written yet: the load scenario (≥ 200 clients) is added with the observabi
 
 ## Indexes
 
-Not written yet: the indexes for the log, snapshot and access queries are added with the access
-control change. The schema currently has the original two indexes (`entities (site_id)`,
-`change_log (created_at)`).
+The indexes for the access queries are added with the access control change. The log lifecycle
+added the indexes of its own queries, each chosen with `EXPLAIN (ANALYZE, BUFFERS)` before and
+after, on a database of 1 000 000 log entries over 100 sites, 300 000 entities (10 % deleted) and
+500 000 mutation results (local Postgres 16):
+
+| Query | Without the index | With it | Index |
+|---|---|---|---|
+| Snapshot page in the middle of a site of 100 000 rows (`WHERE NOT deleted AND site_id = ANY(…) AND (site_id, entity, id) > (…) ORDER BY site_id, entity, id LIMIT 501`) | 19 ms, 50 101 rows read through `entities_site_idx` and sorted | 2.6 ms, index scan of 501 rows | `entities_snapshot_idx (site_id, entity, id) WHERE NOT deleted` |
+| Tombstones of one GC batch (`WHERE deleted AND version > … AND version <= …`) | 36 ms (sequential scan of `entities` per batch) | 4 ms | `entities_tombstone_idx (version) WHERE deleted` |
+| Results of the applied mutations of one batch | 25 ms (sequential scan) | 2 ms | `mutation_results_applied_version_idx (version) WHERE status = 'applied'` |
+| Next batch of the log (`WHERE version > floor ORDER BY version LIMIT 5000`) | — | 7 ms, primary key | `change_log_pkey` |
+| Expired results without a version, 5000 at a time | 72 ms with `IN (subquery)` (hash join over the whole table) | 8.7 ms with `ctid = ANY(ARRAY(subquery))` (TID scan); a partial index on `created_at` made it slower (17 ms) | none |
+
+On sites of about 2000 rows the planner keeps using `entities_site_idx` with an incremental sort
+(1.3 ms per page); the snapshot index matters for large sites, where the sort would read the whole
+site up to the page and make a snapshot quadratic. `change_log_created_idx` was dropped: since the GC
+removes the log by version, no query filters it by `created_at`, and every write paid for it. The
+plans were checked with `EXPLAIN (ANALYZE, BUFFERS)` on that database; the migration builds and
+drops the indexes concurrently.
 
 ## Observability
 
@@ -1380,9 +1581,17 @@ work.
   known-defect test with an owner and is listed by every test run.
 - Writes are serialized on the change log's head for the last statement of each mutation, which
   bounds write throughput per database (see [3.3.1](#protocol-correctness-331)).
-- A 409 `MUTATION_OUT_OF_ORDER` needs the client to reset its queue, which comes with the log
-  lifecycle work; until then the client reports it as `syncError` and keeps retrying with its
-  usual delay.
+- A 409 `MUTATION_OUT_OF_ORDER` means the client lost part of its queue; recovering needs a new
+  client id and a server that refuses late copies under the old one, which comes with the durable
+  client queue (3.3.3). Until then the client reports it as `syncError` and keeps retrying.
+- Log lifecycle (see [3.3.6](#change-log-lifecycle-336)): a snapshot must finish within the
+  retention; an id is protected against reuse only while its deletion is within the retention; a
+  rejection's reason is lost after `MUTATION_RESULT_RETENTION_SECONDS`; push p95 rises by up to
+  about 5 ms while the GC collects a large backlog; partitioning the log is the documented way once
+  it outgrows the database server's memory; a client released before this change cannot handle
+  `RESET_REQUIRED`; during a rolling update the old instances' GC must be stopped; holes the original
+  GC left inside the kept log cannot be told apart from versions rolled back under the old sequence,
+  so the migration cannot reset the clients they affect.
 - A session waiting for a lock does not notice that its client process died; it ends when it gets
   the lock or its `lock_timeout` expires, so a crash leaves no trace either way.
 - There is no revert command. TypeORM's `undoLastMigration` ignores a migration's

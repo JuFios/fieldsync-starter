@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { Db } from '../../src/db';
+import { ProblemException } from '../../src/problem';
 import { PullService } from '../../src/pull.service';
 import { mockDb, result, type MockDb } from './support';
 
@@ -26,15 +27,19 @@ describe('PullService', () => {
   let db: MockDb;
   let log: ReturnType<typeof logRow>[];
   let head: number;
+  let floor: number;
   let lastMutationId: number | undefined;
 
   beforeEach(async () => {
     db = mockDb();
     log = [];
     head = 0;
+    floor = 0;
     lastMutationId = undefined;
     db.inTx.query.mockImplementation((sql, params) => {
-      if (sql.includes('FROM log_head')) return Promise.resolve(result([{ version: String(head) }]));
+      if (sql.includes('FROM log_head')) {
+        return Promise.resolve(result([{ head: String(head), floor: String(floor) }]));
+      }
       if (sql.includes('FROM user_sites')) return Promise.resolve(result([{ site_id: NORTH }]));
       if (sql.includes('FROM change_log')) {
         const [after, upTo, , take] = params as [number, number, unknown, number];
@@ -119,6 +124,23 @@ describe('PullService', () => {
     db.inTx.query.mockClear();
     await expect(pull.pull(TECH, 0, 500)).resolves.toMatchObject({ lastMutationId: 0 });
     expect(db.inTx.query.mock.calls.some(([sql]) => sql.includes('FROM clients'))).toBe(false);
+  });
+
+  it('answers 410 RESET_REQUIRED with the floor for a cursor below the floor of the log', async () => {
+    logOf(5, 6, 7);
+    floor = 4;
+    const err = await pull.pull(TECH, 3, 500).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProblemException);
+    expect(err).toMatchObject({ code: 'RESET_REQUIRED', details: { floor: 4 } });
+    expect((err as ProblemException).getStatus()).toBe(410);
+    expect(logQuery()).toBeUndefined();
+  });
+
+  it('serves a cursor at the floor: it has every change up to the floor already', async () => {
+    logOf(5, 6, 7);
+    floor = 4;
+    const res = await pull.pull(TECH, 4, 500);
+    expect(res.changes.map((c) => c.version)).toEqual([5, 6, 7]);
   });
 
   it('passes a database error to the caller', async () => {

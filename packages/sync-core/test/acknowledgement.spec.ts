@@ -1,10 +1,19 @@
-import { MemoryStorage, SyncClient, type Change, type PullResponse, type PushRequest, type PushResponse } from '../src';
+import {
+  asVersion,
+  MemoryStorage,
+  SyncClient,
+  type Change,
+  type PullResponse,
+  type PushRequest,
+  type PushResponse,
+  type SnapshotPage,
+} from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
 
 const ticketChange = (version: number): Change => ({
-  version,
+  version: asVersion(version),
   entity: 'ticket',
   id: TICKET,
   siteId: SITE,
@@ -18,7 +27,7 @@ class ScriptedTransport {
 
   push(req: PushRequest): Promise<PushResponse> {
     return Promise.resolve({
-      results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: 3 })),
+      results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(3) })),
       lastMutationId: req.mutations.at(-1)?.id ?? 0,
     });
   }
@@ -27,10 +36,17 @@ class ScriptedTransport {
     const next = this.pulls.shift();
     return next ? next() : Promise.reject(new Error('offline'));
   }
+
+  snapshot(): Promise<SnapshotPage> {
+    return Promise.reject(new Error('these tests start from a stored state'));
+  }
 }
 
+/** A client that synced before: it has a stored state, so it reads the log and never a snapshot. */
 function client(transport: ScriptedTransport): SyncClient {
-  return new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+  const storage = new MemoryStorage();
+  storage.save({ cursor: 0, lastMutationId: 0, base: {} });
+  return new SyncClient({ clientId: 'c1', transport, storage });
 }
 
 /**
@@ -54,7 +70,9 @@ describe('acknowledged mutations', () => {
   it('stay visible when a page acknowledges them before the page with their change fails', async () => {
     const transport = new ScriptedTransport();
     // The first page ends before the change; it already reports the mutation as applied.
-    transport.pulls = [() => Promise.resolve({ changes: [], nextCursor: 2, hasMore: true, lastMutationId: 1 })];
+    transport.pulls = [
+      () => Promise.resolve({ changes: [], nextCursor: asVersion(2), hasMore: true, lastMutationId: 1 }),
+    ];
     const c = client(transport);
     try {
       c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
@@ -68,7 +86,8 @@ describe('acknowledged mutations', () => {
   it('leave the queue once the pull delivers their change, and are not applied twice', async () => {
     const transport = new ScriptedTransport();
     transport.pulls = [
-      () => Promise.resolve({ changes: [ticketChange(3)], nextCursor: 3, hasMore: false, lastMutationId: 1 }),
+      () =>
+        Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
     ];
     const c = client(transport);
     try {
@@ -100,7 +119,8 @@ describe('acknowledged mutations', () => {
         titles: ['Mine'],
       });
       transport.pulls = [
-        () => Promise.resolve({ changes: [ticketChange(3)], nextCursor: 3, hasMore: false, lastMutationId: 1 }),
+        () =>
+          Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
       ];
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({

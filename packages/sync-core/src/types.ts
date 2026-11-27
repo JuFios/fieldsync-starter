@@ -1,5 +1,18 @@
 export type EntityName = 'ticket' | 'part';
 
+/**
+ * A position in the server's change log: a change's version, a cursor, a snapshot watermark, the
+ * floor. Branded so that it cannot be mixed up with the other integers of the protocol (mutation
+ * ids above all) without the compiler noticing; on the wire it is a plain JSON number.
+ */
+export type Version = number & { readonly __brand: 'Version' };
+
+/** A version from a number: a non-negative integer that JSON carries exactly. Throws a RangeError otherwise. */
+export function asVersion(n: number): Version {
+  if (!Number.isSafeInteger(n) || n < 0) throw new RangeError(`not a change-log version: ${n}`);
+  return n as Version;
+}
+
 export type Row = Record<string, unknown>;
 
 export type MutatorName =
@@ -62,12 +75,12 @@ export type MutationResult =
    * `version` is the change-log version of the mutation's last change: a client has the mutation's
    * effect once its cursor reaches it. Absent when the mutation changed nothing.
    */
-  | { id: number; status: 'applied'; version?: number }
+  | { id: number; status: 'applied'; version?: Version }
   /**
    * The server had this mutation id already, so it applied nothing now; `version` as for `applied`
    * (absent too when the original result has expired, see the change-log retention).
    */
-  | { id: number; status: 'duplicate'; version?: number }
+  | { id: number; status: 'duplicate'; version?: Version }
   | ({ id: number; status: 'rejected' } & Rejection);
 
 export type MutationStatus = MutationResult['status'];
@@ -100,7 +113,7 @@ export interface PushResponse {
 }
 
 export interface Change {
-  version: number;
+  version: Version;
   entity: EntityName;
   id: string;
   siteId: string;
@@ -110,9 +123,42 @@ export interface Change {
 
 export interface PullResponse {
   changes: Change[];
-  nextCursor: number;
+  nextCursor: Version;
   hasMore: boolean;
   lastMutationId: number;
+}
+
+/** A live row of a snapshot. */
+export interface SnapshotRow {
+  entity: EntityName;
+  id: string;
+  siteId: string;
+  data: Row;
+}
+
+/** Where a snapshot page ends; the next page starts after it (rows are ordered by site, entity, id). */
+export interface SnapshotKey {
+  siteId: string;
+  entity: EntityName;
+  id: string;
+}
+
+/**
+ * One page of a snapshot: live rows of the user's sites in key order. `watermark` is the head of the
+ * change log when the snapshot started; every page of one snapshot carries it, and after the last
+ * page (`next` null) the client pulls the log from it, which makes the rows it read consistent.
+ */
+export interface SnapshotPage {
+  watermark: Version;
+  rows: SnapshotRow[];
+  next: SnapshotKey | null;
+}
+
+/** A snapshot page to read: the first one (no watermark), or the one after `after`. */
+export interface SnapshotRequest {
+  watermark?: Version;
+  after?: SnapshotKey;
+  limit?: number;
 }
 
 export type TicketStatus = 'open' | 'in_progress' | 'done' | 'cancelled';

@@ -1,6 +1,6 @@
 import type { RejectionCode } from '@fieldsync/sync-core';
 import type { LinkState, RequestFault, ResponseFault } from './network';
-import type { Role } from './types';
+import { SIM_RETENTION_MS, type Role } from './types';
 
 /** What a simulated user does; the generator turns a kind into a concrete mutation. */
 export const ACTION_KINDS = [
@@ -15,7 +15,17 @@ export const ACTION_KINDS = [
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
 /** What a command of the fault phase does (see `StepCommand`). */
-export const STEP_KINDS = ['act', 'sync', 'deliver', 'respond', 'redeliver', 'tick', 'link'] as const;
+export const STEP_KINDS = [
+  'act',
+  'sync',
+  'deliver',
+  'respond',
+  'redeliver',
+  'tick',
+  'link',
+  'compact',
+  'away',
+] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
 /**
@@ -39,6 +49,8 @@ export const SIGNATURES = [
   'client-error',
   /** A ticket field does not hold the value of the last applied mutation that wrote it. */
   'lost-edit',
+  /** A client dropped a queued mutation that the server never handled. */
+  'lost-mutation',
 ] as const;
 export type Signature = (typeof SIGNATURES)[number];
 
@@ -98,6 +110,12 @@ export interface Profile {
   invalidText: boolean;
   /** Longest time a `tick` step lets pass, in ms (the client retries after 5 s). */
   maxTickMs: number;
+  /**
+   * How long an `away` step keeps a client away, in ms of virtual time: longer than the server's
+   * change-log retention ({@link SIM_RETENTION_MS}), so a `compact` step after it leaves the
+   * client's cursor behind the floor and the client has to be reset.
+   */
+  awayMs: number;
   /** Known-defect signatures this profile may produce (see {@link KNOWN_SIGNATURES}). */
   allowed: readonly Signature[];
   /**
@@ -129,9 +147,33 @@ const NO_ACTIONS: Record<ActionKind, number> = {
 const ALL_REQUEST_FAULTS = { none: 20, 'drop-request': 4, duplicate: 3, 'hold-copy': 3, hang: 0 } as const;
 const ALL_RESPONSE_FAULTS = { none: 10, 'drop-response': 2, 'bad-gateway': 1, truncate: 1 } as const;
 const ALL_LINK_STATES = { up: 3, down: 2, 'responses-lost': 1 } as const;
-const STEPS = { act: 60, sync: 15, deliver: 60, respond: 60, redeliver: 10, tick: 15, link: 8 } as const;
+const STEPS = {
+  act: 60,
+  sync: 15,
+  deliver: 60,
+  respond: 60,
+  redeliver: 10,
+  tick: 15,
+  link: 8,
+  compact: 4,
+  away: 3,
+} as const;
 
+/**
+ * Writes to a row another client wrote last, per seed. A client that starts (every client, at the
+ * start of a run) reads a snapshot and then the log, one exchange more than a pull, before it sees
+ * the other clients' rows, so fewer of its first writes land on them; `compact` and `away` steps
+ * take a share of the commands too (README, Simulation).
+ */
+const CONTENTION = 0.8;
+/** Users of different sites see fewer of each other's tickets, so fewer rows have several writers. */
+const CONTENTION_MULTI_SITE = 0.6;
 /** Statistics every profile must keep up: each fault happens, clients contend for the same rows. */
+/**
+ * The log lifecycle in every profile: the server compacts its log, a client is away longer than the
+ * retention, and a client is reset (410) and reloads from a snapshot.
+ */
+const LIFECYCLE_MINIMUM = { compactions: 0.8, away: 0.5, resets: 0.1 } as const;
 const NETWORK_MINIMUM = {
   'requestFault:drop-request': 1,
   'requestFault:duplicate': 0.7,
@@ -175,11 +217,12 @@ const baseline: Profile = {
   linkStates: ALL_LINK_STATES,
   invalidText: false,
   maxTickMs: 8_000,
+  awayMs: 2 * SIM_RETENTION_MS,
   allowed: [],
   // Creates, edits and parts of existing tickets: the server applies every one, except an edit of a
   // field another client changed since the user saw it.
   rejectionCodes: SAME_FIELD_EDITS,
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, 'action:edit-ticket': 6 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, ...LIFECYCLE_MINIMUM, crossClientWrites: CONTENTION, 'action:edit-ticket': 6 },
 };
 
 /**
@@ -219,7 +262,13 @@ const rejections: Profile = {
   invalidText: true,
   allowed: [],
   rejectionCodes: REJECTABLE,
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, serverRejections: 1, 'action:change-status': 3 },
+  minimumPerSeed: {
+    ...NETWORK_MINIMUM,
+    ...LIFECYCLE_MINIMUM,
+    crossClientWrites: CONTENTION,
+    serverRejections: 1,
+    'action:change-status': 3,
+  },
 };
 
 /** Two sites, technicians of one site each, a technician of both and an admin; no rejectable actions. */
@@ -242,8 +291,12 @@ const multiSite: Profile = {
   ],
   allowed: ['foreign-site-rows'],
   rejectionCodes: [...FOREIGN_TICKET_EDITS, ...SAME_FIELD_EDITS],
-  // Users of different sites see fewer of each other's tickets, so fewer rows have several writers.
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, 'action:edit-ticket': 6 },
+  minimumPerSeed: {
+    ...NETWORK_MINIMUM,
+    ...LIFECYCLE_MINIMUM,
+    crossClientWrites: CONTENTION_MULTI_SITE,
+    'action:edit-ticket': 6,
+  },
 };
 
 /** Everything at once, hung requests included. */
@@ -256,7 +309,13 @@ const full: Profile = {
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
   allowed: ['foreign-site-rows', 'stuck-request'],
   rejectionCodes: [...REJECTABLE, ...FOREIGN_TICKET_EDITS],
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
+  minimumPerSeed: {
+    ...NETWORK_MINIMUM,
+    ...LIFECYCLE_MINIMUM,
+    crossClientWrites: CONTENTION_MULTI_SITE,
+    serverRejections: 1,
+    'action:change-status': 3,
+  },
 };
 
 export const PROFILES = { baseline, rejections, 'multi-site': multiSite, full } satisfies Record<string, Profile>;

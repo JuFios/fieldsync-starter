@@ -65,4 +65,14 @@ export interface SimServer {
   send(request: SimRequest): Promise<SimResponse>;
   /** Every live row, independently of the server's own read paths (the oracle's source of truth). */
   liveRows(): Promise<StoredRow[]>;
+  /**
+   * Runs the change-log GC at the server's current (virtual) time, with the retention the binding
+   * configured (see {@link SIM_RETENTION_MS}). Returns the number of log entries it removed.
+   */
+  compact(): Promise<number>;
+  /** The last mutation id the server handled for each client id it knows, independently of its API. */
+  handledMutations(): Promise<Map<string, number>>;
 }
+
+/** Change-log retention the server of a simulation runs with: one hour of virtual time. */
+export const SIM_RETENTION_MS = 3_600_000;

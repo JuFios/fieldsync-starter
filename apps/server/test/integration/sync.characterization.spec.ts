@@ -286,7 +286,7 @@ describeWithDb('sync API (characterization)', () => {
   });
 
   describe('change-log GC', () => {
-    it('deletes entries older than the retention period and reports how many', async () => {
+    it('deletes the oldest entries up to the first one within the retention, and reports how many', async () => {
       const site = await ctx.fixtures.site();
       const insert = (age: string) =>
         ctx.db.query<{ version: string }>(
@@ -296,17 +296,21 @@ describeWithDb('sync API (characterization)', () => {
            SELECT head.version, $1, 'ticket', $2, 'put', '{}', now() - $3::interval FROM head RETURNING version`,
           [site, randomUUID(), age],
         );
-      const old = [await insert('8 days'), await insert('30 days')].map((r) => r.rows[0].version);
-      const recent = (await insert('1 day')).rows[0].version;
+      // Earlier tests of this file wrote recent entries: the log starts fresh for this test.
+      await ctx.db.query(`DELETE FROM change_log`);
+      const [first, second] = [await insert('8 days'), await insert('30 days')].map((r) => Number(r.rows[0].version));
+      const recent = Number((await insert('1 day')).rows[0].version);
+      // Old again, but after a recent one: it stays until the recent one is old as well.
+      const late = Number((await insert('9 days')).rows[0].version);
 
-      const removed = await ctx.server.app.get(GcService).collect();
+      const run = await ctx.server.app.get(GcService).collect();
 
-      expect(removed).toBe(2);
+      expect(run).toMatchObject({ log: 2, floor: second, skipped: false });
       const { rows } = await ctx.db.query<{ version: string }>(
-        `SELECT version FROM change_log WHERE version = ANY($1::bigint[])`,
-        [[...old, recent]],
+        `SELECT version FROM change_log WHERE version = ANY($1::bigint[]) ORDER BY version`,
+        [[first, second, recent, late]],
       );
-      expect(rows.map((r) => r.version)).toEqual([recent]);
+      expect(rows.map((r) => Number(r.version))).toEqual([recent, late]);
     });
   });
 });

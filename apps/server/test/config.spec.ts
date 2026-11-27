@@ -30,6 +30,8 @@ describe('validate', () => {
       DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: 10_000,
       SEED_DEMO: false,
       CHANGELOG_RETENTION_SECONDS: 604_800,
+      MUTATION_RESULT_RETENTION_SECONDS: 1_209_600,
+      GC_BATCH_SIZE: 5_000,
       GC_INTERVAL_MS: 3_600_000,
       JSON_BODY_LIMIT_BYTES: 2_097_152,
       API_DOCS_ENABLED: false,
@@ -43,7 +45,9 @@ describe('validate', () => {
         DATABASE_URL: 'postgresql://u:p@localhost/db',
         DB_POOL_MAX: '5',
         SEED_DEMO: 'true',
-        CHANGELOG_RETENTION_SECONDS: '60',
+        CHANGELOG_RETENTION_SECONDS: '3600',
+        MUTATION_RESULT_RETENTION_SECONDS: '7200',
+        GC_BATCH_SIZE: '100',
         GC_INTERVAL_MS: '1000',
         JSON_BODY_LIMIT_BYTES: '1048576',
         API_DOCS_ENABLED: 'true',
@@ -53,7 +57,9 @@ describe('validate', () => {
       DATABASE_URL: 'postgresql://u:p@localhost/db',
       DB_POOL_MAX: 5,
       SEED_DEMO: true,
-      CHANGELOG_RETENTION_SECONDS: 60,
+      CHANGELOG_RETENTION_SECONDS: 3600,
+      MUTATION_RESULT_RETENTION_SECONDS: 7200,
+      GC_BATCH_SIZE: 100,
       GC_INTERVAL_MS: 1000,
       JSON_BODY_LIMIT_BYTES: 1_048_576,
       API_DOCS_ENABLED: true,
@@ -90,10 +96,30 @@ describe('validate', () => {
     ['DB_POOL_MAX', '2.5'],
     ['CHANGELOG_RETENTION_SECONDS', '0'],
     ['CHANGELOG_RETENTION_SECONDS', '-1'],
+    // Shorter than a snapshot may take, see CHANGELOG_RETENTION_SECONDS.
+    ['CHANGELOG_RETENTION_SECONDS', '3599'],
+    ['MUTATION_RESULT_RETENTION_SECONDS', '3599'],
+    ['GC_BATCH_SIZE', '99'],
+    ['GC_BATCH_SIZE', '100001'],
   ])('rejects %s=%s with a readable message', (name, value) => {
     const problems = problemsOf({ [name]: value });
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(new RegExp(`^${name} must be an integer from \\d+ to \\d+ \\(got "${value}"\\)$`));
+  });
+
+  it('makes the result retention twice the change-log retention by default, at least 14 days', () => {
+    expect(validate({ DATABASE_URL: SECRET_URL, CHANGELOG_RETENTION_SECONDS: '2592000' })).toMatchObject({
+      MUTATION_RESULT_RETENTION_SECONDS: 5_184_000,
+    });
+    expect(validate({ DATABASE_URL: SECRET_URL, CHANGELOG_RETENTION_SECONDS: '3600' })).toMatchObject({
+      MUTATION_RESULT_RETENTION_SECONDS: 1_209_600,
+    });
+  });
+
+  it('rejects a result retention shorter than the change-log retention', () => {
+    expect(problemsOf({ CHANGELOG_RETENTION_SECONDS: '7200', MUTATION_RESULT_RETENTION_SECONDS: '3600' })).toEqual([
+      'MUTATION_RESULT_RETENTION_SECONDS must not be shorter than CHANGELOG_RETENTION_SECONDS (got 3600 and 7200)',
+    ]);
   });
 
   it.each(['SEED_DEMO', 'API_DOCS_ENABLED'])('rejects anything but "true" or "false" for %s', (name) => {

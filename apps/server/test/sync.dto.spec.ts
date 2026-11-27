@@ -1,6 +1,6 @@
 import { BadRequestException, ValidationPipe, type ArgumentMetadata } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PullQueryDto, PushRequestDto } from '../src/sync.dto';
+import { PullQueryDto, PushRequestDto, SnapshotQueryDto } from '../src/sync.dto';
 
 /** The pipe exactly as AppModule registers it. */
 const pipe = new ValidationPipe({ whitelist: true, transform: true, stopAtFirstError: true });
@@ -70,5 +70,40 @@ describe('PushRequestDto', () => {
     [{ clientId, mutations: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, name: 'n', args: {} })) }],
   ])('rejects %j', async (input) => {
     await expect(pipe.transform(input, body)).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('SnapshotQueryDto', () => {
+  const snapshot: ArgumentMetadata = { type: 'query', metatype: SnapshotQueryDto };
+  const key = { afterSite: randomUUID(), afterEntity: 'ticket', afterId: randomUUID() };
+
+  it('accepts a first page without anything, with a full page as the default', async () => {
+    const dto = (await pipe.transform({}, snapshot)) as SnapshotQueryDto;
+    expect({ watermark: dto.watermark, afterSite: dto.afterSite, limit: dto.limit }).toEqual({
+      watermark: undefined,
+      afterSite: undefined,
+      limit: 500,
+    });
+  });
+
+  it('accepts a later page: its watermark and a complete key', async () => {
+    const dto = (await pipe.transform({ watermark: '12', ...key, limit: '3' }, snapshot)) as SnapshotQueryDto;
+    expect({ ...dto }).toEqual({ watermark: 12, ...key, limit: 3 });
+  });
+
+  it.each([
+    [{ ...key }],
+    [{ watermark: '1', afterSite: key.afterSite, afterEntity: 'ticket' }],
+    [{ watermark: '1', afterId: key.afterId }],
+    [{ watermark: '1', ...key, afterEntity: 'constructor' }],
+    [{ watermark: '1', ...key, afterSite: 'x' }],
+    [{ watermark: '1e3' }],
+    [{ watermark: '' }],
+    [{ watermark: '-1' }],
+    [{ watermark: ['1', '2'] }],
+    [{ limit: '0' }],
+    [{ limit: '501' }],
+  ])('rejects %j', async (input) => {
+    await expect(pipe.transform(input, snapshot)).rejects.toBeInstanceOf(BadRequestException);
   });
 });

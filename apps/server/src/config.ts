@@ -1,11 +1,25 @@
 import { MAX_PUSH_BODY_BYTES } from '@fieldsync/sync-core';
 import { ConfigService } from '@nestjs/config';
 import { Expose, plainToInstance, Transform, type TransformFnParams } from 'class-transformer';
-import { IsBoolean, IsDefined, IsString, Matches, validateSync, type ValidationArguments } from 'class-validator';
+import {
+  IsBoolean,
+  IsDefined,
+  IsOptional,
+  IsString,
+  Matches,
+  validateSync,
+  type ValidationArguments,
+} from 'class-validator';
 import { IntegerIn as IntegerBetween, trimmed } from './validation';
 
 /** Largest delay setInterval accepts; larger values silently become 1 ms. */
 const MAX_TIMER_MS = 2_147_483_647;
+
+/** Shortest retention of the change log and of mutation results, in seconds (see CHANGELOG_RETENTION_SECONDS). */
+export const MIN_RETENTION_SECONDS = 3_600;
+
+/** The default retention of mutation results is twice the log's, and never less than this (14 days). */
+const DEFAULT_MIN_RESULT_RETENTION_SECONDS = 1_209_600;
 
 /** A blank value counts as unset, so the setting gets its default. */
 function isBlank(value: unknown): boolean {
@@ -88,10 +102,31 @@ export class EnvironmentVariables {
   @IntegerIn(1, 3_600_000)
   DB_IDLE_IN_TRANSACTION_TIMEOUT_MS = 10_000;
 
-  /** Change-log entries older than this are removed by the GC. */
+  /**
+   * Change-log entries older than this are removed by the GC; a client whose cursor falls behind
+   * them is reset (410 RESET_REQUIRED) and reloads its state from a snapshot. At least an hour: a
+   * snapshot started at the head of the log stays valid until the changes after it are this old, so
+   * a snapshot (with the tail of the log after it) must finish within the retention.
+   */
   @Expose()
-  @IntegerIn(1, 2_147_483_647)
+  @IntegerIn(MIN_RETENTION_SECONDS, 2_147_483_647)
   CHANGELOG_RETENTION_SECONDS = 604_800;
+
+  /**
+   * Results of rejected mutations, and of applied ones that changed nothing, are kept this long to
+   * answer retried copies of them; results of applied mutations go with the log entries of their
+   * changes. Never shorter than the change-log retention, so a client that is reset still learns why
+   * its mutations were rejected. Unset, it is twice the change-log retention, at least 14 days.
+   */
+  @Expose()
+  @IsOptional()
+  @IntegerIn(MIN_RETENTION_SECONDS, 2_147_483_647)
+  MUTATION_RESULT_RETENTION_SECONDS!: number;
+
+  /** Most change-log entries one GC transaction removes, so that no transaction holds locks for long. */
+  @Expose()
+  @IntegerIn(100, 100_000)
+  GC_BATCH_SIZE = 5_000;
 
   /** How often the change-log GC runs. At least a second: a GC that runs more often only loads the database. */
   @Expose()
@@ -139,8 +174,19 @@ export function validate(env: Record<string, unknown>): EnvironmentVariables {
     stopAtFirstError: true,
     validationError: { target: false, value: false },
   });
-  if (errors.length > 0) {
-    throw new ConfigError(errors.flatMap((e) => Object.values(e.constraints ?? {})));
+  const problems = errors.flatMap((e) => Object.values(e.constraints ?? {}));
+  if (problems.length === 0 && (config.MUTATION_RESULT_RETENTION_SECONDS as number | undefined) === undefined) {
+    config.MUTATION_RESULT_RETENTION_SECONDS = Math.max(
+      DEFAULT_MIN_RESULT_RETENTION_SECONDS,
+      Math.min(2 * config.CHANGELOG_RETENTION_SECONDS, 2_147_483_647),
+    );
   }
+  if (problems.length === 0 && config.MUTATION_RESULT_RETENTION_SECONDS < config.CHANGELOG_RETENTION_SECONDS) {
+    problems.push(
+      `MUTATION_RESULT_RETENTION_SECONDS must not be shorter than CHANGELOG_RETENTION_SECONDS ` +
+        `(got ${config.MUTATION_RESULT_RETENTION_SECONDS} and ${config.CHANGELOG_RETENTION_SECONDS})`,
+    );
+  }
+  if (problems.length > 0) throw new ConfigError(problems);
   return Object.freeze(config);
 }
