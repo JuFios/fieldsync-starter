@@ -35,7 +35,7 @@ describeWithDb('change-log compaction', () => {
     const clock = ctx.server.app.get(Clock);
     const now = jest.spyOn(clock, 'now').mockReturnValue(new Date(Date.now() + ms));
     try {
-      return await ctx.server.app.get(GcService).collect();
+      return (await ctx.server.app.get(GcService).collect()).log;
     } finally {
       now.mockRestore();
     }

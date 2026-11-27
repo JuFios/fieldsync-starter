@@ -100,6 +100,9 @@ export class MemoryServer implements SimServer {
     }
     if (request.method === 'GET' && url.pathname === '/sync/pull')
       return Promise.resolve(this.pull(user, url.searchParams));
+    if (request.method === 'GET' && url.pathname === '/sync/snapshot') {
+      return Promise.resolve(this.snapshot(user, url.searchParams));
+    }
     return Promise.resolve(json(404, { message: 'Not found' }));
   }
 
@@ -194,6 +197,39 @@ export class MemoryServer implements SimServer {
     }
   }
 
+  /** Whether a defect hides this row from every read path. */
+  private dropped(entity: EntityName, id: string): boolean {
+    return this.defects.has('drop-first-row') && entity === this.log[0]?.entity && id === this.log[0]?.id;
+  }
+
+  private shown(entity: EntityName, data: Row | null): Row | null {
+    return this.defects.has('corrupt-status') && entity === 'ticket' && data
+      ? { ...data, status: 'constructor' }
+      : data;
+  }
+
+  /** Live rows of the user's sites in key order (site, entity, id), from the page key on; never compacted. */
+  private snapshot(user: SimUser, params: URLSearchParams): SimResponse {
+    const limit = Math.min(Math.max(Number(params.get('limit') ?? 500), 1), 500);
+    const watermark = params.has('watermark') ? Number(params.get('watermark')) : this.log.length;
+    const after = params.has('afterSite')
+      ? `${params.get('afterSite')}/${params.get('afterEntity')}/${params.get('afterId')}`
+      : undefined;
+    const sites = this.sites(user);
+    const rows = [...this.entities.values()]
+      .filter((e) => !e.deleted && e.data && sites.has(e.siteId) && !this.dropped(e.entity, e.id))
+      .map((e) => ({ key: `${e.siteId}/${e.entity}/${e.id}`, e }))
+      .filter((r) => after === undefined || r.key > after)
+      .sort((a, b) => (a.key < b.key ? -1 : 1));
+    const page = rows.slice(0, limit);
+    const last = page.at(-1)?.e;
+    return json(200, {
+      watermark,
+      rows: page.map(({ e }) => ({ entity: e.entity, id: e.id, siteId: e.siteId, data: this.shown(e.entity, e.data) })),
+      next: rows.length > limit && last ? { siteId: last.siteId, entity: last.entity, id: last.id } : null,
+    });
+  }
+
   private pull(user: SimUser, params: URLSearchParams): SimResponse {
     const cursor = Number(params.get('cursor') ?? 0);
     const limit = Math.min(Math.max(Number(params.get('limit') ?? 500), 1), 500);
@@ -202,9 +238,7 @@ export class MemoryServer implements SimServer {
     const ignoreSites = this.defects.has('foreign-rows') && cursor > 0;
     const page = this.log
       .filter((e) => e.version > cursor)
-      .filter(
-        (e) => !(this.defects.has('drop-first-row') && e.entity === this.log[0]?.entity && e.id === this.log[0]?.id),
-      )
+      .filter((e) => !this.dropped(e.entity, e.id))
       .filter((e) => ignoreSites || sites.has(e.siteId))
       .slice(0, limit);
     const head = this.log.length;
@@ -215,10 +249,7 @@ export class MemoryServer implements SimServer {
         id: e.id,
         siteId: e.siteId,
         op: e.op,
-        data:
-          this.defects.has('corrupt-status') && e.entity === 'ticket' && e.data
-            ? { ...e.data, status: 'constructor' }
-            : e.data,
+        data: this.shown(e.entity, e.data),
       })),
       nextCursor: page.length === limit ? (page.at(-1)?.version ?? cursor) : Math.max(cursor, head),
       hasMore: page.length === limit,

@@ -1,18 +1,44 @@
 import { systemClock, type SyncClock, type TimerHandle } from './clock';
 import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './mutators';
 import type { SyncStorage } from './storage';
-import { TransportError, type Transport } from './transport';
+import { RESET_REQUIRED, TransportError, type Transport } from './transport';
 import {
   MAX_PUSH_BODY_BYTES,
   MAX_PUSH_MUTATIONS,
   type EntityName,
   type Mutation,
   type MutatorName,
+  type PullResponse,
   type Rejection,
   type Row,
 } from './types';
 
-export type SyncStatus = 'idle' | 'syncing' | 'offline';
+/**
+ * `loading`: the client is reading a snapshot of the server's state (it has none yet, or its cursor
+ * fell behind the collected part of the change log); its view still shows the previous state.
+ */
+export type SyncStatus = 'idle' | 'syncing' | 'loading' | 'offline';
+
+/** Changes and snapshot rows per request. */
+const PAGE_SIZE = 500;
+
+/**
+ * Snapshots started in one sync before giving up until the next retry. A snapshot is answered
+ * RESET_REQUIRED again only if it took longer than the server's change-log retention.
+ */
+const MAX_SNAPSHOT_ATTEMPTS = 3;
+
+function isResetRequired(err: unknown): boolean {
+  return err instanceof TransportError && err.code === RESET_REQUIRED;
+}
+
+function applyChanges(state: Map<string, Row>, changes: PullResponse['changes']): void {
+  for (const change of changes) {
+    const key = `${change.entity}/${change.id}`;
+    if (change.op === 'put' && change.data) state.set(key, change.data);
+    else state.delete(key);
+  }
+}
 
 /** Why the last sync failed: the server's problem code, or NETWORK when no answer arrived. */
 export interface SyncError {
@@ -132,6 +158,12 @@ export class SyncClient {
    */
   private nextMutationId = 1;
   private pending: Queued[] = [];
+  /**
+   * Whether `base` and `cursor` hold a state read from the server. A client without one, and one
+   * whose cursor the server no longer serves (410 RESET_REQUIRED), loads a snapshot instead of
+   * reading the change log from the start.
+   */
+  private hasState = false;
   private listeners = new Set<() => void>();
   private currentStatus: SyncStatus = 'idle';
   private rejected: RejectedMutation[] = [];
@@ -152,6 +184,7 @@ export class SyncClient {
       this.lastMutationId = saved.lastMutationId;
       this.nextMutationId = saved.lastMutationId + 1;
       this.base = new Map(Object.entries(saved.base));
+      this.hasState = true;
     }
   }
 
@@ -239,7 +272,14 @@ export class SyncClient {
     this.setStatus('syncing');
     try {
       await this.push();
-      await this.pull();
+      if (this.hasState) {
+        await this.pull().catch(async (err: unknown) => {
+          if (!isResetRequired(err)) throw err;
+          await this.reload();
+        });
+      } else {
+        await this.reload();
+      }
       this.lastError = undefined;
       this.setStatus('idle');
     } catch (err) {
@@ -322,25 +362,77 @@ export class SyncClient {
 
   private async pull(): Promise<void> {
     for (;;) {
-      const resp = await this.transport.pull(this.cursor, this.clientId, 500);
-      for (const change of resp.changes) {
-        const key = `${change.entity}/${change.id}`;
-        if (change.op === 'put' && change.data) this.base.set(key, change.data);
-        else this.base.delete(key);
-      }
+      const resp = await this.transport.pull(this.cursor, this.clientId, PAGE_SIZE);
+      applyChanges(this.base, resp.changes);
       this.cursor = resp.nextCursor;
-      this.acknowledge(resp.lastMutationId);
-      this.pending = this.pending.filter((q) => {
-        if (q.appliedAt !== undefined) return q.appliedAt > this.cursor;
-        if (q.awaitingPull) return resp.hasMore;
-        // A mutation whose answer was lost: the last page comes from the same snapshot as the
-        // client's last applied id, so every change of those mutations is in the pages read.
-        return resp.hasMore || q.mutation.id > resp.lastMutationId;
-      });
+      this.settle(resp);
       this.persist();
       this.emit();
       if (!resp.hasMore) break;
     }
+  }
+
+  /**
+   * After a pull page: takes the server's last handled id and drops the pending mutations whose
+   * effect the client now has.
+   */
+  private settle(resp: PullResponse): void {
+    this.acknowledge(resp.lastMutationId);
+    this.pending = this.pending.filter((q) => {
+      if (q.appliedAt !== undefined) return q.appliedAt > this.cursor;
+      if (q.awaitingPull) return resp.hasMore;
+      // A mutation whose answer was lost: the last page comes from the same snapshot as the
+      // client's last applied id, so every change of those mutations is in the pages read.
+      return resp.hasMore || q.mutation.id > resp.lastMutationId;
+    });
+  }
+
+  /**
+   * Replaces the client's state with the server's: a snapshot (see {@link loadSnapshot}), started
+   * again if the server answers RESET_REQUIRED while it is read.
+   */
+  private async reload(): Promise<void> {
+    this.setStatus('loading');
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.loadSnapshot();
+        return;
+      } catch (err) {
+        if (!isResetRequired(err) || attempt >= MAX_SNAPSHOT_ATTEMPTS) throw err;
+      }
+    }
+  }
+
+  /**
+   * Reads every page of a snapshot and then the change log from its watermark into a separate map,
+   * and only then makes it the base, with the cursor and the pending mutations settled by the last
+   * pull page. Rows of a page may already hold changes after the watermark; the log replays them in
+   * commit order, so the staged state ends as the server's, and nothing in between ever reaches the
+   * view. The queue is kept: the view is the new base with the remaining pending mutations applied on
+   * top (a rebase). An interruption leaves the previous state in place; the next sync starts over.
+   */
+  private async loadSnapshot(): Promise<void> {
+    const staged = new Map<string, Row>();
+    let page = await this.transport.snapshot({ limit: PAGE_SIZE });
+    const { watermark } = page;
+    for (;;) {
+      for (const row of page.rows) staged.set(`${row.entity}/${row.id}`, row.data);
+      if (page.next === null) break;
+      page = await this.transport.snapshot({ watermark, after: page.next, limit: PAGE_SIZE });
+    }
+    let cursor = watermark;
+    let last: PullResponse;
+    do {
+      last = await this.transport.pull(cursor, this.clientId, PAGE_SIZE);
+      applyChanges(staged, last.changes);
+      cursor = last.nextCursor;
+    } while (last.hasMore);
+    this.base = staged;
+    this.cursor = cursor;
+    this.hasState = true;
+    this.settle(last);
+    this.persist();
+    this.emit();
   }
 
   private persist(): void {

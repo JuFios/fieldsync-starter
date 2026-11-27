@@ -115,4 +115,37 @@ export interface PullResponse {
   lastMutationId: number;
 }
 
+/** A live row of a snapshot. */
+export interface SnapshotRow {
+  entity: EntityName;
+  id: string;
+  siteId: string;
+  data: Row;
+}
+
+/** Where a snapshot page ends; the next page starts after it (rows are ordered by site, entity, id). */
+export interface SnapshotKey {
+  siteId: string;
+  entity: EntityName;
+  id: string;
+}
+
+/**
+ * One page of a snapshot: live rows of the user's sites in key order. `watermark` is the head of the
+ * change log when the snapshot started; every page of one snapshot carries it, and after the last
+ * page (`next` null) the client pulls the log from it, which makes the rows it read consistent.
+ */
+export interface SnapshotPage {
+  watermark: number;
+  rows: SnapshotRow[];
+  next: SnapshotKey | null;
+}
+
+/** A snapshot page to read: the first one (no watermark), or the one after `after`. */
+export interface SnapshotRequest {
+  watermark?: number;
+  after?: SnapshotKey;
+  limit?: number;
+}
+
 export type TicketStatus = 'open' | 'in_progress' | 'done' | 'cancelled';

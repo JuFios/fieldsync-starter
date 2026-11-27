@@ -92,6 +92,7 @@ describeWithDb('server startup', () => {
           '/me',
           '/sync/pull',
           '/sync/push',
+          '/sync/snapshot',
           '/sync/stream',
         ]);
         expect(res.body.components.securitySchemes.bearer.scheme).toBe('bearer');
@@ -124,7 +125,16 @@ describeWithDb('server startup', () => {
             (res.body.paths[path][method] as unknown as { responses: Record<string, unknown> }).responses,
           ).sort();
         expect(responses('/sync/push', 'post')).toEqual(['201', '400', '401', '409', '413', '500', '503']);
-        expect(responses('/sync/pull', 'get')).toEqual(['200', '400', '401', '500', '503']);
+        expect(responses('/sync/pull', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
+        expect(responses('/sync/snapshot', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
+        const snapshot = res.body.paths['/sync/snapshot'].get.parameters ?? [];
+        expect(snapshot.map((p) => [p.name, p.in, p.required ?? false]).sort()).toEqual([
+          ['afterEntity', 'query', false],
+          ['afterId', 'query', false],
+          ['afterSite', 'query', false],
+          ['limit', 'query', false],
+          ['watermark', 'query', false],
+        ]);
         const { PushRequestDto, MutationDto } = res.body.components.schemas;
         expect([PushRequestDto.required, MutationDto.required]).toEqual([
           ['clientId', 'mutations'],

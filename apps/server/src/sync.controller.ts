@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Header, Post, Query, Req, Res } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiConflictResponse,
   ApiCreatedResponse,
+  ApiGoneResponse,
   ApiInternalServerErrorResponse,
   ApiOkResponse,
   ApiOperation,
@@ -19,8 +20,17 @@ import type { AuthedRequest } from './auth';
 import { Db } from './db';
 import { PullService } from './pull.service';
 import { PushService } from './push.service';
+import { SnapshotService } from './snapshot.service';
 import { StreamService } from './stream.service';
-import { ProblemDto, PullQueryDto, PullResponseDto, PushRequestDto, PushResponseDto } from './sync.dto';
+import {
+  ProblemDto,
+  PullQueryDto,
+  PullResponseDto,
+  PushRequestDto,
+  PushResponseDto,
+  SnapshotPageDto,
+  SnapshotQueryDto,
+} from './sync.dto';
 
 @ApiTags('sync')
 @ApiBearerAuth()
@@ -32,6 +42,7 @@ export class SyncController {
     private readonly db: Db,
     private readonly pushService: PushService,
     private readonly pullService: PullService,
+    private readonly snapshotService: SnapshotService,
     private readonly streams: StreamService,
   ) {}
 
@@ -73,12 +84,49 @@ export class SyncController {
   })
   @ApiOkResponse({ type: PullResponseDto })
   @ApiBadRequestResponse({ description: 'A cursor, limit or client id that is not valid.', type: ProblemDto })
+  @ApiGoneResponse({
+    description:
+      'The cursor is below the floor of the change log (RESET_REQUIRED, details.floor): reload the state from GET /sync/snapshot.',
+    type: ProblemDto,
+  })
   @ApiServiceUnavailableResponse({
     description: 'A transient database failure (TRANSIENT, Retry-After).',
     type: ProblemDto,
   })
+  // Sync answers are the user's data and change with every write: never stored by a cache.
+  @Header('Cache-Control', 'no-store')
   pull(@Req() req: AuthedRequest, @Query() query: PullQueryDto) {
     return this.pullService.pull(req.user, query.cursor, query.limit, query.clientId);
+  }
+
+  @Get('sync/snapshot')
+  @ApiOperation({
+    summary: 'The live state of the sites the user can access, page by page',
+    description:
+      'For a client without state, or one answered RESET_REQUIRED. The first page fixes the watermark (the head of ' +
+      'the change log); every next page passes it with the key of the previous page. After the last page the ' +
+      'client pulls from the watermark and only then replaces its state.',
+  })
+  @ApiOkResponse({ type: SnapshotPageDto })
+  @ApiBadRequestResponse({
+    description: 'An incomplete or invalid page key, a limit out of range, or a watermark ahead of the log.',
+    type: ProblemDto,
+  })
+  @ApiGoneResponse({
+    description: 'The watermark fell below the floor of the change log (RESET_REQUIRED): start a new snapshot.',
+    type: ProblemDto,
+  })
+  @ApiServiceUnavailableResponse({
+    description: 'A transient database failure (TRANSIENT, Retry-After).',
+    type: ProblemDto,
+  })
+  @Header('Cache-Control', 'no-store')
+  snapshot(@Req() req: AuthedRequest, @Query() query: SnapshotQueryDto) {
+    const after =
+      query.afterSite !== undefined && query.afterEntity !== undefined && query.afterId !== undefined
+        ? { siteId: query.afterSite, entity: query.afterEntity, id: query.afterId }
+        : undefined;
+    return this.snapshotService.page(req.user, { watermark: query.watermark, after, limit: query.limit });
   }
 
   @Get('sync/stream')

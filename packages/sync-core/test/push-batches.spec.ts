@@ -4,6 +4,7 @@ import {
   type PullResponse,
   type PushRequest,
   type PushResponse,
+  type SnapshotPage,
   type Transport,
 } from '../src';
 
@@ -33,6 +34,11 @@ class RecordingTransport implements Transport {
   pull(): Promise<PullResponse> {
     if (!this.online) return Promise.reject(new Error('offline'));
     return Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: 0 });
+  }
+
+  snapshot(): Promise<SnapshotPage> {
+    if (!this.online) return Promise.reject(new Error('offline'));
+    return Promise.resolve({ watermark: 0, rows: [], next: null });
   }
 }
 

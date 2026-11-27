@@ -1,4 +1,12 @@
-import { MemoryStorage, SyncClient, type Change, type PullResponse, type PushRequest, type PushResponse } from '../src';
+import {
+  MemoryStorage,
+  SyncClient,
+  type Change,
+  type PullResponse,
+  type PushRequest,
+  type PushResponse,
+  type SnapshotPage,
+} from '../src';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
@@ -27,10 +35,17 @@ class ScriptedTransport {
     const next = this.pulls.shift();
     return next ? next() : Promise.reject(new Error('offline'));
   }
+
+  snapshot(): Promise<SnapshotPage> {
+    return Promise.reject(new Error('these tests start from a stored state'));
+  }
 }
 
+/** A client that synced before: it has a stored state, so it reads the log and never a snapshot. */
 function client(transport: ScriptedTransport): SyncClient {
-  return new SyncClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+  const storage = new MemoryStorage();
+  storage.save({ cursor: 0, lastMutationId: 0, base: {} });
+  return new SyncClient({ clientId: 'c1', transport, storage });
 }
 
 /**

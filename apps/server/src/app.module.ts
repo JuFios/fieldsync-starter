@@ -12,6 +12,7 @@ import { HealthController } from './health.controller';
 import { ProblemFilter } from './problem';
 import { PullService } from './pull.service';
 import { PushService } from './push.service';
+import { SnapshotService } from './snapshot.service';
 import { StreamService } from './stream.service';
 import { SyncController } from './sync.controller';
 
@@ -22,6 +23,7 @@ import { SyncController } from './sync.controller';
     { provide: Clock, useClass: SystemClock },
     PushService,
     PullService,
+    SnapshotService,
     StreamService,
     GcService,
     // Every route requires a token unless it is marked @Public() (NestJS authentication docs).

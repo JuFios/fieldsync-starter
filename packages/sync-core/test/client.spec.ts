@@ -1,7 +1,10 @@
 import { knownDefect, precondition } from '@fieldsync/test-kit';
 import { MemoryStorage, SyncClient, type SyncClientOptions, type TimerHandle, type Transport } from '../src';
 import type { SyncClock } from '../src';
-import type { PullResponse, PushRequest, PushResponse } from '../src';
+import type { PullResponse, PushRequest, PushResponse, SnapshotPage } from '../src';
+
+/** The snapshot of an empty server. */
+const EMPTY_SNAPSHOT: SnapshotPage = { watermark: 0, rows: [], next: null };
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 
@@ -22,6 +25,10 @@ class OfflineTransport implements Transport {
   }
 
   pull(): Promise<PullResponse> {
+    return Promise.reject(new Error('offline'));
+  }
+
+  snapshot(): Promise<SnapshotPage> {
     return Promise.reject(new Error('offline'));
   }
 }
@@ -46,6 +53,10 @@ class RejectingTransport implements Transport {
   pull(): Promise<PullResponse> {
     return Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: 0 });
   }
+
+  snapshot(): Promise<SnapshotPage> {
+    return Promise.resolve(EMPTY_SNAPSHOT);
+  }
 }
 
 /** A transport whose requests never complete unless the caller aborts them. */
@@ -60,6 +71,12 @@ class HangingTransport implements Transport {
   }
 
   pull(_cursor: number, _clientId: string, _limit?: number, init?: { signal?: AbortSignal }): Promise<PullResponse> {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  }
+
+  snapshot(_req: unknown, init?: { signal?: AbortSignal }): Promise<SnapshotPage> {
     return new Promise((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
     });
@@ -88,6 +105,7 @@ class FakeServer {
       },
       pull: (_cursor, clientId) =>
         Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: this.last.get(clientId) ?? 0 }),
+      snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
   }
 }
@@ -249,6 +267,7 @@ describe('SyncClient', () => {
           lastMutationId: 1,
         }),
       pull: () => Promise.resolve({ changes: [], nextCursor: 0, hasMore: false, lastMutationId: 1 }),
+      snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
     const client = makeClient(transport);
     client.mutate('ticket.setStatus', { id: SITE, siteId: SITE, from: 'open', to: 'in_progress' });

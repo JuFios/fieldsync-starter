@@ -4,6 +4,7 @@ import { accessibleSites } from './access';
 import type { AuthUser } from './auth';
 import { Db, type TxSql } from './db';
 import { isTransient, retryLater } from './db-errors';
+import { resetRequired } from './log-floor';
 
 interface LogRow {
   version: string;
@@ -26,6 +27,10 @@ export class PullService {
    * head, past changes the user does not see, so a client with nothing new does not read the same
    * rows again; `hasMore` is true exactly when changes after the page exist in the snapshot.
    */
+  /**
+   * Throws 410 RESET_REQUIRED when the cursor is below the floor of the log: the changes after it are
+   * partly collected, so the client has to reload its state from a snapshot (see SnapshotService).
+   */
   pull(user: AuthUser, cursor: number, limit: number, clientId?: string): Promise<PullResponse> {
     return this.db
       .tx((c) => this.page(c, user, cursor, limit, clientId), { isolation: 'REPEATABLE READ', readOnly: true })
@@ -41,8 +46,12 @@ export class PullService {
     limit: number,
     clientId?: string,
   ): Promise<PullResponse> {
-    const head = await c.query<{ version: string }>(`SELECT version FROM log_head WHERE id = 1`);
-    const headVersion = Number(head.rows[0].version);
+    const ends = await c.query<{ head: string; floor: string }>(
+      `SELECT h.version AS head, f.version AS floor FROM log_head h, log_floor f WHERE h.id = 1 AND f.id = 1`,
+    );
+    const headVersion = Number(ends.rows[0].head);
+    const floor = Number(ends.rows[0].floor);
+    if (cursor < floor) throw resetRequired(floor);
     const sites = await accessibleSites(c, user);
     // Other sites' changes in incremental pulls are a known defect of the access control (F-07).
     const siteFilter = cursor === 0 ? sites : null;

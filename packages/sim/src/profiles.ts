@@ -131,6 +131,14 @@ const ALL_RESPONSE_FAULTS = { none: 10, 'drop-response': 2, 'bad-gateway': 1, tr
 const ALL_LINK_STATES = { up: 3, down: 2, 'responses-lost': 1 } as const;
 const STEPS = { act: 60, sync: 15, deliver: 60, respond: 60, redeliver: 10, tick: 15, link: 8 } as const;
 
+/**
+ * Writes to a row another client wrote last, per seed. A client that starts (every client, at the
+ * start of a run) reads a snapshot and then the log, one exchange more than a pull, before it sees
+ * the other clients' rows, so fewer of its first writes land on them (README, Simulation).
+ */
+const CONTENTION = 1;
+/** Users of different sites see fewer of each other's tickets, so fewer rows have several writers. */
+const CONTENTION_MULTI_SITE = 0.6;
 /** Statistics every profile must keep up: each fault happens, clients contend for the same rows. */
 const NETWORK_MINIMUM = {
   'requestFault:drop-request': 1,
@@ -179,7 +187,7 @@ const baseline: Profile = {
   // Creates, edits and parts of existing tickets: the server applies every one, except an edit of a
   // field another client changed since the user saw it.
   rejectionCodes: SAME_FIELD_EDITS,
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, 'action:edit-ticket': 6 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: CONTENTION, 'action:edit-ticket': 6 },
 };
 
 /**
@@ -219,7 +227,7 @@ const rejections: Profile = {
   invalidText: true,
   allowed: [],
   rejectionCodes: REJECTABLE,
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1.5, serverRejections: 1, 'action:change-status': 3 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: CONTENTION, serverRejections: 1, 'action:change-status': 3 },
 };
 
 /** Two sites, technicians of one site each, a technician of both and an admin; no rejectable actions. */
@@ -242,8 +250,7 @@ const multiSite: Profile = {
   ],
   allowed: ['foreign-site-rows'],
   rejectionCodes: [...FOREIGN_TICKET_EDITS, ...SAME_FIELD_EDITS],
-  // Users of different sites see fewer of each other's tickets, so fewer rows have several writers.
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, 'action:edit-ticket': 6 },
+  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: CONTENTION_MULTI_SITE, 'action:edit-ticket': 6 },
 };
 
 /** Everything at once, hung requests included. */
@@ -256,7 +263,12 @@ const full: Profile = {
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
   allowed: ['foreign-site-rows', 'stuck-request'],
   rejectionCodes: [...REJECTABLE, ...FOREIGN_TICKET_EDITS],
-  minimumPerSeed: { ...NETWORK_MINIMUM, crossClientWrites: 1, serverRejections: 1, 'action:change-status': 3 },
+  minimumPerSeed: {
+    ...NETWORK_MINIMUM,
+    crossClientWrites: CONTENTION_MULTI_SITE,
+    serverRejections: 1,
+    'action:change-status': 3,
+  },
 };
 
 export const PROFILES = { baseline, rejections, 'multi-site': multiSite, full } satisfies Record<string, Profile>;

@@ -12,6 +12,7 @@ export const PROBLEM_CODES = [
   'NOT_FOUND',
   'CONFLICT',
   'MUTATION_OUT_OF_ORDER',
+  'RESET_REQUIRED',
   'PAYLOAD_TOO_LARGE',
   'TOO_MANY_REQUESTS',
   'TRANSIENT',
@@ -67,6 +68,7 @@ const TITLES: Partial<Record<number, string>> = {
   403: 'Forbidden',
   404: 'Not Found',
   409: 'Conflict',
+  410: 'Gone',
   413: 'Payload Too Large',
   429: 'Too Many Requests',
   500: 'Internal Server Error',
@@ -149,6 +151,8 @@ export class ProblemFilter implements ExceptionFilter {
     }
     httpAdapter.setHeader(response, 'Content-Type', PROBLEM_JSON);
     if (retryAfterSeconds !== undefined) httpAdapter.setHeader(response, 'Retry-After', String(retryAfterSeconds));
+    // A 410 is heuristically cacheable (RFC 9110, section 15.1); a reset must reach the client every time.
+    if (problem.status === 410) httpAdapter.setHeader(response, 'Cache-Control', 'no-store');
     httpAdapter.reply(response, problem, problem.status);
   }
 }
