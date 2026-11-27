@@ -1472,7 +1472,23 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
 
 ### Results
 
-After the protocol change, a local search of 1000 runs per profile from seed 20261126
+After the log lifecycle change, a local search of 1000 runs per profile from seed 20261127
+(`npm run sim -- --profile <name> --seed 20261127 --runs 1000`, one process per profile, about
+7 minutes) found no violation other than the known defects each profile tolerates: no divergence,
+lost edit, lost mutation or unexpected rejection, with compaction and clients away longer than the
+retention in every profile.
+
+| Profile | Runs without violations | Known-defect runs | Resets (410) per run | Compactions per run | Time per run |
+|---|---|---|---|---|---|
+| `baseline` | 1000 / 1000 | — | 0.38 | 1.49 | 432 ms |
+| `rejections` | 1000 / 1000 | — | 0.44 | 1.57 | 429 ms |
+| `multi-site` | 126 / 1000 | `foreign-site-rows` (F-07): 874 | 0.38 | 1.49 | 433 ms |
+| `full` | 137 / 1000 | `foreign-site-rows` (F-07): 729; `stuck-request` (F-13): 359 | 0.36 | 1.57 | 405 ms |
+
+The same search before the change (no compaction in the simulation) found the same known defects;
+the simulation could not see category 5 at all, since the GC never ran.
+
+Earlier, after the protocol change, a local search of 1000 runs per profile from seed 20261126
 (`npm run sim -- --profile all --seed 20261126 --runs 1000`, about 15 minutes in all, fast-check
 4.11.0) found no violation other than the known defects each profile tolerates. No run shows a
 divergence, a lost edit, an unexpected rejection or `rejected-mutation-500`:
