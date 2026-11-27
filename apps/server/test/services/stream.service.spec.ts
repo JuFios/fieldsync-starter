@@ -152,4 +152,21 @@ describe('StreamService', () => {
       expect(streams.count).toBe(0);
     });
   });
+
+  describe('onModuleDestroy', () => {
+    it('ends every open stream, removes it, and ends a new one at once', async () => {
+      const open = listen(streams, client([NORTH]).stream);
+      await jest.advanceTimersByTimeAsync(0);
+
+      streams.onModuleDestroy();
+
+      expect(open.completed).toBe(true);
+      expect(streams.count).toBe(0);
+      const late = listen(streams, client([NORTH]).stream);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(late.completed).toBe(true);
+      expect(late.events).toEqual([]);
+      expect(streams.count).toBe(0);
+    });
+  });
 });

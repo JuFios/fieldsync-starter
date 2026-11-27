@@ -1,6 +1,17 @@
-import { Injectable, type MessageEvent } from '@nestjs/common';
+import { Injectable, type MessageEvent, type OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { asyncScheduler, defer, from, interval, Observable, Subject, switchMap, throttleTime } from 'rxjs';
+import {
+  asyncScheduler,
+  defer,
+  EMPTY,
+  from,
+  interval,
+  Observable,
+  Subject,
+  switchMap,
+  takeUntil,
+  throttleTime,
+} from 'rxjs';
 import type { EnvironmentVariables } from './config';
 
 /**
@@ -40,11 +51,14 @@ interface Subscriber {
  *   event, which clients that do not listen for it ignore).
  *
  * A stream whose client reads nothing for a whole heartbeat interval while writes back up is
- * dropped.
+ * dropped. Every stream ends when the application shuts down, so open streams never hold up
+ * `app.close()` (F-36).
  */
 @Injectable()
-export class StreamService {
+export class StreamService implements OnModuleDestroy {
   private readonly subscribers = new Set<Subscriber>();
+  private readonly shutdown = new Subject<void>();
+  private closed = false;
   private readonly heartbeatMs: number;
 
   constructor(config: ConfigService<EnvironmentVariables, true>) {
@@ -61,7 +75,11 @@ export class StreamService {
    * registered once the client's sites are known and removed on unsubscribe, completion or error.
    */
   events(client: StreamClient): Observable<MessageEvent> {
-    return defer(() => from(client.sites())).pipe(switchMap((sites) => this.subscribe(sites, client)));
+    if (this.closed) return EMPTY;
+    return defer(() => from(client.sites())).pipe(
+      switchMap((sites) => this.subscribe(sites, client)),
+      takeUntil(this.shutdown),
+    );
   }
 
   /** Pokes every open stream of one of these sites. */
@@ -69,6 +87,13 @@ export class StreamService {
     for (const sub of this.subscribers) {
       if (siteIds.some((site) => sub.sites.has(site))) sub.pokes.next();
     }
+  }
+
+  /** Ends every stream (Nest then ends each response) and refuses new ones. */
+  onModuleDestroy(): void {
+    this.closed = true;
+    this.shutdown.next();
+    this.shutdown.complete();
   }
 
   private subscribe(sites: readonly string[], client: StreamClient): Observable<MessageEvent> {
