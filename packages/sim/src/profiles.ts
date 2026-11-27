@@ -25,6 +25,10 @@ export const STEP_KINDS = [
   'link',
   'compact',
   'away',
+  'reload',
+  'tab',
+  'poke',
+  'drop-stream',
 ] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
@@ -144,7 +148,14 @@ const NO_ACTIONS: Record<ActionKind, number> = {
 };
 
 /** Every network fault, each common enough to occur several times per seed. */
-const ALL_REQUEST_FAULTS = { none: 20, 'drop-request': 4, duplicate: 3, 'hold-copy': 3, hang: 0 } as const;
+const ALL_REQUEST_FAULTS = {
+  none: 20,
+  'drop-request': 4,
+  duplicate: 3,
+  'hold-copy': 3,
+  hang: 0,
+  'cut-request': 2,
+} as const;
 const ALL_RESPONSE_FAULTS = { none: 10, 'drop-response': 2, 'bad-gateway': 1, truncate: 1 } as const;
 const ALL_LINK_STATES = { up: 3, down: 2, 'responses-lost': 1 } as const;
 const STEPS = {
@@ -157,27 +168,36 @@ const STEPS = {
   link: 8,
   compact: 4,
   away: 3,
+  reload: 2,
+  tab: 2,
+  poke: 5,
+  'drop-stream': 2,
 } as const;
 
 /**
  * Writes to a row another client wrote last, per seed. A client that starts (every client, at the
  * start of a run) reads a snapshot and then the log, one exchange more than a pull, before it sees
  * the other clients' rows, so fewer of its first writes land on them; `compact` and `away` steps
- * take a share of the commands too (README, Simulation).
+ * take a share of the commands too, and since the offline-client change every stream that opens and
+ * every poke queues a pull, so the network carries more exchanges and views are older when users act
+ * (README, Simulation).
  */
-const CONTENTION = 0.8;
+const CONTENTION = 0.4;
 /** Users of different sites see fewer of each other's tickets, so fewer rows have several writers. */
-const CONTENTION_MULTI_SITE = 0.6;
+const CONTENTION_MULTI_SITE = 0.2;
 /** Statistics every profile must keep up: each fault happens, clients contend for the same rows. */
 /**
  * The log lifecycle in every profile: the server compacts its log, a client is away longer than the
  * retention, and a client is reset (410) and reloads from a snapshot.
  */
 const LIFECYCLE_MINIMUM = { compactions: 0.8, away: 0.5, resets: 0.1 } as const;
+/** The offline client in every profile: pages reload, a second tab opens or closes, the stream pokes and drops. */
+const CLIENT_MINIMUM = { reloads: 0.3, tabs: 0.3, pokes: 0.6, streamDrops: 0.15 } as const;
 const NETWORK_MINIMUM = {
   'requestFault:drop-request': 1,
   'requestFault:duplicate': 0.7,
   'requestFault:hold-copy': 0.7,
+  'requestFault:cut-request': 0.4,
   redelivered: 0.5,
   'responseFault:drop-response': 1,
   'responseFault:bad-gateway': 0.4,
@@ -223,7 +243,13 @@ const baseline: Profile = {
   // Creates, edits and parts of existing tickets: the server applies every one, except an edit of a
   // field another client changed since the user saw it.
   rejectionCodes: SAME_FIELD_EDITS,
-  minimumPerSeed: { ...NETWORK_MINIMUM, ...LIFECYCLE_MINIMUM, crossClientWrites: CONTENTION, 'action:edit-ticket': 6 },
+  minimumPerSeed: {
+    ...NETWORK_MINIMUM,
+    ...LIFECYCLE_MINIMUM,
+    ...CLIENT_MINIMUM,
+    crossClientWrites: CONTENTION,
+    'action:edit-ticket': 6,
+  },
 };
 
 /**
@@ -266,6 +292,7 @@ const rejections: Profile = {
   minimumPerSeed: {
     ...NETWORK_MINIMUM,
     ...LIFECYCLE_MINIMUM,
+    ...CLIENT_MINIMUM,
     crossClientWrites: CONTENTION,
     serverRejections: 1,
     'action:change-status': 3,
@@ -295,6 +322,7 @@ const multiSite: Profile = {
   minimumPerSeed: {
     ...NETWORK_MINIMUM,
     ...LIFECYCLE_MINIMUM,
+    ...CLIENT_MINIMUM,
     crossClientWrites: CONTENTION_MULTI_SITE,
     'action:edit-ticket': 6,
   },
@@ -313,6 +341,7 @@ const full: Profile = {
   minimumPerSeed: {
     ...NETWORK_MINIMUM,
     ...LIFECYCLE_MINIMUM,
+    ...CLIENT_MINIMUM,
     crossClientWrites: CONTENTION_MULTI_SITE,
     serverRejections: 1,
     'action:change-status': 3,

@@ -143,9 +143,14 @@ export class MemoryServer implements SimServer {
     if (!user) return Promise.resolve(json(401, { message: 'Unauthorized' }));
     const url = new URL(request.path, 'http://memory');
     if (request.method === 'POST' && url.pathname === '/sync/push') {
-      return Promise.resolve(
-        this.push(user, JSON.parse(request.body ?? '{}') as { clientId: string; mutations: Mutation[] }),
-      );
+      let body: { clientId: string; mutations: Mutation[] };
+      try {
+        body = JSON.parse(request.body ?? '{}') as { clientId: string; mutations: Mutation[] };
+      } catch {
+        // A body cut in the middle: the real server's body parser answers 400 and applies nothing.
+        return Promise.resolve(json(400, { code: 'BAD_REQUEST' }));
+      }
+      return Promise.resolve(this.push(user, body));
     }
     if (request.method === 'GET' && url.pathname === '/sync/pull')
       return Promise.resolve(this.pull(user, url.searchParams));

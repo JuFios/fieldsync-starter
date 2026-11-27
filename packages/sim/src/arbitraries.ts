@@ -90,6 +90,10 @@ export function stepArb(profile: Profile): fc.Arbitrary<Step> {
     link: fc.record({ kind: fc.constant('link' as const), client, state: weighted(profile.linkStates) }),
     compact: fc.constant({ kind: 'compact' as const }),
     away: fc.record({ kind: fc.constant('away' as const), client }),
+    reload: fc.record({ kind: fc.constant('reload' as const), client }),
+    tab: fc.record({ kind: fc.constant('tab' as const), client }),
+    poke: fc.record({ kind: fc.constant('poke' as const), pick: fc.nat() }),
+    'drop-stream': fc.record({ kind: fc.constant('drop-stream' as const), client }),
   };
   const kinds = (Object.entries(profile.stepWeights) as Array<[Step['kind'], number]>).filter(([, w]) => w > 0);
   return fc.oneof(...kinds.map(([kind, weight]) => ({ weight, arbitrary: byKind[kind] })));

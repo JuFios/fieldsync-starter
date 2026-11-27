@@ -30,6 +30,7 @@ async function signaturesIn(
   name: keyof typeof PROFILES,
   defects: Defect[] = [],
   overrides: Partial<(typeof PROFILES)['full']> = {},
+  runs = 15,
 ): Promise<Set<Signature>> {
   const profile = {
     ...PROFILES[name],
@@ -40,7 +41,7 @@ async function signaturesIn(
     profile: profile as typeof PROFILES.full,
     server: new MemoryServer(new Set(defects)),
     seed: SEED,
-    runs: 15,
+    runs,
     shrinkTimeMs: 0,
   });
   return new Set(report.results.flatMap((r) => r.violations.map((v) => v.signature)));
@@ -123,7 +124,9 @@ describe('simulation engine (against the in-memory reference server)', () => {
     ];
 
     it.each(cases)('reports %s', async (_label, profile, defect, signature) => {
-      expect(await signaturesIn(profile, defect ? [defect] : [])).toContain(signature);
+      // A GC without a floor shows only where a client was away during a compaction: more runs.
+      const runs = defect === 'compact-without-floor' ? 40 : 15;
+      expect(await signaturesIn(profile, defect ? [defect] : [], {}, runs)).toContain(signature);
     });
 
     it('reports a client that waits forever on a hung request (as one without a request timeout would)', async () => {

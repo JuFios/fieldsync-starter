@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { HttpTransport, MemoryStorage, SyncClient, type Row } from '@fieldsync/sync-core';
+import {
+  HttpTransport,
+  MemoryStorage,
+  SyncClient,
+  TabGroup,
+  type RequestOptions,
+  type Row,
+  type StreamEvent,
+  type Transport,
+} from '@fieldsync/sync-core';
 import fc from 'fast-check';
 import { SimClock } from './clock';
 import type { LinkState, NetworkEvent, RequestFault, ResponseFault } from './network';
@@ -33,7 +42,15 @@ export type Step =
   /** The server runs its change-log GC at the current virtual time. */
   | { kind: 'compact' }
   /** A client loses its link and is away for the profile's `awayMs` (longer than the retention). */
-  | { kind: 'away'; client: number };
+  | { kind: 'away'; client: number }
+  /** The page of a client reloads: its leading tab goes away at once and a new one opens on its storage. */
+  | { kind: 'reload'; client: number }
+  /** A second tab of the client opens, or, with two open, the leading one closes (the other takes over). */
+  | { kind: 'tab'; client: number }
+  /** The notification stream of a client delivers a poke the server sent it (a change of a site). */
+  | { kind: 'poke'; pick: number }
+  /** The notification stream of a client breaks; it reconnects with its backoff. */
+  | { kind: 'drop-stream'; client: number };
 
 export type Violation =
   | { signature: 'divergence' | 'foreign-site-rows'; client: string; detail: Divergence }
@@ -55,6 +72,9 @@ export interface RunResult {
   /** SHA-256 of the trace: equal for two runs of the same commands. */
   traceHash: string;
 }
+
+/** The heartbeat interval the simulated stream announces (virtual time). */
+const SIM_HEARTBEAT_MS = 600_000;
 
 /** HttpTransport needs an absolute base URL; the simulated network routes every request to the server. */
 const BASE_URL = 'http://fieldsync.sim';
@@ -87,6 +107,12 @@ export function describeStep(step: Step): string {
       return 'compact';
     case 'away':
       return `away c${step.client}`;
+    case 'reload':
+    case 'tab':
+    case 'drop-stream':
+      return `${step.kind} c${step.client}`;
+    case 'poke':
+      return `poke #${step.pick}`;
   }
 }
 
@@ -174,10 +200,55 @@ class Counters {
   }
 }
 
-interface SimClient {
-  name: string;
-  user: SimUser;
-  client: SyncClient;
+/** An open notification stream of a tab, as the simulated network holds it. */
+interface SimStream {
+  onEvent: (event: StreamEvent) => void;
+  fail: (err: Error) => void;
+}
+
+/**
+ * One device of a user: its storage (what survives a reload), its tabs on that storage and their
+ * coordination (the leader talks to the server), its open notification streams.
+ */
+class SimClient {
+  readonly tabs: SyncClient[] = [];
+  readonly streams = new Set<SimStream>();
+  /** A poke the server sent this device that the stream has not delivered yet. */
+  pokeWaiting = false;
+  readonly storage = new MemoryStorage();
+  readonly group = new TabGroup();
+
+  constructor(
+    readonly name: string,
+    readonly user: SimUser,
+    private readonly open: (device: SimClient) => SyncClient,
+  ) {
+    this.tabs.push(open(this));
+  }
+
+  /** The tab that leads (the one the oracle reads), or the oldest while leadership passes. */
+  get client(): SyncClient {
+    return this.tabs.find((t) => t.isLeader) ?? (this.tabs[0] as SyncClient);
+  }
+
+  openTab(): SyncClient {
+    const tab = this.open(this);
+    this.tabs.push(tab);
+    return tab;
+  }
+
+  closeTab(tab: SyncClient): void {
+    tab.dispose();
+    this.tabs.splice(this.tabs.indexOf(tab), 1);
+  }
+
+  /** Breaks every open stream (a dropped connection; the clients reconnect with backoff). */
+  dropStreams(): number {
+    const open = [...this.streams];
+    this.streams.clear();
+    for (const stream of open) stream.fail(new TypeError('stream connection reset (simulated)'));
+    return open.length;
+  }
 }
 
 /** An exception thrown by the client code under test, as opposed to one from the harness. */
@@ -294,18 +365,29 @@ export class SimSystem {
         throw new Error(`profile ${profile.name}: client ${index} names user ${spec.user}, which does not exist`);
       }
       const name = `c${index}`;
-      const client = new SyncClient({
-        clientId: simUuid(3, index + 1),
-        transport: new HttpTransport(BASE_URL, user.token, this.network.fetchFor(name)),
-        storage: new MemoryStorage(),
-        clock: this.clock.view(spec.skewMs),
-        requestTimeoutMs: profile.requestTimeoutMs,
-        // The jitter of retries, reproducible: the same sequence for this client in every run.
-        random: mulberry32(index + 1),
-        // The notification stream is modelled by `sync` steps (see README, Simulation).
-        live: false,
+      const http = new HttpTransport(BASE_URL, user.token, this.network.fetchFor(name));
+      let opened = 0;
+      return new SimClient(name, user, (device) => {
+        opened += 1;
+        // Requests go through the simulated network; the stream is the network's too (see openStream).
+        const transport: Transport = {
+          push: (req, init) => http.push(req, init),
+          pull: (cursor, clientId, limit, init) => http.pull(cursor, clientId, limit, init),
+          snapshot: (req, init) => http.snapshot(req, init),
+          retire: (clientId, init) => http.retire(clientId, init),
+          stream: (onEvent, init) => this.openStream(device, onEvent, init),
+        };
+        return new SyncClient({
+          clientId: simUuid(3, index + 1),
+          transport,
+          storage: device.storage,
+          tabs: device.group.tab(),
+          clock: this.clock.view(spec.skewMs),
+          requestTimeoutMs: profile.requestTimeoutMs,
+          // The jitter of retries, reproducible: the same sequence for this tab in every run.
+          random: mulberry32(1000 * (index + 1) + opened),
+        });
       });
-      return { name, user, client };
     });
   }
 
@@ -333,7 +415,9 @@ export class SimSystem {
           return simUuid(4, this.ids);
         });
         this.trace.push(`${label} act ${sim.name} ${action.name} ${canonicalJson(action.args)}`);
-        await guardAsync(() => sim.client.mutate(action.name, action.args));
+        // The user acts in one of the device's open tabs.
+        const tab = sim.tabs[step.params.pick % sim.tabs.length] ?? sim.client;
+        await guardAsync(() => tab.mutate(action.name, action.args));
         this.queued.set(sim.name, (this.queued.get(sim.name) ?? 0) + 1);
         this.stats.add(`action:${step.intent}`);
         const target = targetOf(action);
@@ -383,6 +467,7 @@ export class SimSystem {
         const sim = this.client(step.client);
         this.trace.push(`${label} link ${sim.name} ${step.state}`);
         this.network.setLink(sim.name, step.state);
+        if (step.state === 'down') sim.dropStreams();
         break;
       }
       case 'compact': {
@@ -398,8 +483,50 @@ export class SimSystem {
         const sim = this.client(step.client);
         this.trace.push(`${label} away ${sim.name} ${this.profile.awayMs}ms`);
         this.network.setLink(sim.name, 'down');
+        sim.dropStreams();
         await this.clock.jump(this.profile.awayMs, () => this.settle());
         this.stats.add('away');
+        break;
+      }
+      case 'reload': {
+        // The leading tab goes away at once, whatever it was doing (a request in flight, a write
+        // about to start); the page opens again on the same storage.
+        const sim = this.client(step.client);
+        this.trace.push(`${label} reload ${sim.name}`);
+        sim.closeTab(sim.client);
+        const tab = sim.openTab();
+        await guardAsync(() => tab.ready);
+        this.stats.add('reloads');
+        break;
+      }
+      case 'tab': {
+        const sim = this.client(step.client);
+        if (sim.tabs.length < 2) {
+          this.trace.push(`${label} tab ${sim.name} open`);
+          await guardAsync(() => sim.openTab().ready);
+        } else {
+          // The leading tab closes; the other one takes over.
+          this.trace.push(`${label} tab ${sim.name} close-leader`);
+          sim.closeTab(sim.client);
+        }
+        this.stats.add('tabs');
+        break;
+      }
+      case 'poke': {
+        const waiting = this.clients.filter((c) => c.pokeWaiting && c.streams.size > 0).map((c) => c.name);
+        if (!this.traceOrSkip(label, step, waiting)) return;
+        const sim = this.byName(waiting[step.pick % waiting.length] as string);
+        this.trace.push(`${label} poke ${sim.name}`);
+        sim.pokeWaiting = false;
+        for (const stream of sim.streams) guard(() => stream.onEvent({ type: 'poke' }));
+        this.stats.add('pokes');
+        break;
+      }
+      case 'drop-stream': {
+        const sim = this.client(step.client);
+        const dropped = sim.dropStreams();
+        this.trace.push(`${label} drop-stream ${sim.name} ${dropped}`);
+        this.stats.add('streamDrops', dropped);
         break;
       }
     }
@@ -564,7 +691,7 @@ export class SimSystem {
 
   /** Stops every client and writes its final state to the trace. */
   dispose(): void {
-    for (const sim of this.clients) sim.client.dispose();
+    for (const sim of this.clients) for (const tab of sim.tabs) tab.dispose();
     for (const sim of this.clients) {
       let state: Map<string, Row>;
       try {
@@ -653,8 +780,52 @@ export class SimSystem {
     }
   }
 
+  /**
+   * The notification stream of a tab: open while its device's link is up, until a `drop-stream`
+   * step, a link going down, or the tab aborting it. It says `ready` at once; pokes come from `poke`
+   * steps for the changes the server made (see onNetwork). No heartbeats are sent: a stream that is
+   * silent for three intervals is reopened by the client, as a dead connection would be.
+   */
+  private openStream(device: SimClient, onEvent: (event: StreamEvent) => void, init?: RequestOptions): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (this.network.linkState(device.name) === 'down') {
+        reject(new TypeError('fetch failed'));
+        return;
+      }
+      const stream: SimStream = {
+        onEvent,
+        fail: (err) => {
+          device.streams.delete(stream);
+          reject(err);
+        },
+      };
+      device.streams.add(stream);
+      this.stats.add('streamsOpened');
+      init?.signal?.addEventListener(
+        'abort',
+        () => {
+          device.streams.delete(stream);
+          resolve();
+        },
+        { once: true },
+      );
+      queueMicrotask(() => {
+        if (device.streams.has(stream)) onEvent({ type: 'ready', heartbeatMs: SIM_HEARTBEAT_MS });
+      });
+    });
+  }
+
   private onNetwork(event: NetworkEvent): void {
     this.trace.push(describeEvent(event));
+    // A push the server handled changed rows of some site: the server pokes the other devices' streams.
+    if (
+      event.kind === 'delivered' &&
+      this.pushPaths.get(event.exchange) &&
+      event.responses.some((r) => r.status === 201)
+    ) {
+      for (const device of this.clients)
+        if (device.name !== event.client && device.streams.size > 0) device.pokeWaiting = true;
+    }
     switch (event.kind) {
       case 'sent':
         this.stats.add('exchanges');
