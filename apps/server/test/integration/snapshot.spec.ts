@@ -98,7 +98,7 @@ describeWithDb('GET /sync/snapshot', () => {
     });
   });
 
-  it('gives an empty first page to a user without sites, and to an empty database', async () => {
+  it('gives an empty first page to a user without sites', async () => {
     const lonely = await ctx.fixtures.technician();
     const res = await page(lonely);
     expect(res.status).toBe(200);

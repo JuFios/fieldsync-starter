@@ -341,6 +341,7 @@ describe('isSnapshotPage', () => {
     ],
     ['no watermark', { rows: [], next: null }, false],
     ['a fractional watermark', { watermark: 1.5, rows: [], next: null }, false],
+    ['a negative watermark', { watermark: -1, rows: [], next: null }, false],
     ['an unknown entity', { watermark: asVersion(1), rows: [{ ...row, entity: 'site' }], next: null }, false],
     ['a row without data', { watermark: asVersion(1), rows: [{ ...row, data: null }], next: null }, false],
     ['a key without an id', { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part' } }, false],

@@ -55,6 +55,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isVersion(value: unknown): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isEntity(value: unknown): value is EntityName {
   return typeof value === 'string' && (ENTITIES as readonly string[]).includes(value);
 }
@@ -65,7 +69,7 @@ function isEntity(value: unknown): value is EntityName {
  * instead of being taken for an empty state.
  */
 export function isSnapshotPage(body: unknown): body is SnapshotPage {
-  if (!isRecord(body) || !Number.isSafeInteger(body.watermark) || !Array.isArray(body.rows)) return false;
+  if (!isRecord(body) || !isVersion(body.watermark) || !Array.isArray(body.rows)) return false;
   const rowsOk = body.rows.every(
     (r: unknown) =>
       isRecord(r) && isEntity(r.entity) && typeof r.id === 'string' && typeof r.siteId === 'string' && isRecord(r.data),

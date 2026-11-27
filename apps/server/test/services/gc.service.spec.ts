@@ -23,6 +23,8 @@ interface Script {
   floor: number;
   batches: Array<{ stop: number | null; full: boolean; young: boolean; removed?: [number, number, number] }>;
   expired?: number[];
+  /** Tombstones and applied results below the floor, removed after the batches. */
+  belowFloor?: { tombstones?: number[]; results?: number[] };
 }
 
 describe('GcService', () => {
@@ -77,7 +79,15 @@ describe('GcService', () => {
       return Promise.reject(new Error(`unexpected query: ${sql}`));
     });
     const expired = [...(s.expired ?? [0])];
-    db.query.mockImplementation(() => Promise.resolve(result([], expired.shift() ?? 0)));
+    const tombstones = [...(s.belowFloor?.tombstones ?? [0])];
+    const results = [...(s.belowFloor?.results ?? [0])];
+    db.query.mockImplementation((sql) => {
+      if (sql.includes('FROM log_floor')) return Promise.resolve(result([{ version: String(floor) }]));
+      if (sql.includes('DELETE FROM entities')) return Promise.resolve(result([], tombstones.shift() ?? 0));
+      if (sql.includes("status = 'applied'")) return Promise.resolve(result([], results.shift() ?? 0));
+      if (sql.includes('version IS NULL')) return Promise.resolve(result([], expired.shift() ?? 0));
+      return Promise.reject(new Error(`unexpected query: ${sql}`));
+    });
   }
 
   describe('collect', () => {
@@ -128,17 +138,35 @@ describe('GcService', () => {
     });
 
     it('does nothing when another GC holds the floor', async () => {
-      script({ floorTaken: true, floor: 0, batches: [] });
-      await expect(gc.collect()).resolves.toEqual({ log: 0, tombstones: 0, results: 0, floor: 0, skipped: true });
+      script({ floorTaken: true, floor: 42, batches: [] });
+      await expect(gc.collect()).resolves.toEqual({ log: 0, tombstones: 0, results: 0, floor: 42, skipped: true });
       expect(db.inTx.query).toHaveBeenCalledTimes(1);
-      expect(db.query).not.toHaveBeenCalled();
+      expect(db.query.mock.calls.some(([sql]) => sql.includes('DELETE'))).toBe(false);
     });
 
     it('removes results without a version older than their own retention, in batches', async () => {
       script({ floor: 0, batches: [{ stop: null, full: false, young: false }], expired: [100, 100, 7] });
       await expect(gc.collect()).resolves.toMatchObject({ results: 207 });
-      expect(db.query).toHaveBeenCalledTimes(3);
-      expect(db.query.mock.calls[0][1]).toEqual([new Date('2026-11-26T10:00:00.000Z'), 100]);
+      const expired = db.query.mock.calls.filter(([sql]) => sql.includes('version IS NULL'));
+      expect(expired).toHaveLength(3);
+      expect(expired[0][1]).toEqual([new Date('2026-11-26T10:00:00.000Z'), 100]);
+    });
+
+    it('removes tombstones and applied results left below the floor, in batches', async () => {
+      script({
+        floor: 500,
+        batches: [{ stop: null, full: false, young: false }],
+        belowFloor: { tombstones: [100, 3], results: [100, 100, 0] },
+      });
+      await expect(gc.collect()).resolves.toMatchObject({ tombstones: 103, results: 200, floor: 500 });
+      const below = db.query.mock.calls.filter(([sql]) => sql.includes('version <= $1'));
+      expect(below.map(([, params]) => params)).toEqual([
+        [500, 100],
+        [500, 100],
+        [500, 100],
+        [500, 100],
+        [500, 100],
+      ]);
     });
 
     it('joins a run already in progress instead of starting a second one', async () => {
@@ -150,6 +178,9 @@ describe('GcService', () => {
     });
 
     it('passes a database error to the caller', async () => {
+      db.query.mockRejectedValue(new Error('connection reset'));
+      await expect(gc.collect()).rejects.toThrow('connection reset');
+      db.query.mockResolvedValue(result([{ version: '0' }]));
       db.inTx.query.mockRejectedValue(new Error('connection reset'));
       await expect(gc.collect()).rejects.toThrow('connection reset');
     });
@@ -172,6 +203,9 @@ describe('GcService', () => {
         return original!(fn, options);
       });
       const run = gc.collect();
+      // The first batch has started and waits.
+      await jest.advanceTimersByTimeAsync(0);
+      expect(db.tx).toHaveBeenCalledTimes(1);
       const destroyed = gc.onModuleDestroy();
       let done = false;
       void destroyed.then(() => (done = true));

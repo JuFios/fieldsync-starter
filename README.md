@@ -152,7 +152,7 @@ errors.
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `10000` | 1–3600000 | Postgres ends a server session that idles inside a transaction this long (`idle_in_transaction_session_timeout`), rolling it back and freeing its locks |
 | `SEED_DEMO` | `false` | `true`, `false` | Insert demo sites, users and well-known tokens on startup (development only) |
 | `CHANGELOG_RETENTION_SECONDS` | `604800` | 3600–2147483647 | Change-log entries older than this are removed by the GC, oldest first. A client whose cursor falls behind them is reset (410) and reloads from a snapshot. At least an hour: a snapshot must finish within the retention (see [3.3.6](#change-log-lifecycle-336)) |
-| `MUTATION_RESULT_RETENTION_SECONDS` | `1209600` | 3600–2147483647, ≥ `CHANGELOG_RETENTION_SECONDS` | Results of rejected mutations (and of applied ones that changed nothing) are kept this long, so a retried copy is answered with the same rejection; results of applied mutations go with the log entries of their changes |
+| `MUTATION_RESULT_RETENTION_SECONDS` | twice `CHANGELOG_RETENTION_SECONDS`, at least `1209600` | 3600–2147483647, ≥ `CHANGELOG_RETENTION_SECONDS` | Results of rejected mutations (and of applied ones that changed nothing) are kept this long, so a retried copy is answered with the same rejection; results of applied mutations go with the log entries of their changes |
 | `GC_BATCH_SIZE` | `5000` | 100–100000 | Most change-log entries one GC transaction removes |
 | `GC_INTERVAL_MS` | `3600000` | 1000–2147483647 | How often the GC runs. At least a second, so a millisecond/second mix-up cannot turn the GC into a load test; at most what `setInterval` accepts |
 | `JSON_BODY_LIMIT_BYTES` | `2097152` | 1048576–67108864 | Largest JSON request body. Never below the 1 MiB the client puts in one push (`MAX_PUSH_BODY_BYTES`), so its batches are not refused for their size |
@@ -544,7 +544,7 @@ still answered as duplicates, because the client's last mutation id is kept for 
 protected against reuse while its deletion is within the retention. Results of applied mutations go
 with their log entries too (their `version` would point into the collected log). Rejections, and
 mutations that changed nothing, have no version; they are kept for `MUTATION_RESULT_RETENTION_SECONDS`
-(14 days by default, never less than the log retention), so a client reset after a week offline
+(by default twice the log retention and at least 14 days, never less than the log retention), so a client reset after a week offline
 still learns why its queued mutations were rejected.
 
 **Consequences.** The log, the tombstones and the results are bounded by the retention. New clients

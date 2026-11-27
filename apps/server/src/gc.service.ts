@@ -16,7 +16,7 @@ export interface GcRun {
   tombstones: number;
   /** Mutation results removed. */
   results: number;
-  /** The highest removed version after the run: pulls with a cursor below it are reset. */
+  /** The floor of the log after the run (as read when no batch ran): pulls with a cursor below it are reset. */
   floor: number;
   /** True when another GC (in this process or another instance) held the log, so this run did nothing. */
   skipped: boolean;
@@ -104,7 +104,7 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
     const resultCutoff = new Date(now - this.config.get('MUTATION_RESULT_RETENTION_SECONDS', { infer: true }) * 1000);
     const size = this.config.get('GC_BATCH_SIZE', { infer: true });
 
-    const total: GcRun = { log: 0, tombstones: 0, results: 0, floor: 0, skipped: false };
+    const total: GcRun = { log: 0, tombstones: 0, results: 0, floor: await this.floor(), skipped: false };
     for (;;) {
       if (this.stopping) return total;
       const batch = await this.db.tx((c) => this.batch(c, logCutoff, size));
@@ -114,6 +114,19 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
       total.results += batch.results;
       total.floor = batch.floor;
       if (!batch.more) break;
+    }
+    // What lies below the floor from before this GC ran (a database the original GC pruned).
+    for (;;) {
+      if (this.stopping) return total;
+      const removed = await this.belowFloor('tombstones', total.floor, size);
+      total.tombstones += removed;
+      if (removed < size) break;
+    }
+    for (;;) {
+      if (this.stopping) return total;
+      const removed = await this.belowFloor('results', total.floor, size);
+      total.results += removed;
+      if (removed < size) break;
     }
     for (;;) {
       if (this.stopping) return total;
@@ -179,6 +192,30 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
       floor: stop,
       more: rows[0].full && !rows[0].young,
     };
+  }
+
+  private async floor(): Promise<number> {
+    const { rows } = await this.db.query<{ version: string }>(`SELECT version FROM log_floor WHERE id = 1`);
+    return Number(rows[0].version);
+  }
+
+  /**
+   * Up to `size` tombstones, or results of applied mutations, at or below `floor`: rows a batch never
+   * covered because their changes were gone before the floor existed. Picked by `ctid` like
+   * {@link expiredResults}; through the partial indexes on `version` the check is cheap once none
+   * are left.
+   */
+  private async belowFloor(what: 'tombstones' | 'results', floor: number, size: number): Promise<number> {
+    const sql =
+      what === 'tombstones'
+        ? `DELETE FROM entities WHERE ctid = ANY (ARRAY(
+             SELECT ctid FROM entities WHERE deleted AND version <= $1 LIMIT $2
+           ))`
+        : `DELETE FROM mutation_results WHERE ctid = ANY (ARRAY(
+             SELECT ctid FROM mutation_results WHERE status = 'applied' AND version <= $1 LIMIT $2
+           ))`;
+    const { rowCount } = await this.db.query(sql, [floor, size]);
+    return rowCount;
   }
 
   /**

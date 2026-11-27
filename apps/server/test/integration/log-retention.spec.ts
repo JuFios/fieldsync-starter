@@ -96,6 +96,22 @@ describeWithDb('retention of tombstones and mutation results', () => {
     expect(reused.body.results[0]).toMatchObject({ status: 'applied' });
   });
 
+  it('removes tombstones left below the floor, as a database the original GC pruned has them', async () => {
+    const site = await ctx.fixtures.site();
+    const ticket = randomUUID();
+    const floor = await ctx.db.query<{ version: string }>('SELECT version FROM log_floor');
+    // A deletion whose change the original GC removed before the floor existed.
+    await ctx.db.query(
+      `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ('ticket', $1, $2, NULL, true, $3)`,
+      [ticket, site, floor.rows[0].version],
+    );
+
+    const run = await ctx.server.app.get(GcService).collect();
+
+    expect(run.tombstones).toBeGreaterThanOrEqual(1);
+    expect(await tombstone(ticket)).toBe(0);
+  });
+
   it('answers a copy of a rejected mutation with its reason after the log retention, until its own ends', async () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);

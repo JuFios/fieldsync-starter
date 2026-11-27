@@ -13,7 +13,7 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  * at the head when nothing is kept), so clients with older cursors are reset rather than left with
  * gaps; holes the original GC left inside the kept part cannot be told apart from versions rolled
  * back under the old sequence. Tombstones and results of applied mutations whose changes are below
- * the floor are removed, as the GC removes them from now on.
+ * the floor are left to the GC, which removes them in batches like everything else.
  *
  * The GC deletes from `change_log` and `mutation_results` in bulk, so autovacuum visits them after a
  * twentieth of their rows are dead instead of the default fifth.
@@ -29,8 +29,6 @@ export class LogFloor1796083200000 implements MigrationInterface {
       );
       INSERT INTO log_floor (id, version)
       SELECT 1, coalesce((SELECT min(version) - 1 FROM change_log), (SELECT version FROM log_head WHERE id = 1));
-      DELETE FROM entities WHERE deleted AND version <= (SELECT version FROM log_floor);
-      DELETE FROM mutation_results WHERE status = 'applied' AND version <= (SELECT version FROM log_floor);
       ALTER TABLE change_log SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
       ALTER TABLE mutation_results SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
     `);

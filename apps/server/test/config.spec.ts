@@ -107,6 +107,15 @@ describe('validate', () => {
     expect(problems[0]).toMatch(new RegExp(`^${name} must be an integer from \\d+ to \\d+ \\(got "${value}"\\)$`));
   });
 
+  it('makes the result retention twice the change-log retention by default, at least 14 days', () => {
+    expect(validate({ DATABASE_URL: SECRET_URL, CHANGELOG_RETENTION_SECONDS: '2592000' })).toMatchObject({
+      MUTATION_RESULT_RETENTION_SECONDS: 5_184_000,
+    });
+    expect(validate({ DATABASE_URL: SECRET_URL, CHANGELOG_RETENTION_SECONDS: '3600' })).toMatchObject({
+      MUTATION_RESULT_RETENTION_SECONDS: 1_209_600,
+    });
+  });
+
   it('rejects a result retention shorter than the change-log retention', () => {
     expect(problemsOf({ CHANGELOG_RETENTION_SECONDS: '7200', MUTATION_RESULT_RETENTION_SECONDS: '3600' })).toEqual([
       'MUTATION_RESULT_RETENTION_SECONDS must not be shorter than CHANGELOG_RETENTION_SECONDS (got 3600 and 7200)',
