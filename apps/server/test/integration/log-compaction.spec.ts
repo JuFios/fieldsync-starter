@@ -89,6 +89,7 @@ describeWithDb('change-log compaction', () => {
     // The slow mutation reads the clock first (t0 - 60 s, as a server with a slower clock would),
     // then waits on a row the test holds, while the fast one reads t0 and commits first.
     const now = jest.spyOn(clock, 'now').mockReturnValue(new Date(t0 - 60_000));
+    let fastVersion: number | undefined;
     const blocker = await ctx.db.connect();
     try {
       const slowTicket = randomUUID();
@@ -105,7 +106,7 @@ describeWithDb('change-log compaction', () => {
       await blocker.query('ROLLBACK');
       const slowRes = await slow;
       precondition(slowRes.body.results[0]?.status === 'applied', `slow: ${JSON.stringify(slowRes.body)}`);
-      const fastVersion = fast.body.results[0]?.status === 'applied' ? fast.body.results[0].version : undefined;
+      fastVersion = fast.body.results[0]?.status === 'applied' ? fast.body.results[0].version : undefined;
       const slowVersion = slowRes.body.results[0]?.status === 'applied' ? slowRes.body.results[0].version : undefined;
       precondition(
         fastVersion !== undefined && slowVersion !== undefined && fastVersion < slowVersion,
@@ -125,8 +126,10 @@ describeWithDb('change-log compaction', () => {
     const kept = rows.map((r) => Number(r.version));
     const head = await ctx.db.query<{ version: string }>(`SELECT version FROM log_head`);
     const first = kept[0] ?? Number(head.rows[0].version) + 1;
-    // What is left is every version from the first kept one up to the head, without holes.
+    // What is left is every version from the first kept one up to the head, without holes, and the
+    // change within the retention is among it.
     expect(kept).toEqual(Array.from({ length: Number(head.rows[0].version) - first + 1 }, (_, i) => first + i));
+    expect(kept).toContain(fastVersion);
   });
 
   /** Waits until a server connection waits for a lock held by another transaction. */

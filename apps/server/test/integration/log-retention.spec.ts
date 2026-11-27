@@ -10,6 +10,11 @@ import { rowsById, SyncClients } from '../support/sync-clients';
 const DAY_MS = 86_400_000;
 const LOG_RETENTION_DAYS = 7;
 const RESULT_RETENTION_DAYS = 14;
+/**
+ * Far enough ahead that every log entry of this file is older than the retention, whatever the order
+ * of the tests (one of them writes a week ahead by the server's clock).
+ */
+const PAST_EVERYTHING_DAYS = LOG_RETENTION_DAYS + 13;
 
 /**
  * What the GC removes besides the log: tombstones of deletions it collected, results of applied
@@ -48,15 +53,25 @@ describeWithDb('retention of tombstones and mutation results', () => {
   it('keeps a tombstone, and so the id taken, while its deletion is in the log', async () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);
-    const ticket = randomUUID();
     const client = randomUUID();
-    await push(tech, client, [create(1, site, ticket, 'deleted soon')]);
-    await push(tech, client, [{ id: 2, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
+    const [old, recent] = [randomUUID(), randomUUID()];
+    await push(tech, client, [create(1, site, old, 'deleted long ago')]);
+    await push(tech, client, [{ id: 2, name: 'ticket.delete', args: { id: old, siteId: site } }]);
+    // The second ticket is created and deleted a week later, by the server's clock.
+    const later = jest.spyOn(ctx.server.app.get(Clock), 'now').mockReturnValue(new Date(Date.now() + 8 * DAY_MS));
+    try {
+      await push(tech, client, [create(3, site, recent, 'deleted recently')]);
+      await push(tech, client, [{ id: 4, name: 'ticket.delete', args: { id: recent, siteId: site } }]);
+    } finally {
+      later.mockRestore();
+    }
 
-    await collectAfterDays(LOG_RETENTION_DAYS - 1);
+    // A day after that: the first deletion is older than the retention, the second is not.
+    const run = await collectAfterDays(9);
 
-    expect(await tombstone(ticket)).toBe(1);
-    const again = await push(tech, randomUUID(), [create(1, site, ticket, 'same id')]);
+    precondition(run.log > 0 && (await tombstone(old)) === 0, 'the old deletion was not collected');
+    expect(await tombstone(recent)).toBe(1);
+    const again = await push(tech, randomUUID(), [create(1, site, recent, 'same id')]);
     expect(again.body.results[0]).toMatchObject({ status: 'rejected', code: 'ID_CONFLICT' });
   });
 
@@ -70,7 +85,7 @@ describeWithDb('retention of tombstones and mutation results', () => {
     precondition(rowsById(holder, 'ticket').has(ticket), 'the holder does not have the ticket');
     await push(tech, randomUUID(), [{ id: 1, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
 
-    const run = await collectAfterDays(LOG_RETENTION_DAYS + 1);
+    const run = await collectAfterDays(PAST_EVERYTHING_DAYS);
 
     expect(run.tombstones).toBeGreaterThanOrEqual(1);
     expect(await tombstone(ticket)).toBe(0);
@@ -110,7 +125,7 @@ describeWithDb('retention of tombstones and mutation results', () => {
     const kept = await push(tech, client, [m]);
     expect(kept.body.results[0]).toEqual({ id: 1, status: 'duplicate', version });
 
-    await collectAfterDays(LOG_RETENTION_DAYS + 1);
+    await collectAfterDays(PAST_EVERYTHING_DAYS);
     const { rowCount } = await ctx.db.query(`SELECT 1 FROM mutation_results WHERE client_id = $1`, [client]);
     expect(rowCount).toBe(0);
     // Still never applied twice: the client's last mutation id is kept for good.
