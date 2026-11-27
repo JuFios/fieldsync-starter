@@ -3,6 +3,7 @@ import { MUTATORS, MutationRejected, partsInState, type MutatorTx } from './muta
 import type { SyncStorage } from './storage';
 import { RESET_REQUIRED, TransportError, type Transport } from './transport';
 import {
+  asVersion,
   MAX_PUSH_BODY_BYTES,
   MAX_PUSH_MUTATIONS,
   type EntityName,
@@ -11,6 +12,7 @@ import {
   type PullResponse,
   type Rejection,
   type Row,
+  type Version,
 } from './types';
 
 /**
@@ -64,7 +66,7 @@ interface Queued {
    * mutation stays in the queue, and in the optimistic view, until the cursor reaches this version,
    * so an interrupted pull never takes the user's change out of the view (F-30). It is not sent again.
    */
-  appliedAt?: number;
+  appliedAt?: Version;
   /**
    * Set when the server answered a copy of the mutation as a duplicate without a version (its
    * result was collected): the change's version is unknown, so the mutation stays in the view until
@@ -150,7 +152,7 @@ export class SyncClient {
   private readonly storage: SyncStorage;
   private readonly clock: SyncClock;
   private base = new Map<string, Row>();
-  private cursor = 0;
+  private cursor: Version = asVersion(0);
   private lastMutationId = 0;
   /**
    * The id the next mutation gets. Ids only grow, whatever the server answers: deriving them from
@@ -180,11 +182,15 @@ export class SyncClient {
     this.clock = opts.clock ?? systemClock;
     const saved = this.storage.load();
     if (saved) {
-      this.cursor = saved.cursor;
       this.lastMutationId = saved.lastMutationId;
       this.nextMutationId = saved.lastMutationId + 1;
-      this.base = new Map(Object.entries(saved.base));
-      this.hasState = true;
+      // A stored cursor that is not a version (storage edited or damaged) cannot be pulled from: the
+      // client then loads a snapshot instead of failing.
+      if (Number.isSafeInteger(saved.cursor) && saved.cursor >= 0) {
+        this.cursor = asVersion(saved.cursor);
+        this.base = new Map(Object.entries(saved.base));
+        this.hasState = true;
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 import {
+  asVersion,
   MemoryStorage,
   SyncClient,
   type Change,
@@ -12,7 +13,7 @@ const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
 
 const ticketChange = (version: number): Change => ({
-  version,
+  version: asVersion(version),
   entity: 'ticket',
   id: TICKET,
   siteId: SITE,
@@ -26,7 +27,7 @@ class ScriptedTransport {
 
   push(req: PushRequest): Promise<PushResponse> {
     return Promise.resolve({
-      results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: 3 })),
+      results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(3) })),
       lastMutationId: req.mutations.at(-1)?.id ?? 0,
     });
   }
@@ -69,7 +70,9 @@ describe('acknowledged mutations', () => {
   it('stay visible when a page acknowledges them before the page with their change fails', async () => {
     const transport = new ScriptedTransport();
     // The first page ends before the change; it already reports the mutation as applied.
-    transport.pulls = [() => Promise.resolve({ changes: [], nextCursor: 2, hasMore: true, lastMutationId: 1 })];
+    transport.pulls = [
+      () => Promise.resolve({ changes: [], nextCursor: asVersion(2), hasMore: true, lastMutationId: 1 }),
+    ];
     const c = client(transport);
     try {
       c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
@@ -83,7 +86,8 @@ describe('acknowledged mutations', () => {
   it('leave the queue once the pull delivers their change, and are not applied twice', async () => {
     const transport = new ScriptedTransport();
     transport.pulls = [
-      () => Promise.resolve({ changes: [ticketChange(3)], nextCursor: 3, hasMore: false, lastMutationId: 1 }),
+      () =>
+        Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
     ];
     const c = client(transport);
     try {
@@ -115,7 +119,8 @@ describe('acknowledged mutations', () => {
         titles: ['Mine'],
       });
       transport.pulls = [
-        () => Promise.resolve({ changes: [ticketChange(3)], nextCursor: 3, hasMore: false, lastMutationId: 1 }),
+        () =>
+          Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
       ];
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({

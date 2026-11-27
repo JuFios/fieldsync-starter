@@ -1,4 +1,5 @@
 import {
+  asVersion,
   MemoryStorage,
   SyncClient,
   type PullResponse,
@@ -18,9 +19,9 @@ class OfflinePullServer {
   push(req: PushRequest): Promise<PushResponse> {
     this.pushed.push(req.mutations.map((m) => m.id));
     const results = req.mutations.map((m) => {
-      if (m.id <= this.last) return { id: m.id, status: 'duplicate' as const, version: m.id };
+      if (m.id <= this.last) return { id: m.id, status: 'duplicate' as const, version: asVersion(m.id) };
       this.last = m.id;
-      return { id: m.id, status: 'applied' as const, version: m.id };
+      return { id: m.id, status: 'applied' as const, version: asVersion(m.id) };
     });
     return Promise.resolve({ results, lastMutationId: this.last });
   }

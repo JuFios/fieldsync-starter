@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Change, PullResponse } from '@fieldsync/sync-core';
+import { asVersion, type Change, type PullResponse } from '@fieldsync/sync-core';
 import { accessibleSites } from './access';
 import type { AuthUser } from './auth';
 import { Db, type TxSql } from './db';
@@ -67,7 +67,7 @@ export class PullService {
     );
     const hasMore = rows.length > limit;
     const changes: Change[] = rows.slice(0, limit).map((r) => ({
-      version: Number(r.version),
+      version: asVersion(Number(r.version)),
       entity: r.entity,
       id: r.entity_id,
       siteId: r.site_id,
@@ -87,7 +87,7 @@ export class PullService {
     return {
       changes,
       // Never backwards: a cursor beyond the head stays where it is (a reset log is a later change).
-      nextCursor: hasMore ? changes[changes.length - 1].version : Math.max(cursor, headVersion),
+      nextCursor: hasMore ? changes[changes.length - 1].version : asVersion(Math.max(cursor, headVersion)),
       hasMore,
       lastMutationId,
     };

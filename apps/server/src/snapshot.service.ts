@@ -1,5 +1,5 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
-import type { EntityName, Row, SnapshotKey, SnapshotPage } from '@fieldsync/sync-core';
+import { asVersion, type EntityName, type Row, type SnapshotKey, type SnapshotPage } from '@fieldsync/sync-core';
 import { accessibleSites } from './access';
 import type { AuthUser } from './auth';
 import { Db, type TxSql } from './db';
@@ -87,7 +87,7 @@ export class SnapshotService {
     const page = rows.slice(0, query.limit);
     const last = page[page.length - 1];
     return {
-      watermark,
+      watermark: asVersion(watermark),
       rows: page.map((r) => ({ entity: r.entity, id: r.id, siteId: r.site_id, data: r.data })),
       next: rows.length > query.limit && last ? { siteId: last.site_id, entity: last.entity, id: last.id } : null,
     };

@@ -1,4 +1,5 @@
 import {
+  asVersion,
   HttpTransport,
   isSnapshotPage,
   MemoryStorage,
@@ -24,7 +25,7 @@ const OTHER = '00000000-0000-4000-8000-000000000003';
 const ticket = (title: string): Row => ({ id: TICKET, siteId: SITE, title, description: '', status: 'open' });
 const part = (quantity: number): Row => ({ id: PART, ticketId: TICKET, siteId: SITE, name: 'Valve', quantity });
 const put = (version: number, entity: 'ticket' | 'part', id: string, data: Row): Change => ({
-  version,
+  version: asVersion(version),
   entity,
   id,
   siteId: SITE,
@@ -62,11 +63,11 @@ class ScriptedTransport implements Transport {
 const page =
   (watermark: number, rows: SnapshotPage['rows'], next: SnapshotPage['next'] = null) =>
   () =>
-    Promise.resolve({ watermark, rows, next });
+    Promise.resolve({ watermark: asVersion(watermark), rows, next });
 const pulled =
   (changes: Change[], nextCursor: number, lastMutationId = 0, hasMore = false) =>
   () =>
-    Promise.resolve({ changes, nextCursor, hasMore, lastMutationId });
+    Promise.resolve({ changes, nextCursor: asVersion(nextCursor), hasMore, lastMutationId });
 
 const clients: SyncClient[] = [];
 function client(transport: Transport, stored?: { cursor: number; lastMutationId: number; base: Record<string, Row> }) {
@@ -95,7 +96,7 @@ describe('SyncClient snapshots', () => {
 
     await c.sync();
 
-    expect(t.snapshotRequests).toEqual([{ limit: 500 }, { watermark: 7, after: key, limit: 500 }]);
+    expect(t.snapshotRequests).toEqual([{ limit: 500 }, { watermark: asVersion(7), after: key, limit: 500 }]);
     expect(t.pullCursors).toEqual([7]);
     expect(c.rows('ticket')).toEqual([ticket('edited after the watermark')]);
     expect(c.rows('part')).toEqual([part(2)]);
@@ -126,7 +127,7 @@ describe('SyncClient snapshots', () => {
       page(30, [{ entity: 'part', id: PART, siteId: SITE, data: part(9) }], { siteId: SITE, entity: 'part', id: PART }),
       () =>
         new Promise((resolve) => {
-          releasePage2 = () => resolve({ watermark: 30, rows: [], next: null });
+          releasePage2 = () => resolve({ watermark: asVersion(30), rows: [], next: null });
         }),
     );
     t.pulls.push(pulled([], 30));
@@ -193,7 +194,7 @@ describe('SyncClient snapshots', () => {
         Promise.resolve({
           results: req.mutations
             .filter((m) => m.id === 1)
-            .map((m) => ({ id: m.id, status: 'applied' as const, version: 20 })),
+            .map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(20) })),
           lastMutationId: 1,
         }),
       );
@@ -239,7 +240,7 @@ describe('SyncClient snapshots', () => {
       const t = new ScriptedTransport();
       t.pushes.push((req) =>
         Promise.resolve({
-          results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: 50 })),
+          results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(50) })),
           lastMutationId: 1,
         }),
       );
@@ -295,10 +296,10 @@ describe('HttpTransport.snapshot', () => {
     const urls: string[] = [];
     const fetchImpl: typeof fetch = (input) => {
       urls.push(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
-      return ok({ watermark: 4, rows: [], next: null })(input);
+      return ok({ watermark: asVersion(4), rows: [], next: null })(input);
     };
     await new HttpTransport('http://api', 't', fetchImpl).snapshot({
-      watermark: 4,
+      watermark: asVersion(4),
       after: { siteId: SITE, entity: 'part', id: PART },
       limit: 2,
     });
@@ -332,16 +333,54 @@ describe('HttpTransport.snapshot', () => {
 describe('isSnapshotPage', () => {
   const row = { entity: 'ticket', id: TICKET, siteId: SITE, data: {} };
   it.each([
-    ['a page', { watermark: 1, rows: [row], next: null }, true],
-    ['a page with a key', { watermark: 1, rows: [], next: { siteId: SITE, entity: 'part', id: PART } }, true],
+    ['a page', { watermark: asVersion(1), rows: [row], next: null }, true],
+    [
+      'a page with a key',
+      { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part', id: PART } },
+      true,
+    ],
     ['no watermark', { rows: [], next: null }, false],
     ['a fractional watermark', { watermark: 1.5, rows: [], next: null }, false],
-    ['an unknown entity', { watermark: 1, rows: [{ ...row, entity: 'site' }], next: null }, false],
-    ['a row without data', { watermark: 1, rows: [{ ...row, data: null }], next: null }, false],
-    ['a key without an id', { watermark: 1, rows: [], next: { siteId: SITE, entity: 'part' } }, false],
-    ['no next', { watermark: 1, rows: [] }, false],
+    ['an unknown entity', { watermark: asVersion(1), rows: [{ ...row, entity: 'site' }], next: null }, false],
+    ['a row without data', { watermark: asVersion(1), rows: [{ ...row, data: null }], next: null }, false],
+    ['a key without an id', { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part' } }, false],
+    ['no next', { watermark: asVersion(1), rows: [] }, false],
     ['an array', [], false],
   ])('%s', (_case, body, expected) => {
     expect(isSnapshotPage(body)).toBe(expected);
+  });
+});
+
+describe('asVersion', () => {
+  it.each([0, 1, Number.MAX_SAFE_INTEGER])('accepts %p', (n) => {
+    expect(asVersion(n)).toBe(n);
+  });
+
+  it.each([-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY])('refuses %p', (n) => {
+    expect(() => asVersion(n)).toThrow(RangeError);
+  });
+});
+
+describe('a stored state with a cursor that is not a version', () => {
+  it('loads a snapshot instead, and keeps numbering mutations after the stored id', async () => {
+    const t = new ScriptedTransport();
+    t.snapshots.push(page(4, []));
+    t.pulls.push(pulled([], 4, 7));
+    const { client: c } = client(t, { cursor: -3, lastMutationId: 7, base: { [`ticket/${TICKET}`]: ticket('stale') } });
+    const pushed: number[] = [];
+    t.pushes.push((req) => {
+      pushed.push(...req.mutations.map((m) => m.id));
+      return Promise.resolve({
+        results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
+        lastMutationId: 8,
+      });
+    });
+    c.mutate('ticket.create', { id: OTHER, siteId: SITE, title: 'new', description: '' });
+
+    await c.sync();
+
+    expect(pushed).toEqual([8]);
+    expect(t.snapshotRequests).toEqual([{ limit: 500 }]);
+    expect(c.rows('ticket').map((r) => r.id)).not.toContain(TICKET);
   });
 });
