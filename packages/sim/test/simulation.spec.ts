@@ -26,8 +26,16 @@ async function search(
 }
 
 /** Signatures over every run of a search that does not stop: the profile allows them all. */
-async function signaturesIn(name: keyof typeof PROFILES, defects: Defect[] = []): Promise<Set<Signature>> {
-  const profile = { ...PROFILES[name], allowed: [...PROFILES.full.allowed, 'divergence', 'livelock', 'client-error'] };
+async function signaturesIn(
+  name: keyof typeof PROFILES,
+  defects: Defect[] = [],
+  overrides: Partial<(typeof PROFILES)['full']> = {},
+): Promise<Set<Signature>> {
+  const profile = {
+    ...PROFILES[name],
+    allowed: [...PROFILES.full.allowed, 'divergence', 'livelock', 'client-error', 'stuck-request'],
+    ...overrides,
+  };
   const report = await checkProfile({
     profile: profile as typeof PROFILES.full,
     server: new MemoryServer(new Set(defects)),
@@ -76,8 +84,8 @@ describe('simulation engine (against the in-memory reference server)', () => {
       expect(report.results.every((r) => r.quiescent)).toBe(true);
     });
 
-    it('only ever gets stuck on hung requests in the full profile', async () => {
-      expect([...(await signaturesIn('full'))]).toEqual(['stuck-request']);
+    it('converges on every run of full, hung requests included: the client gives up on them', async () => {
+      expect([...(await signaturesIn('full'))]).toEqual([]);
     });
 
     it.each(Object.keys(PROFILES) as Array<keyof typeof PROFILES>)(
@@ -101,7 +109,6 @@ describe('simulation engine (against the in-memory reference server)', () => {
       ['a rejected mutation answered with 500', 'rejections', 'rejection-500', 'rejected-mutation-500'],
       ["other sites' rows in incremental pulls", 'multi-site', 'foreign-rows', 'foreign-site-rows'],
       ['a server that never accepts a push', 'baseline', 'push-unavailable', 'livelock'],
-      ['a request that never answers', 'full', undefined, 'stuck-request'],
       ['client code that throws', 'rejections', 'corrupt-status', 'client-error'],
       ['an edit of the title that empties the description', 'baseline', 'blank-unsent-description', 'lost-edit'],
       ['a rejection the actions of the profile cannot cause', 'baseline', 'internal-rejection', 'unexpected-rejection'],
@@ -117,6 +124,12 @@ describe('simulation engine (against the in-memory reference server)', () => {
 
     it.each(cases)('reports %s', async (_label, profile, defect, signature) => {
       expect(await signaturesIn(profile, defect ? [defect] : [])).toContain(signature);
+    });
+
+    it('reports a client that waits forever on a hung request (as one without a request timeout would)', async () => {
+      // No timeout, as in the client before F-13.
+      const forever = { requestTimeoutMs: Number.POSITIVE_INFINITY };
+      expect(await signaturesIn('full', [], forever)).toContain('stuck-request');
     });
 
     it('still checks the clients that drained when another client is stuck on a known defect', async () => {

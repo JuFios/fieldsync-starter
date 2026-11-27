@@ -1,5 +1,13 @@
 import { knownDefect, precondition } from '@fieldsync/test-kit';
-import { asVersion, MemoryStorage, SyncClient, type SyncClientOptions, type TimerHandle, type Transport } from '../src';
+import {
+  asVersion,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MemoryStorage,
+  SyncClient,
+  type SyncClientOptions,
+  type TimerHandle,
+  type Transport,
+} from '../src';
 import type { SyncClock } from '../src';
 import type { PullResponse, PushRequest, PushResponse, SnapshotPage } from '../src';
 
@@ -68,11 +76,16 @@ class RejectingTransport implements Transport {
 /** A transport whose requests never complete unless the caller aborts them. */
 class HangingTransport implements Transport {
   pushCalls = 0;
+  /** Requests whose signal was aborted. */
+  aborted = 0;
 
   push(_req: PushRequest, init?: { signal?: AbortSignal }): Promise<PushResponse> {
     this.pushCalls += 1;
     return new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      init?.signal?.addEventListener('abort', () => {
+        this.aborted += 1;
+        reject(new Error('aborted'));
+      });
     });
   }
 
@@ -314,24 +327,25 @@ describe('SyncClient', () => {
     expect(second).toEqual([2]);
   });
 
-  knownDefect(
-    {
-      id: 'F-13',
-      owner: 'offline-client',
-      reason: 'requests have no timeout, so a hung request blocks syncing forever',
-    },
-    'gives up on a request that never answers and retries',
-    async () => {
-      jest.useFakeTimers();
-      const transport = new HangingTransport();
-      const client = makeClient(transport);
-      await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
-      precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
-      await jest.advanceTimersByTimeAsync(5 * 60_000);
-      expect(client.status).not.toBe('syncing');
-      expect(transport.pushCalls).toBeGreaterThan(1);
-    },
-  );
+  it('gives up on a request that never answers and retries', async () => {
+    const clock = new ManualClock();
+    const transport = new HangingTransport();
+    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
+    precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
+
+    await clock.advance(DEFAULT_REQUEST_TIMEOUT_MS - 1);
+    expect(client.status).toBe('syncing');
+    await clock.advance(1);
+    expect({ status: client.status, error: client.syncError }).toEqual({
+      status: 'offline',
+      error: { status: 0, code: 'TIMEOUT' },
+    });
+    expect(transport.aborted).toBe(1);
+
+    await clock.advance(60_000);
+    expect(transport.pushCalls).toBeGreaterThan(1);
+  });
 
   knownDefect(
     { id: 'F-10', owner: 'offline-client', reason: 'the pending queue is never persisted' },

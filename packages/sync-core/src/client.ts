@@ -30,6 +30,17 @@ const PAGE_SIZE = 500;
  */
 const MAX_SNAPSHOT_ATTEMPTS = 3;
 
+/** A request that got no answer within the client's request timeout. */
+export class RequestTimeout extends Error {
+  constructor(readonly ms: number) {
+    super(`No answer within ${ms} ms`);
+    this.name = 'RequestTimeout';
+  }
+}
+
+/** How long a request may take before the client gives up on it and retries later. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 /** What a step of a disposed client rejects with: it stops without storing or reporting anything. */
 export class ClientDisposed extends Error {
   constructor() {
@@ -50,7 +61,10 @@ function applyChanges(state: Map<string, Row>, changes: PullResponse['changes'])
   }
 }
 
-/** Why the last sync failed: the server's problem code, or NETWORK when no answer arrived. */
+/**
+ * Why the last sync failed: the server's problem code, NETWORK when the request failed without an
+ * answer, TIMEOUT when no answer came within the request timeout.
+ */
 export interface SyncError {
   /** 0 when no answer arrived. */
   status: number;
@@ -96,6 +110,11 @@ export interface SyncClientOptions {
   storage: SyncStorage;
   /** Time and timers; defaults to the system clock. */
   clock?: SyncClock;
+  /**
+   * Longest wait for one request, in milliseconds; see {@link DEFAULT_REQUEST_TIMEOUT_MS}. `Infinity`
+   * waits as long as the transport does.
+   */
+  requestTimeoutMs?: number;
 }
 
 class MapTx implements MutatorTx {
@@ -159,6 +178,7 @@ export class SyncClient {
   private readonly transport: Transport;
   private readonly storage: SyncStorage;
   private readonly clock: SyncClock;
+  private readonly requestTimeoutMs: number;
   private base = new Map<string, Row>();
   private cursor: Version = asVersion(0);
   private lastMutationId = 0;
@@ -197,6 +217,7 @@ export class SyncClient {
     this.transport = opts.transport;
     this.storage = opts.storage;
     this.clock = opts.clock ?? systemClock;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.ready = this.load();
   }
 
@@ -321,22 +342,36 @@ export class SyncClient {
   }
 
   /**
-   * Runs one request with a signal that aborts when the client is disposed. Resolves only while the
-   * client is alive: a request that ends after `dispose()` rejects with {@link ClientDisposed}, even if
-   * the transport ignored the signal, so no later step stores its answer.
+   * Runs one request with a signal that aborts when the client is disposed or the request takes
+   * longer than `requestTimeoutMs` (on the client's clock, so tests and the simulation control it). A
+   * request that hangs (a half-open connection) then fails like a lost one, and the client retries
+   * instead of waiting forever (F-13). It resolves only while the client is alive: after `dispose()`
+   * it rejects with {@link ClientDisposed}, even if the transport ignored the signal, so no later step
+   * stores its answer.
    */
   private async request<T>(send: (init: RequestOptions) => Promise<T>): Promise<T> {
-    const { signal } = this.life;
-    if (signal.aborted) throw new ClientDisposed();
-    let onAbort: () => void = () => undefined;
-    const aborted = new Promise<never>((_resolve, reject) => {
-      onAbort = () => reject(new ClientDisposed());
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
+    if (this.life.signal.aborted) throw new ClientDisposed();
+    const controller = new AbortController();
+    let fail: (err: Error) => void = () => undefined;
+    const failed = new Promise<never>((_resolve, reject) => (fail = reject));
+    // The reason is settled before the abort, so the request ends with it and not with whatever error
+    // the aborted transport rejects with.
+    const onDispose = () => {
+      fail(new ClientDisposed());
+      controller.abort();
+    };
+    this.life.signal.addEventListener('abort', onDispose, { once: true });
+    const timer = Number.isFinite(this.requestTimeoutMs)
+      ? this.clock.setTimeout(() => {
+          fail(new RequestTimeout(this.requestTimeoutMs));
+          controller.abort();
+        }, this.requestTimeoutMs)
+      : undefined;
     try {
-      return await Promise.race([send({ signal }), aborted]);
+      return await Promise.race([send({ signal: controller.signal }), failed]);
     } finally {
-      signal.removeEventListener('abort', onAbort);
+      if (timer !== undefined) this.clock.clearTimeout(timer);
+      this.life.signal.removeEventListener('abort', onDispose);
     }
   }
 
@@ -362,7 +397,7 @@ export class SyncClient {
       this.lastError =
         err instanceof TransportError
           ? { status: err.status, code: err.code, ...(err.details ? { details: err.details } : {}) }
-          : { status: 0, code: 'NETWORK' };
+          : { status: 0, code: err instanceof RequestTimeout ? 'TIMEOUT' : 'NETWORK' };
       this.setStatus('offline');
       this.scheduleRetry();
     }

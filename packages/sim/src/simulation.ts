@@ -284,6 +284,7 @@ export class SimSystem {
         transport: new HttpTransport(BASE_URL, user.token, this.network.fetchFor(name)),
         storage: new MemoryStorage(),
         clock: this.clock.view(spec.skewMs),
+        requestTimeoutMs: profile.requestTimeoutMs,
       });
       return { name, user, client };
     });

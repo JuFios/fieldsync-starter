@@ -1,4 +1,4 @@
-import type { RejectionCode } from '@fieldsync/sync-core';
+import { DEFAULT_REQUEST_TIMEOUT_MS, type RejectionCode } from '@fieldsync/sync-core';
 import type { LinkState, RequestFault, ResponseFault } from './network';
 import { SIM_RETENTION_MS, type Role } from './types';
 
@@ -37,7 +37,7 @@ export const SIGNATURES = [
   'rejected-mutation-500',
   /** The server rejected a mutation with a code none of the profile's actions can cause. */
   'unexpected-rejection',
-  /** A client waits forever on a request that never completes. */
+  /** A client waits forever on a request that never completes (fixed: F-13, requests time out). */
   'stuck-request',
   /** A client never drained its queue for another reason. */
   'livelock',
@@ -68,11 +68,6 @@ export const KNOWN_SIGNATURES: Partial<Record<Signature, KnownSignature>> = {
     defect: 'F-07',
     owner: 'access-control',
     reason: "incremental pull returns other sites' changes",
-  },
-  'stuck-request': {
-    defect: 'F-13',
-    owner: 'offline-client',
-    reason: 'requests have no timeout, so a request that never answers blocks syncing forever',
   },
 };
 
@@ -116,6 +111,11 @@ export interface Profile {
    * client's cursor behind the floor and the client has to be reset.
    */
   awayMs: number;
+  /**
+   * How long a client waits for an answer before it gives up on the request (its request timeout).
+   * A request that hangs (the `hang` fault) ends after it like a lost one.
+   */
+  requestTimeoutMs: number;
   /** Known-defect signatures this profile may produce (see {@link KNOWN_SIGNATURES}). */
   allowed: readonly Signature[];
   /**
@@ -218,6 +218,7 @@ const baseline: Profile = {
   invalidText: false,
   maxTickMs: 8_000,
   awayMs: 2 * SIM_RETENTION_MS,
+  requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
   allowed: [],
   // Creates, edits and parts of existing tickets: the server applies every one, except an edit of a
   // field another client changed since the user saw it.
@@ -307,7 +308,7 @@ const full: Profile = {
   actionWeights: rejections.actionWeights,
   invalidText: true,
   requestFaults: { ...ALL_REQUEST_FAULTS, hang: 1 },
-  allowed: ['foreign-site-rows', 'stuck-request'],
+  allowed: ['foreign-site-rows'],
   rejectionCodes: [...REJECTABLE, ...FOREIGN_TICKET_EDITS],
   minimumPerSeed: {
     ...NETWORK_MINIMUM,
