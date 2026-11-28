@@ -67,6 +67,19 @@ function refused(count: { requests: number }): Transport {
   return { push: refuse, pull: refuse, snapshot: refuse };
 }
 
+/** The same storage with its own `commit`. */
+function withCommit(storage: MemoryStorage, commit: SyncStorage['commit']): SyncStorage {
+  return {
+    load: () => storage.load(),
+    loadQueue: () => storage.loadQueue(),
+    ensureClientId: (candidate) => storage.ensureClientId(candidate),
+    enqueue: (entry) => storage.enqueue(entry),
+    commit,
+    restartClient: (clientId, lastHandled) => storage.restartClient(clientId, lastHandled),
+    close: () => storage.close(),
+  };
+}
+
 /**
  * The same storage as a newer app reads it: a refusal that was stored by the app under test is, for
  * it, a refusal of an older protocol than its own.
@@ -98,6 +111,32 @@ async function tab(transport: Transport, storage: SyncStorage, tabs: TabCoordina
   await c.ready;
   return c;
 }
+
+describe('a disposed client', () => {
+  it('does nothing when asked to sync, also as a follower whose channel is closed', async () => {
+    const storage = new MemoryStorage();
+    const group = new TabGroup();
+    await tab(new Server().transport(), storage, group.tab());
+    const member = group.tab();
+    let closed = false;
+    // As a BroadcastChannel: posting once it is closed throws.
+    const channel: TabCoordinator = {
+      claim: (signal, onLeader) => member.claim(signal, onLeader),
+      subscribe: (listener) => member.subscribe(listener),
+      post: (message) => {
+        if (closed) throw new Error('InvalidStateError: the channel is closed');
+        member.post(message);
+      },
+      close: () => {
+        closed = true;
+        member.close();
+      },
+    };
+    const follower = await tab(new Server().transport(), storage, channel);
+    follower.dispose();
+    await expect(follower.sync()).resolves.toBeUndefined();
+  });
+});
 
 describe('a leading tab that cannot sync any more', () => {
   it("gives up leadership once the server refuses its protocol, so a newer app's tab sends the queue", async () => {
@@ -177,6 +216,36 @@ describe('a leading tab that cannot sync any more', () => {
       status: 'update-required',
     });
     expect(server.titles).toEqual([]);
+  });
+
+  it('keeps saying so when the refusal arrives while a sync is storing its last page', async () => {
+    const memory = new MemoryStorage();
+    let release: () => void = () => undefined;
+    let held: Promise<void> | undefined;
+    // The same storage; once `held` is set, writing a pull page waits for it.
+    const storage = withCommit(memory, async (change) => {
+      if (change.base && held) await held;
+      await memory.commit(change);
+    });
+    let refuseStream: (err: Error) => void = () => undefined;
+    const stream = () => new Promise<void>((_resolve, reject) => (refuseStream = reject));
+    const c = await tab({ ...new Server().transport(), stream }, storage, new TabGroup().tab(), true);
+    await c.sync();
+
+    held = new Promise<void>((resolve) => (release = resolve));
+    const running = c.sync();
+    await settle();
+    refuseStream(tooOld());
+    await settle();
+    release();
+    await running;
+    await settle();
+
+    expect({ status: c.status, indicator: c.indicator, error: c.syncError?.code }).toEqual({
+      status: 'update-required',
+      indicator: 'update-required',
+      error: 'CLIENT_UPDATE_REQUIRED',
+    });
   });
 
   it('says that an update is required when it is the stream that the server refuses', async () => {

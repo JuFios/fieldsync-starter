@@ -570,9 +570,11 @@ export class SyncClient {
    * the retry timer runs the next), and resolves when that one ends.
    */
   sync(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     if (!this.leader) {
       // The leading tab syncs for every tab; a follower that is not ready yet knows no leader.
       return this.ready.then(() => {
+        if (this.disposed) return undefined;
         if (this.leader) return this.sync();
         this.tabs.post({ kind: 'sync' });
         return undefined;
@@ -621,8 +623,8 @@ export class SyncClient {
 
   /**
    * Runs one request with a signal that aborts when the client is disposed or stops syncing, or the
-   * request takes longer than `requestTimeoutMs` (on the client's clock, so tests and the simulation control it). A
-   * request that hangs (a half-open connection) then fails like a lost one, and the client retries
+   * request takes longer than `requestTimeoutMs` (on the client's clock, so tests and the simulation
+   * control it). A request that hangs (a half-open connection) then fails like a lost one, and the client retries
    * instead of waiting forever (F-13). It resolves only while the client is alive: after `dispose()`
    * it rejects with {@link ClientDisposed}, even if the transport ignored the signal, so no later step
    * stores its answer.
@@ -785,6 +787,8 @@ export class SyncClient {
       } else {
         await this.reload();
       }
+      // The stream may have been refused while the last page was being stored.
+      if (this.updateRequired) return;
       this.lastError = undefined;
       this.failures = 0;
       this.setStatus('idle');
@@ -1044,6 +1048,7 @@ export class SyncClient {
    * again if the server answers RESET_REQUIRED while it is read.
    */
   private async reload(): Promise<void> {
+    if (this.updateRequired) return;
     this.setStatus('loading');
     for (let attempt = 1; ; attempt += 1) {
       try {
