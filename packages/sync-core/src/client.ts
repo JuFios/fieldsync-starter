@@ -919,12 +919,14 @@ export class SyncClient {
    * it would never end, nor push again (N-1). What came after is the next sync's.
    */
   private async pull(): Promise<void> {
-    let target: Version | undefined;
+    let first: PullResponse | undefined;
     for (;;) {
       const from = this.cursor;
       const clientId = this.loadedClientId();
       const resp = await this.request((init) => this.transport.pull(from, clientId, PAGE_SIZE, init));
-      const settled = this.settled(resp, resp.nextCursor);
+      first ??= resp;
+      // What waited for a pull was handled before this one started, so before its first page.
+      const settled = this.settled(resp, resp.nextCursor, first.head, first);
       const put: Array<[string, Row]> = [];
       const removed: string[] = [];
       for (const change of resp.changes) {
@@ -943,24 +945,28 @@ export class SyncClient {
       this.cursor = resp.nextCursor;
       this.apply(settled);
       this.emit();
-      target ??= resp.head;
-      if (!resp.hasMore || this.cursor >= target) break;
+      if (!resp.hasMore || this.cursor >= first.head) break;
     }
   }
 
   /**
    * What a pull page settles at `cursor`: the server's last handled id, and the pending mutations
-   * whose effect the client then has.
+   * whose effect the client then has. Every change of a mutation the server had handled before a read
+   * is at or below the head of that read. Reaching such a head therefore settles the mutation even
+   * while others write faster than a page per request and no page is the last one: `handledBy` is
+   * one for the mutations already waiting for a pull, and the head of `first`, the first page read,
+   * for those its last applied id covers.
    */
-  private settled(resp: PullResponse, cursor: Version) {
+  private settled(resp: PullResponse, cursor: Version, handledBy: Version, first: PullResponse) {
     const lastMutationId = asLastMutationId(Math.max(this.lastMutationId, resp.lastMutationId));
     const dropped = this.pending
       .filter((q) => {
         if (q.appliedAt !== undefined) return q.appliedAt <= cursor;
-        if (q.awaitingPull) return !resp.hasMore;
+        if (q.awaitingPull) return !resp.hasMore || cursor >= handledBy;
         // A mutation whose answer was lost: the last page comes from the same snapshot as the
         // client's last applied id, so every change of those mutations is in the pages read.
-        return !resp.hasMore && q.mutation.id <= resp.lastMutationId;
+        if (!resp.hasMore && q.mutation.id <= resp.lastMutationId) return true;
+        return cursor >= first.head && q.mutation.id <= first.lastMutationId;
       })
       .map((q) => q.seq);
     return { dropped, meta: { lastMutationId, nextMutationIdAtLeast: asMutationId(lastMutationId + 1) } };
@@ -1010,18 +1016,21 @@ export class SyncClient {
       page = await this.request((init) => this.transport.snapshot({ watermark, after, limit: PAGE_SIZE }, init));
     }
     let cursor = watermark;
+    let first: PullResponse | undefined;
     let last: PullResponse;
     do {
       const from = cursor;
       const clientId = this.loadedClientId();
       last = await this.request((init) => this.transport.pull(from, clientId, PAGE_SIZE, init));
+      first ??= last;
       applyChanges(staged, last.changes);
       cursor = last.nextCursor;
       // Once the log is read up to the point of consistency the staged rows are one state of the
       // server: installed now, however fast others write meanwhile (waiting for a page without more
       // changes never ends under constant writes, №2). The rest comes with the next pulls.
     } while (last.hasMore && cursor < consistentAt);
-    const settled = this.settled(last, cursor);
+    // What waited for a pull was handled before the first page of the snapshot was read.
+    const settled = this.settled(last, cursor, consistentAt, first);
     await this.commit({
       base: { replace: true, put: [...staged] },
       pending: { delete: settled.dropped },

@@ -91,6 +91,26 @@ describe('a sync under constant writes', () => {
   });
 });
 
+describe('a mutation the server handled, under constant writes', () => {
+  // The server answers the copy as a duplicate without a version (its result was collected), so the
+  // client waits for a pull to have its change; every page has more changes after it.
+  it.each([
+    ['a pull', true],
+    ['a snapshot', false],
+  ])('leaves the queue once %s has reached the head it started from', async (_what, hasState) => {
+    const server = new BusyServer();
+    server.push = () =>
+      Promise.resolve({ results: [{ id: asMutationId(1), status: 'duplicate' as const }], lastMutationId: asMutationId(1) });
+    const storage = new MemoryStorage();
+    if (hasState) await storage.commit({ meta: { cursor: asVersion(1_000) } });
+    const c = client(server, storage);
+    await c.mutate('ticket.create', { id: id(1), siteId: SITE, title: 'handled already', description: '' });
+    await c.sync();
+    expect({ status: c.status, pending: c.pendingCount }).toEqual({ status: 'idle', pending: 0 });
+    expect((await storage.load()).pending).toEqual([]);
+  });
+});
+
 describe('a client restarted before its first state arrived (№5)', () => {
   it('starts with a snapshot after the restart, not with the log from 0', async () => {
     const storage = new MemoryStorage();
