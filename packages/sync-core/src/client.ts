@@ -104,6 +104,17 @@ function isClientGone(err: unknown): boolean {
   return err instanceof TransportError && (err.code === 'MUTATION_OUT_OF_ORDER' || err.code === 'CLIENT_RETIRED');
 }
 
+/** Whether a stored refusal holds for this app; one of an older protocol is history: the app was updated. */
+function refusesThisApp(refused: UpdateRequired | null): refused is UpdateRequired {
+  return refused !== null && refused.version >= PROTOCOL_VERSION;
+}
+
+/** What a queue written by a newer app asks for: it holds formats this code cannot send. */
+function requiredByQueue(pending: readonly StoredMutation[]): UpdateRequired | null {
+  if (!pending.some((q) => q.v > MUTATION_FORMAT_VERSION)) return null;
+  return { version: PROTOCOL_VERSION, min: PROTOCOL_VERSION + 1, max: PROTOCOL_VERSION + 1 };
+}
+
 function isResetRequired(err: unknown): boolean {
   return err instanceof TransportError && err.code === RESET_REQUIRED;
 }
@@ -300,8 +311,12 @@ export class SyncClient {
    */
   private again = false;
   private disposed = false;
-  /** Aborts every request of the client when it is disposed. */
-  private readonly life = new AbortController();
+  /**
+   * Aborted when the client is disposed, or can no longer sync (an update is required): it aborts
+   * every request and the stream, and gives up leadership or the place in line, so that another tab,
+   * a newer app's among them, takes over.
+   */
+  private readonly leadership = new AbortController();
   /**
    * Resolves once the stored state is loaded; every operation waits for it. It does not reject: a
    * storage that cannot be read leaves the client in the status `error` (see `syncError`).
@@ -342,17 +357,18 @@ export class SyncClient {
         this.hasState = true;
       }
       this.retiring = state.meta.retiring;
-      // A refusal of an older protocol than this code speaks is history: the app was updated.
       const refused = state.meta.updateRequired;
-      if (refused && refused.version < PROTOCOL_VERSION) await this.storage.commit({ meta: { updateRequired: null } });
-      else this.updateRequired = refused;
-      // A queue written by a newer app holds formats this code cannot send.
-      if (this.pending.some((q) => q.v > MUTATION_FORMAT_VERSION)) {
-        this.updateRequired ??= { version: PROTOCOL_VERSION, min: PROTOCOL_VERSION + 1, max: PROTOCOL_VERSION + 1 };
-      }
+      if (refusesThisApp(refused)) this.updateRequired = refused;
+      else if (refused) await this.storage.commit({ meta: { updateRequired: null } });
+      this.updateRequired ??= requiredByQueue(this.pending);
       if (this.updateRequired) this.currentStatus = 'update-required';
       this.unsubscribeTabs = this.tabs.subscribe((message) => void this.onTabMessage(message));
-      this.leader = await this.tabs.claim(this.life.signal, () => void this.takeOver());
+      // A tab that cannot sync does not ask to lead: it would keep a newer app's tab from it.
+      if (!this.updateRequired) {
+        const leads = await this.tabs.claim(this.leadership.signal, () => void this.takeOver());
+        // Leadership may have been given up while the answer was on its way.
+        this.leader = leads && !this.leadership.signal.aborted;
+      }
     } catch (err) {
       this.broken = new StorageFailure(err);
       this.lastError = syncErrorOf(this.broken);
@@ -367,14 +383,16 @@ export class SyncClient {
   }
 
   private startStream(): void {
-    if (this.live && !this.broken && !this.disposed && this.transport.stream) void this.runStream();
+    if (this.live && this.leader && !this.broken && !this.disposed && this.transport.stream) void this.runStream();
   }
 
   /** The tab that led went away: this one leads now, from what is stored, and sends what waits. */
   private async takeOver(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.leadership.signal.aborted) return;
     this.leader = true;
     await this.reloadState(true).catch(() => undefined);
+    // The stored state may say that this app cannot sync either: it has then given leadership up.
+    if (!this.leader) return;
     this.startStream();
     void this.sync();
   }
@@ -398,6 +416,9 @@ export class SyncClient {
     }
     this.pending = state.pending;
     this.rejected = state.rejections.map(({ seq: _seq, ...rejection }) => rejection);
+    const refused = state.meta?.updateRequired ?? null;
+    const required = refusesThisApp(refused) ? refused : requiredByQueue(this.pending);
+    if (required) this.stopForUpdate(required);
     this.emit();
   }
 
@@ -425,7 +446,8 @@ export class SyncClient {
         if (this.leader) void this.sync();
         return;
       case 'status':
-        if (this.leader || !isSyncStatus(message.status)) return;
+        // A tab that cannot sync keeps its own status, whatever the one that leads now reports.
+        if (this.leader || this.updateRequired || !isSyncStatus(message.status)) return;
         this.lastError = message.error ?? undefined;
         this.setStatus(message.status);
         return;
@@ -587,26 +609,26 @@ export class SyncClient {
    */
   dispose(): void {
     this.disposed = true;
-    this.life.abort();
+    this.leadership.abort();
     if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
     for (const timer of this.streamTimers) this.clock.clearTimeout(timer);
     this.streamTimers.clear();
     this.listeners.clear();
-    // Aborting `life` gave up leadership (or the place in line); another tab takes over.
+    // Aborting `leadership` gave it up (or the place in line); another tab takes over.
     this.unsubscribeTabs();
     this.tabs.close();
   }
 
   /**
-   * Runs one request with a signal that aborts when the client is disposed or the request takes
-   * longer than `requestTimeoutMs` (on the client's clock, so tests and the simulation control it). A
+   * Runs one request with a signal that aborts when the client is disposed or stops syncing, or the
+   * request takes longer than `requestTimeoutMs` (on the client's clock, so tests and the simulation control it). A
    * request that hangs (a half-open connection) then fails like a lost one, and the client retries
    * instead of waiting forever (F-13). It resolves only while the client is alive: after `dispose()`
    * it rejects with {@link ClientDisposed}, even if the transport ignored the signal, so no later step
    * stores its answer.
    */
   private async request<T>(send: (init: RequestOptions) => Promise<T>): Promise<T> {
-    if (this.life.signal.aborted) throw new ClientDisposed();
+    if (this.leadership.signal.aborted) throw new ClientDisposed();
     const controller = new AbortController();
     let fail: (err: Error) => void = () => undefined;
     const failed = new Promise<never>((_resolve, reject) => (fail = reject));
@@ -616,7 +638,7 @@ export class SyncClient {
       fail(new ClientDisposed());
       controller.abort();
     };
-    this.life.signal.addEventListener('abort', onDispose, { once: true });
+    this.leadership.signal.addEventListener('abort', onDispose, { once: true });
     const timer = Number.isFinite(this.requestTimeoutMs)
       ? this.clock.setTimeout(() => {
           fail(new RequestTimeout(this.requestTimeoutMs));
@@ -627,7 +649,7 @@ export class SyncClient {
       return await Promise.race([send({ signal: controller.signal }), failed]);
     } finally {
       if (timer !== undefined) this.clock.clearTimeout(timer);
-      this.life.signal.removeEventListener('abort', onDispose);
+      this.leadership.signal.removeEventListener('abort', onDispose);
     }
   }
 
@@ -642,10 +664,10 @@ export class SyncClient {
     const stream = this.transport.stream?.bind(this.transport);
     if (!stream) return;
     let failures = 0;
-    while (!this.disposed) {
+    while (!this.leadership.signal.aborted) {
       const controller = new AbortController();
       const onDispose = () => controller.abort();
-      this.life.signal.addEventListener('abort', onDispose, { once: true });
+      this.leadership.signal.addEventListener('abort', onDispose, { once: true });
       // Until `ready` says how often heartbeats come, the stream gets a request's time to open.
       let silenceMs = this.requestTimeoutMs;
       let watchdog: TimerHandle | undefined;
@@ -679,9 +701,9 @@ export class SyncClient {
         failure = silent && !(err instanceof TransportError) ? new StreamSilent() : err;
       } finally {
         if (watchdog) this.untrack(watchdog);
-        this.life.signal.removeEventListener('abort', onDispose);
+        this.leadership.signal.removeEventListener('abort', onDispose);
       }
-      if (this.disposed) return;
+      if (this.leadership.signal.aborted) return;
       if (failure instanceof TransportError && failure.code === 'CLIENT_UPDATE_REQUIRED') return;
       const retryAfterMs = failure instanceof TransportError ? (failure.retryAfterSeconds ?? 0) * 1000 : 0;
       const delay = backoffDelay(failures, this.backoff, this.random, retryAfterMs);
@@ -689,11 +711,11 @@ export class SyncClient {
       // The listener goes with the wait: one per reconnection would pile up on the client's signal.
       await new Promise<void>((resolve) => {
         const done = () => {
-          this.life.signal.removeEventListener('abort', done);
+          this.leadership.signal.removeEventListener('abort', done);
           resolve();
         };
         this.track(done, delay);
-        this.life.signal.addEventListener('abort', done, { once: true });
+        this.leadership.signal.addEventListener('abort', done, { once: true });
       });
     }
   }
@@ -729,6 +751,12 @@ export class SyncClient {
     this.tabs.post({ kind: 'changed' });
   }
 
+  /** Writes what a sync read from the server; nothing once this tab stopped syncing. */
+  private commitSynced(change: StateChange): Promise<void> {
+    if (this.updateRequired) return Promise.reject(new ClientDisposed());
+    return this.commit(change);
+  }
+
   private async runSync(): Promise<void> {
     await this.ready;
     if (this.disposed || this.broken || this.updateRequired) return;
@@ -742,6 +770,8 @@ export class SyncClient {
         await this.giveUpClientId();
         await this.push();
       });
+      // The queue the push read may hold a newer format: this app has then stopped syncing.
+      if (this.updateRequired) return;
       if (this.hasState) {
         await this.pull().catch(async (err: unknown) => {
           if (!isResetRequired(err)) throw err;
@@ -754,8 +784,9 @@ export class SyncClient {
       this.failures = 0;
       this.setStatus('idle');
     } catch (err) {
-      // A disposed client has nobody to report to and nothing to retry.
-      if (this.disposed) return;
+      // A disposed client has nobody to report to and nothing to retry; neither has one that stopped
+      // syncing while this sync ran.
+      if (this.disposed || this.updateRequired) return;
       this.lastError = syncErrorOf(err);
       if (err instanceof TransportError && err.code === 'CLIENT_UPDATE_REQUIRED') {
         await this.requireUpdate(err);
@@ -772,10 +803,29 @@ export class SyncClient {
    * is made until the app is updated (its next version clears it). The queue stays for that app.
    */
   private async requireUpdate(err: TransportError): Promise<void> {
+    if (this.updateRequired) return;
     const range = (n: unknown) => (typeof n === 'number' && Number.isSafeInteger(n) ? n : PROTOCOL_VERSION + 1);
     this.updateRequired = { version: PROTOCOL_VERSION, min: range(err.details?.min), max: range(err.details?.max) };
     this.setStatus('update-required');
     await this.commit({ meta: { updateRequired: this.updateRequired } }).catch(() => undefined);
+    // Given up only once the refusal is stored: the tab that takes over reads it.
+    this.giveUpLeadership();
+  }
+
+  /** This app cannot sync any more, for a reason the other tabs can read in the storage. */
+  private stopForUpdate(required: UpdateRequired): void {
+    if (this.updateRequired) return;
+    this.updateRequired = required;
+    this.setStatus('update-required');
+    this.giveUpLeadership();
+  }
+
+  /** From now on this tab makes no request: it leaves the lead, or the line, to the others. */
+  private giveUpLeadership(): void {
+    this.leader = false;
+    if (this.retryTimer) this.clock.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.leadership.abort();
   }
 
   /**
@@ -787,7 +837,7 @@ export class SyncClient {
   private async giveUpClientId(): Promise<void> {
     const old = this.loadedClientId();
     this.retiring = old;
-    await this.commit({ meta: { retiring: old } });
+    await this.commitSynced({ meta: { retiring: old } });
     await this.recover();
   }
 
@@ -801,6 +851,7 @@ export class SyncClient {
     const retire = this.transport.retire?.bind(this.transport);
     if (old === null || !retire) return;
     const { lastMutationId } = await this.request((init) => retire(old, init));
+    if (this.updateRequired) throw new ClientDisposed();
     const fresh = this.newClientId();
     try {
       await this.storage.restartClient(fresh, lastMutationId);
@@ -868,6 +919,11 @@ export class SyncClient {
     const stored = await this.readQueue();
     this.pending = stored.pending;
     this.rejected = stored.rejections.map(({ seq: _seq, ...rejection }) => rejection);
+    const required = requiredByQueue(this.pending);
+    if (required) {
+      this.stopForUpdate(required);
+      return;
+    }
     const batch = this.nextBatch();
     if (batch.length === 0) return;
     const clientId = this.loadedClientId();
@@ -901,7 +957,7 @@ export class SyncClient {
     const lastMutationId = asLastMutationId(Math.max(this.lastMutationId, resp.lastMutationId));
     // Stored at once, with the last id the server handled: after a reload, ids continue after it, so
     // a new mutation is never answered as a duplicate of an old one (F-32).
-    await this.commit({
+    await this.commitSynced({
       pending: { put: updated, delete: [...done] },
       rejections: { add: rejections },
       meta: { lastMutationId, nextMutationIdAtLeast: asMutationId(lastMutationId + 1) },
@@ -934,7 +990,7 @@ export class SyncClient {
         if (change.op === 'put' && change.data) put.push([key, change.data]);
         else removed.push(key);
       }
-      await this.commit({
+      await this.commitSynced({
         base: { put, delete: removed },
         pending: { delete: settled.dropped },
         meta: { cursor: resp.nextCursor, ...settled.meta },
@@ -1031,7 +1087,7 @@ export class SyncClient {
     } while (last.hasMore && cursor < consistentAt);
     // What waited for a pull was handled before the first page of the snapshot was read.
     const settled = this.settled(last, cursor, consistentAt, first);
-    await this.commit({
+    await this.commitSynced({
       base: { replace: true, put: [...staged] },
       pending: { delete: settled.dropped },
       meta: { cursor, ...settled.meta },
