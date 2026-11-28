@@ -641,8 +641,9 @@ for as long as its client used it (the built server was still running 15 s after
 the process for the 5 s keep-alive timeout otherwise. Alternatives: Nest's `forceCloseConnections`
 destroys connections with requests in progress; `http-terminator` does so after a grace period (1 s
 by default) and brings four dependencies; setting `Connection: close` on the remaining responses is
-code of our own. `stoppable` sends no such header, so a request a client puts into a connection being
-closed fails on its side and is sent again (however many copies arrive, a push is applied once). It
+code of our own. `stoppable` sends no such header (RFC 9112, 9.6, says a server SHOULD when it
+intends to close), so a request a client puts into a connection being closed fails on its side and
+is sent again (however many copies arrive, a push is applied once). It
 is used without a grace period: a request that never ends (a body that never arrives) holds the
 process until the process manager kills it (Docker: after 10 s by default).
 
@@ -1781,6 +1782,9 @@ second tab, the notification stream and requests cut in the middle in every prof
 | `rejections` | 1000 / 1000 | — | 0.68 | 0.76 | 1.21 | 0.55 | 0.91 |
 | `multi-site` | 102 / 1000 | `foreign-site-rows` (F-07): 898 | 0.73 | 0.70 | 1.16 | 0.58 | 0.94 |
 | `full` | 124 / 1000 | `foreign-site-rows` (F-07): 876 | 0.68 | 0.76 | 1.21 | 0.55 | 0.89 |
+
+Run again (2026-11-28) once mutation and client ids became types of their own in `sync-core` and the
+simulation: the same counts and per-run figures in every profile, as expected of a change of types.
 
 The same search before the change (no reloads, tabs or stream in the simulation): `baseline` and
 `rejections` 1000 / 1000, `multi-site` 119 without violations (F-07 in 881), `full` 105 (F-07 in 762,
