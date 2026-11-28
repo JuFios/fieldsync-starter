@@ -22,13 +22,13 @@ export default function HomePage() {
         onSubmit={(e) => {
           e.preventDefault();
           if (!title.trim()) return;
-          void client.mutate('ticket.create', {
-            id: crypto.randomUUID(),
-            siteId,
-            title: title.trim(),
-            description: '',
-          });
+          const typed = title;
           setTitle('');
+          // Refused (the browser cannot store it, the status line says so): the title comes back,
+          // unless the user has started another one.
+          client
+            .mutate('ticket.create', { id: crypto.randomUUID(), siteId, title: typed.trim(), description: '' })
+            .catch(() => setTitle((current) => (current === '' ? typed : current)));
         }}
       >
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="New ticket title" />

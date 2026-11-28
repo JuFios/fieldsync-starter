@@ -247,6 +247,71 @@ test.describe('the offline-first client', () => {
     }
   });
 
+  test('keeps what the user typed when the browser refuses to store it, so it can be saved again', async ({
+    browser,
+    world,
+    db,
+  }) => {
+    const site = await world.site('Quota');
+    const tech = await world.technician(site);
+    const context = await browser.newContext();
+    try {
+      // A full quota: while the flag is set, the browser refuses to add to the queue.
+      await context.addInitScript(() => {
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its store below
+        const add = IDBObjectStore.prototype.add;
+        IDBObjectStore.prototype.add = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+          if (this.name === 'pending' && sessionStorage.getItem('storage-full') !== null) {
+            throw new DOMException('full', 'QuotaExceededError');
+          }
+          return add.call(this, value, key);
+        };
+      });
+      const app = new TicketsPage(await context.newPage());
+      await app.signIn(tech.token);
+      await app.expectSynced();
+      const full = (on: boolean) =>
+        app.page.evaluate((set) => {
+          if (set) sessionStorage.setItem('storage-full', '1');
+          else sessionStorage.removeItem('storage-full');
+        }, on);
+
+      const title = unique('Typed while full');
+      const newTitle = app.page.getByPlaceholder('New ticket title');
+      await full(true);
+      await newTitle.fill(title);
+      await app.page.locator('form input').nth(1).fill(site);
+      await app.page.getByRole('button', { name: 'Create' }).click();
+      await expect(app.status).toContainText('cannot save on this device');
+      await expect(newTitle).toHaveValue(title);
+      await full(false);
+      await app.page.getByRole('button', { name: 'Create' }).click();
+      await expect(app.ticket(title)).toBeVisible();
+      await expect(newTitle).toHaveValue('');
+      await app.expectSynced();
+
+      await app.ticket(title).click();
+      const edited = unique('Edited while full');
+      // The title field has no label in this version of the UI: it is the page's first field.
+      const titleField = app.page.locator('input').first();
+      await expect(titleField).toHaveValue(title);
+      await full(true);
+      await titleField.fill(edited);
+      await app.page.getByRole('button', { name: 'Save' }).click();
+      await expect(app.status).toContainText('cannot save on this device');
+      await full(false);
+      await app.page.getByRole('button', { name: 'Save' }).click();
+      await expect(app.page.getByRole('heading', { name: edited })).toBeVisible();
+      await app.expectSynced();
+      const { rows } = await db.query(`SELECT 1 FROM entities WHERE entity = 'ticket' AND data->>'title' = $1`, [
+        edited,
+      ]);
+      expect(rows).toHaveLength(1);
+    } finally {
+      await context.close();
+    }
+  });
+
   test("moves the original client's id from localStorage into the database", async ({ browser, world, db }) => {
     const site = await world.site('Legacy');
     const tech = await world.technician(site);
