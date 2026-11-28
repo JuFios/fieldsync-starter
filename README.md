@@ -58,6 +58,12 @@ previous one to be healthy (or, for `migrate`, finished). Settings and host port
 environment or a `.env` file in the repository root (see `.env.example`). Postgres data lives in
 the `postgres-data` volume; `docker compose down -v` removes it.
 
+The images are multi-stage builds installed with `npm ci`; their runtime stages hold the server's
+production dependencies or the web app's Next.js standalone output, run as `node` and have
+healthchecks. `.dockerignore` keeps local `.env` files out of them. The original images ran as root
+and copied whole package directories, local `.env` files included, and the original compose file
+had no migration step; `scripts/docker-smoke.sh` plants canary `.env` files and checks all of this.
+
 Demo tokens (with `SEED_DEMO=true`, the compose default): `admin-token` (all sites),
 `tech-a-token` (North Plant), `tech-b-token` (South Plant).
 
@@ -98,6 +104,13 @@ With `API_DOCS_ENABLED=true` the server describes its API at <http://localhost:3
 | `scripts/scan-images.sh IMAGE...` | Known vulnerabilities of the images (Trivy, report only; CI puts it in the job summary) | Docker |
 | `scripts/audit-starter-tests.sh` | Shows the rewritten starter tests were vacuous (see [Changes to starter tests](#changes-to-starter-tests)) | `DATABASE_URL`, built packages |
 
+CI installs from the committed lockfile with `npm ci` (the original repository had none and ran
+`npm install`, so each run could resolve other versions), type-checks every package (the original
+`typecheck` skipped the web app), runs ESLint with type information and fails on warnings, and
+checks the formatting. Static checks with the unit tests and the build, the Postgres 16 suites
+(`REQUIRE_DB=1`), the simulation command on three operating systems, the e2e tests and the Docker
+check are separate jobs.
+
 `DATABASE_URL` names a maintenance database, e.g.
 `postgres://fieldsync:fieldsync@localhost:5432/fieldsync` with `docker compose up -d postgres`.
 
@@ -133,6 +146,10 @@ Invalid configuration:
   - PORT must be an integer from 1 to 65535 (got "x")
   - GC_INTERVAL_MS must be an integer from 1000 to 2147483647 (got "1h")
 ```
+
+The original server read each setting as `Number(process.env.X ?? default)` without a check:
+`GC_INTERVAL_MS=1h` became `NaN`, which `setInterval` treats as 1 ms, so the change-log `DELETE`
+ran about once a millisecond (`config.spec.ts`).
 
 The three database timeouts are sent as session settings when each connection of the server's pool
 opens (node-postgres connection parameters), not set for the whole database: PostgreSQL advises
@@ -194,8 +211,11 @@ in place.
 
 **Context.** The original server used `pg` directly: a pool, raw SQL, a hand-written
 `BEGIN`/`COMMIT`/`ROLLBACK` helper and the whole schema run with `CREATE … IF NOT EXISTS` on every
-startup. There was no record of the schema version and no way to evolve it, and the transaction
-helper had defects (F-14, F-15). The task allows an ORM if the choice is justified.
+startup. There was no record of the schema version and no way to evolve it. When `ROLLBACK` failed
+too, the transaction helper reported that failure instead of the error that had caused it; and
+neither the pool nor its clients had an `error` listener, so a connection that Postgres dropped (a
+restart, a failover, an idle-session timeout) ended the Node process. The task allows an ORM if the
+choice is justified.
 
 **Options.**
 
@@ -217,7 +237,12 @@ handful of trivial reads.
   rows for `SELECT`/`INSERT` but `[rows, count]` for `UPDATE`/`DELETE`; the structured result
   avoids that trap, and the services changed only from `db.pool.query` to `db.query`.
 - `Db.tx`: commits or rolls back, logs a failed rollback instead of throwing it so the original
-  error reaches the caller (TypeORM's `rollbackTransaction` throws), and always releases.
+  error reaches the caller (TypeORM's `rollbackTransaction` throws), and always releases
+  (`transactions.spec.ts`). An `AggregateError` of both would change the error type every caller
+  sees.
+- The pool and every query runner listen for connection errors: the request that used a dropped
+  connection fails with 500, the server keeps serving and the transaction leaves no partial write
+  (`connection-loss.spec.ts`).
 - `npm run migrate` holds a Postgres advisory lock: TypeORM takes no lock, so two processes would
   both apply the same pending migrations. The lock has a connection of its own, outside the pool,
   with idle-session and statement timeouts switched off (it is idle while the migrations run) and
@@ -269,7 +294,9 @@ services, not by a route guard.
 
 `@nestjs/config` (`ConfigModule.forRoot`, global, cached) with a `validate` function built on
 `class-validator` and `class-transformer`, as in the module's documentation. Services read typed
-values through `ConfigService<EnvironmentVariables, true>` with `infer: true`.
+values through `ConfigService<EnvironmentVariables, true>` with `infer: true`. Joi as
+`validationSchema`, the other approach that documentation shows, would be one more dependency next
+to `class-validator`, which the request DTOs use anyway.
 
 The validation keeps the rules of the original loader, which the documentation's example would
 loosen: integers are converted only from decimal strings (`enableImplicitConversion` would accept
@@ -329,6 +356,20 @@ nondeterminism is controlled:
   and rows are stored in the same physical order (a `DELETE` would leave dead rows that autovacuum
   reclaims at unpredictable times). Rows are compared as JSON with sorted keys
   ([`safe-stable-stringify`](https://github.com/BridgeAR/safe-stable-stringify)).
+
+**The same arguments in both environments.** Convergence also needs the client and the server to
+run a mutation on the same input. The shared mutators check their id arguments as UUIDs and reject
+text Postgres cannot store (NUL, or a string that is not well-formed UTF-16:
+`String.prototype.isWellFormed`, with its `core-js` polyfill in the web app, since Next.js 14
+supports browsers that lack it) with `BAD_ARGS`, and a long description is cut without splitting a
+surrogate pair. Before, only the server checked ids, and the client applied what the server could
+only fail on (`arguments.spec.ts`, `unstorable-arguments.spec.ts`). `mutate` queues and applies a
+JSON round trip of the arguments, which is what the server receives, and throws a `TypeError`
+without queueing anything when they cannot be serialised: it used to keep the caller's object, so a
+later change of it split the view from what was sent, and a `BigInt` made every push throw
+(`client.spec.ts`). Not chosen: `toWellFormed`, which changes what the user typed without saying
+so, and `structuredClone`, which keeps `Date`, `Map` and `BigInt` values that JSON changes or
+refuses.
 
 **Why not `fc.scheduler`.** fast-check's scheduler orders promises that the test schedules; here the
 order of events is the network's (which request is delivered, with which fault, which answer goes
@@ -401,12 +442,34 @@ Every error answer is a problem document (RFC 9457) with a stable `code`, which 
 `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`) keep a stuck transaction that holds
 the head from stopping every writer: they get 503 and recover when Postgres ends it.
 
+**Requests.** `PushRequestDto` and `PullQueryDto` are checked by the global `ValidationPipe`:
+decimal integers only (so `1e3` and `""` are refused), cursors and mutation ids up to 2^53 − 1 (the
+integers JSON numbers carry exactly), pages of 1 to 500 changes and UUID client ids; anything else
+is a 400. The original read `cursor` and `limit` with `Number(x) || 0`, so `cursor=abc` silently
+resynced from the start of the log, while `cursor=1.5` or a client id with a NUL character ended in
+a 500 (`request-validation.spec.ts`). `ParseIntPipe` checks no range, and
+`enableImplicitConversion` turns `""` into 0. Mutator arguments are left to the shared mutators, so
+one bad argument rejects its own mutation, not the batch. A mutator is looked up among the table's
+own entries (`Object.hasOwn`): names such as `toString` or `__proto__` used to pass the lookup and
+end in a 500, and are now rejected as `UNKNOWN_MUTATOR` (`mutator-lookup.spec.ts`).
+
+**Batch size.** The protocol fixes the largest push body (`MAX_PUSH_BODY_BYTES`, 1 MiB of UTF-8
+JSON). The client splits its queue into bodies of at most 100 mutations and that many bytes, and
+`mutate` refuses a single mutation that could never fit; the server's JSON limit
+(`JSON_BODY_LIMIT_BYTES`) is set with `app.useBodyParser` and is never below the protocol's.
+Before, the client counted only mutations and the server kept Express's 100 KB: ten tickets with
+long descriptions were refused with 413 on every retry, and everything queued behind them waited
+(`body-limit.spec.ts`, `push-batches.spec.ts`). Raising only the server's limit would not do: any
+fixed limit can be exceeded by a long enough batch.
+
 **Pull.** One `REPEATABLE READ READ ONLY` transaction reads the head, then at most `limit` changes
 with versions up to the head, and the client's last mutation id, all from one snapshot. Pages are cut
 by version, independently of the site filter; without more changes the cursor moves to the head.
 The client drops pending mutations that the server has applied only once it has caught up
 (`hasMore` false), and keeps an applied mutation in its view until it has pulled the change it made
-(the version in the push answer), so nothing flickers away in between (F-30).
+(the version in the push answer), so nothing flickers away in between (F-30). The pull's last
+mutation id alone could not do this: a client that never reaches the end of a log under constant
+writes would never shorten its queue.
 
 **Evidence.** `commit-order.spec.ts` (two real connections commit out of order; a stress test with
 writers and readers checks that no reader skips a change), `duplicates.spec.ts` (parallel and
@@ -425,7 +488,9 @@ reason.
 
 **Context.** `ticket.update` always wrote both the title and the description, so of two offline
 edits of different fields the second sync undid the first (F-27). `ticket.delete` left the
-ticket's parts behind (F-31). Quantity adjustments and status changes were already relative to the
+ticket's parts live, and a part adjustment made before its author saw the deletion still applied;
+`part.add` under a taken id returned early, so the push reported a part as added that the next pull
+removed. Quantity adjustments and status changes were already relative to the
 stored row (a delta, a `from` status), but a conflict was reported as a bare code. The task asks
 that edits of different fields do not overwrite each other, that quantity changes commute, and that
 a conflicting status change is rejected with an explanation the user can act on.
@@ -453,9 +518,19 @@ transitions it allows, `INVALID_TRANSITION` the allowed ones. Deleting a ticket 
 the same transaction (locked ticket first, then the parts by id), so a concurrent part edit is
 rejected as `NOT_FOUND`.
 
-**Evidence.** `mutators.spec.ts` (the whole transition table, patches, conflicts, the cascade),
-`determinism.spec.ts` (adjustments commute), `merge.spec.ts` and `delete-ticket.spec.ts` on
-Postgres, and the simulation's "no lost edits" property.
+**Parts and their ids.** A mutator declares the ticket whose parts it needs (`partsOf`); the server
+loads and locks them through a partial expression index (`entities_part_ticket_idx`, built
+`CONCURRENTLY`). Parts are matched by their ticket id as text, so ids are accepted only in lower
+case, the form Postgres prints and `crypto.randomUUID()` makes. The migration stores the ids inside
+existing tickets and parts in lower case, deletes the parts already orphaned and publishes both
+through the change log, so clients follow. A foreign key with `ON DELETE CASCADE` would not help:
+rows are never deleted (tombstones keep ids taken), and a cascade would not write the change log.
+`part.add` writes through `MutatorTx.insert`: an id taken by any part, a deleted one included, is
+rejected with `ID_CONFLICT`; retries are deduplicated by mutation id, so no early return is needed.
+
+**Evidence.** `mutators.spec.ts` (the whole transition table, patches, conflicts, the cascade, a
+taken part id), `client-ids.spec.ts`, `determinism.spec.ts` (adjustments commute), `merge.spec.ts`
+and `delete-ticket.spec.ts` on Postgres, and the simulation's "no lost edits" property.
 
 **Remaining limitations.** The UI shows a rejection's code and message in the existing list;
 acting on it (keeping one of the two values, retrying a status change) is part of the frontend work
@@ -583,13 +658,13 @@ so a revert needs every client to reload.
 
 **Context.** The original client kept the server's rows and its cursor in `localStorage` and its
 queue in memory (F-10), allocated mutation ids in memory, so two tabs used the same ones (F-11),
-ignored a refused write (F-38), had no request timeout (F-13), retried every 5 s, and its web app
-never closed it (F-37). The task asks for a queue that survives reloads, tabs that do not break each
-other's queue, reconnection with exponential backoff and jitter, and a status that tells synced,
-pending, offline and rejected apart.
+ignored a refused write, had no request timeout, retried every 5 s, and its web app never closed it
+(F-37). Every user of a browser shared that stored state and one client id. The task asks for a
+queue that survives reloads, tabs that do not break each other's queue, reconnection with
+exponential backoff and jitter, and a status that tells synced, pending, offline and rejected apart.
 
 **Storage.** IndexedDB through `idb` (decision Д-6), one database per user (named after a SHA-256
-of the token, F-40), four stores: `meta` (client id, cursor, last and next mutation ids, an update
+of the token), four stores: `meta` (client id, cursor, last and next mutation ids, an update
 refusal, a client id being retired), `base` (the server's rows), `pending` (the queue, keyed by a
 generated position) and `rejections`. Every change of the state is one transaction that awaits only
 its own requests (a transaction commits once it has no pending request: MDN, `idb` "Transaction
@@ -597,6 +672,20 @@ lifetime") and aborts on any failure; queue writes use `durability: 'strict'`, p
 snapshots, which the server can send again, `relaxed`. A mutation gets its id in the transaction that
 queues it and is shown only once stored: what the user sees survives a reload. `MemoryStorage`
 implements the same interface for tests and the simulation.
+
+A write the storage refuses (a full quota) rejects: the client reports `STORAGE` with the status
+`error`, a mutation it cannot store is not shown and its `mutate` rejects, and a transaction is
+aborted on any failure, one thrown synchronously too, which IndexedDB would otherwise commit around
+(`storage-errors.spec.ts`). The original caught the error and showed "synced" while nothing would
+survive a reload.
+
+**Users of one browser.** With one database per user, a user who signs in after another neither sees
+the other's rows, which may belong to sites they have no access to, nor pushes under the other's
+client id. The name does not contain the token, and a first sign-in works offline (a user id from
+`/me` would need the network). Signing out, confirmed when changes are not synced, removes the token
+and deletes every FieldSync database; a start with nobody signed in deletes any left behind, and
+other tabs close on the deletion and show the sign-in form (e2e `user-switch.spec.ts`). Keeping a
+signed-out user's database would leave their data in the browser.
 
 | Point a page can close at | What the client does after the reload |
 |---|---|
@@ -618,19 +707,23 @@ checked as untrusted input. The leader reads the queue as stored right before ea
 same step as it takes the batch, so a mutation another tab queued meanwhile never leaves a gap.
 
 **Network.** A request is aborted after 30 s (on the client's clock, so tests and the simulation
-control it) and on `dispose()`. Retries use exponential backoff with full jitter (a random delay
-below a ceiling that starts at 1 s and doubles up to 60 s; AWS Architecture Blog, "Exponential
-Backoff And Jitter"), never sooner than a `Retry-After`, reset after a success; the web app syncs at
-once on the browser's `online` event. The notification stream is read over `fetch` with
-`eventsource-parser`, so it carries the bearer token and the protocol version in headers like every
-other request (the browser's `EventSource` can send neither): on `ready` and on every `poke` the
-client syncs, a stream silent for three heartbeat intervals is reopened, every reopening waits a
-backoff delay. A sync asked for while one runs runs once more after it (F-39). A pull stops at the
-head of its first page, and a snapshot is installed once its tail reaches the highest head of its
-pages (each page says the head it was read at): under writes faster than a page per request,
-neither waits for a page without more changes, which never comes.
+control it; `AbortSignal.timeout()` would run on real time) and on `dispose()`, and fails as
+`TIMEOUT`. Without a limit one request that never answered stopped syncing until a reload, since a
+running sync is not started twice (`client.spec.ts`, the simulation's `hang` fault). Retries use
+exponential backoff with full jitter (a random delay below a ceiling that starts at 1 s and doubles
+up to 60 s; AWS Architecture Blog, "Exponential Backoff And Jitter"), never sooner than a
+`Retry-After`, reset after a success; the web app syncs at once on the browser's `online` event. The
+notification stream is read over `fetch` with `eventsource-parser`, so it carries the bearer token
+and the protocol version in headers like every other request (the browser's `EventSource` can send
+neither): on `ready` and on every `poke` the client syncs, a stream silent for three heartbeat
+intervals is reopened, every reopening waits a backoff delay. A sync asked for while one runs makes
+one more run after it, unless that one failed (the retry timer runs the next), and resolves when it
+ends; before, the poke of a change committed after the running sync's pull was dropped
+(`pokes.spec.ts`). A pull stops at the head of its first page, and a snapshot is installed once its
+tail reaches the highest head of its pages (each page says the head it was read at): under writes
+faster than a page per request, neither waits for a page without more changes, which never comes.
 
-**Shutdown.** The server ends every open stream (`onModuleDestroy`, F-36), then stops its HTTP
+**Shutdown.** The server ends every open stream (`onModuleDestroy`, F-35), then stops its HTTP
 server with `stoppable` before Nest closes it and the database pool: no new connections, every
 request in progress is answered, and each connection is closed once nothing on it waits for an answer
 (`stream.spec.ts` holds a push back on its client row while the application closes, with and without
@@ -737,450 +830,42 @@ opened while one already waits show "Loading…" without the notice until the ol
 
 ## Found issues
 
-Each issue has an id (in the order the issues were found), the category from the task (1 delivery
-order and completeness, 2 retried and parallel pushes, 3 rejection in the middle of the queue, 4
+The defects of the starter code (the `main` branch) in the categories of the task: 1 delivery order
+and completeness, 2 retried and parallel pushes, 3 rejection in the middle of the queue, 4
 authenticity and access, 5 change-log lifecycle, 6 resources not released, 7 determinism across
 environments, 8 client data loss, 9 merging concurrent edits, 10 tests that pass regardless of the
-behaviour they name; "other" for everything else), a test that reproduces it, and the commits that
-reproduce and fix it.
+behaviour they name. An item is listed when it is in the starter code, belongs to one of these
+categories and breaks something the starter code does; an entry covers every side of its defect.
+What the task asks to build, and hardening outside the categories, is described with its area. Each
+entry says what is wrong, why it is dangerous, how to reproduce it, how it is fixed, which
+alternatives there were, and names the commits.
 
 | Id | Category | Issue | Status |
 |---|---|---|---|
-| F-01 | 10 | Pull access test mocked every query | Fixed |
-| F-02 | 10 | Mutator rejection tests could not fail | Fixed |
-| F-03 | 10 | Sequential-numbering test never looked at the ids | Fixed |
-| F-04 | 10 | Access tests pinned trust in the client's `siteId` | Fixed |
-| F-05 | 10 | The only integration test was `SELECT 1`, and could be skipped silently | Fixed |
-| F-06 | 10 | `it.todo` tests named behaviour nothing checked | Fixed |
+| F-25 | 1 | A change that commits after a later one is never delivered | Fixed |
+| F-26 | 2 | Parallel copies of one mutation are applied several times | Fixed |
+| F-23 | 3 | A rejected mutation fails the whole push and blocks the queue | Fixed |
 | F-07 | 4 | Incremental pull returns other sites' changes | Open (known defect) |
 | F-08 | 4 | Write access is checked against the `siteId` the client sends | Open (known defect) |
-| F-09 | 2 | Client reuses a mutation id after a rejection | Fixed |
+| F-33 | 4 | A client id is not bound to its user | Open (known defect) |
+| F-34 | 5 | The GC drops changes without telling anyone | Fixed |
+| F-35 | 6 | Notification streams are never released, and keep the server from shutting down | Fixed |
+| F-37 | 6 | The web app never closes its client and stream | Fixed |
+| F-19 | 7 | Mutators are not deterministic: they make up ids and read the clock | Fixed |
 | F-10 | 8 | Pending mutations and the list of rejections are lost on reload | Fixed |
 | F-11 | 8 | Two tabs sharing a `clientId` lose each other's mutations | Fixed |
-| F-12 | 3 | Mutator names from `Object.prototype` crash the push | Fixed |
-| F-13 | 6 | A request that never answers blocks syncing forever | Fixed |
-| F-14 | other | A failed rollback replaces the original error | Fixed |
-| F-15 | other | A dropped database connection crashes the server | Fixed |
-| F-16 | other | Unvalidated settings: an invalid GC interval runs the GC every millisecond | Fixed |
-| F-17 | other | Docker images run as root and bake in local `.env` files; no migrate step, no healthchecks | Fixed |
-| F-18 | other | CI was not reproducible and did not typecheck the web app | Fixed |
-| F-19 | 7 | `ticket.create` makes up its own id, so the client, every recomputed view and the server use different ids | Fixed |
-| F-20 | 7 | Mutators stamp rows with the clock of whatever environment runs them | Fixed |
-| F-21 | 7 | Mutators accept arguments the server cannot store | Fixed |
-| F-22 | 7 | Queued mutations keep a live reference to the caller's arguments | Fixed |
-| F-23 | 3 | A rejected mutation fails the whole push with HTTP 500 | Fixed |
-| F-24 | other | Adding a part under a taken id is reported as applied | Fixed |
-| F-25 | 1 | A change that commits after a later one is never delivered | Fixed |
-| F-26 | 2 | Parallel copies of one mutation are applied several times; a retried rejection loses its reason | Fixed |
+| F-30 | 8 | An interrupted sync loses the user's change | Fixed |
 | F-27 | 9 | An edit of one ticket field overwrites another client's edit of the other field | Fixed |
-| F-28 | 3 | A batch of long mutations is refused with 413 on every retry, blocking the queue | Fixed |
-| F-29 | other | Unvalidated pull parameters and client ids: silent full resyncs and 500s | Fixed |
-| F-30 | 8 | An applied mutation disappears from the view when the sync is interrupted before its change arrives | Fixed |
-| F-31 | 9 | Deleting a ticket leaves its parts behind, and a concurrent part edit still applies | Fixed |
-| F-32 | 8 | After a reload, a new mutation reuses an id the server already handled and is dropped as a duplicate | Fixed |
-| F-33 | 4 | A client id is not bound to its user: another user can push under it and take the owner's next mutation id | Open (known defect) |
-| F-34 | 5 | The GC deletes the change log by age without a signal: stale clients skip changes, new clients miss entities, and the log gets holes | Fixed |
-| F-35 | 6 | Notification streams stay subscribed after their connection closes, and an idle stream gets no heartbeat | Fixed |
-| F-36 | 6 | Open notification streams keep the server from shutting down | Fixed |
-| F-37 | 6 | The web app never closes its client and stream; a disposed client keeps its request and writes its state | Fixed |
-| F-38 | 8 | A write the browser storage refuses is ignored, and the client shows itself as synced | Fixed |
-| F-39 | 1 | A notification that arrives while a sync is running is lost (found after the protocol change) | Fixed |
-| F-40 | 4 | A user who signs in after another in the same browser sees the other's data and pushes under their client id | Fixed |
+| F-01–F-05 | 10 | Five starter tests cannot fail when the behaviour they name is broken | Fixed |
 
-### F-01: pull access test mocked every query (category 10)
-
-- **What.** `apps/server/test/pull.spec.ts`, "only returns changes for sites the user can access",
-  mocked the database so that every query returned no rows, then asserted an empty result.
-- **Why it is dangerous.** No implementation can fail it: with all data mocked away, a pull that
-  ignores access entirely still returns nothing. The suite reported the access rule as tested
-  while it was broken (F-07).
-- **Reproduce.** `scripts/audit-starter-tests.sh` removes the site filter from the pull query: the
-  starter test still passes, the replacement fails.
-- **Fix.** Replaced by `apps/server/test/integration/pull-access.spec.ts` on a real database: the
-  initial pull is filtered by site (passes) and the incremental pull is filtered by site (known
-  defect F-07).
-- **Alternatives.** A smarter mock that evaluates the `WHERE` clause would re-implement SQL in the
-  test and test the mock; the rule lives in SQL, so it is tested against Postgres.
-- **Commits.** `1bac9ad`.
-
-### F-02: mutator rejection tests could not fail (category 10)
-
-- **What.** In `packages/sync-core/test/mutators.spec.ts`, "rejects an invalid status transition"
-  called the mutator inside `try/catch` with the assertion in the `catch` and no assertion count;
-  the other rejection tests accepted any `MutationRejected`.
-- **Why it is dangerous.** If the transition were allowed, nothing would throw and the test would
-  pass. A rejection with the wrong code (e.g. `BAD_ARGS` instead of `NEGATIVE_QUANTITY`) would
-  also pass, although clients act on the code.
-- **Reproduce.** The audit script allows `done → in_progress`: the starter test passes, the
-  replacement fails.
-- **Fix.** Every rejection test requires the exact code and checks that the state did not change;
-  "creates a ticket" also checks that exactly one row was written.
-- **Alternatives.** `expect.assertions(1)` alone would fix the first test but not the missing code
-  and state checks.
-- **Commits.** `9766718`.
-
-### F-03: sequential-numbering test never looked at the ids (category 10)
-
-- **What.** "numbers local mutations sequentially" in `packages/sync-core/test/client.spec.ts`
-  checked the number of rows and pending mutations only; "shows a locally created ticket" checked
-  only the row count.
-- **Why it is dangerous.** Mutation ids are how the server deduplicates and orders a client's
-  writes; with every id equal to 1 the test still passed.
-- **Reproduce.** The audit script makes every id 1: the starter test passes, the replacement fails.
-- **Fix.** A recording transport captures what the client pushes; the test expects `[1, 2, 3]`.
-  The optimistic-create test checks the row content. A stricter property, that ids are never
-  reused even after a rejection, is known defect F-09.
-- **Commits.** `a96263e`.
-
-### F-04: access tests pinned trust in the client's `siteId` (category 10)
-
-- **What.** `apps/server/test/access.spec.ts` used a fake database that returned the same rows for
-  any query and ignored the role; "rejects a mutation on a site the user cannot access" only
-  varied the `siteId` argument.
-- **Why it is dangerous.** The test name promises a check against the site the user cannot access,
-  but it confirmed that the argument decides, which is the defect (F-08). The admin branch was
-  untested.
-- **Reproduce.** The audit script removes the admin branch: the starter tests pass, the new ones
-  fail.
-- **Fix.** The unit tests are renamed to what they check (the `siteId` argument), the fake answers
-  each query by table and user, and admin and missing-`siteId` cases are added. The real property
-  (checked against the stored row's site) is tested on Postgres as known defect F-08.
-- **Commits.** `9edc67e`.
-
-### F-05: the only integration test was `SELECT 1` (category 10)
-
-- **What.** `apps/server/test/sync.integration.spec.ts`, suite "sync protocol (integration)", ran
-  `SELECT 1`. Without `DATABASE_URL` it was skipped, so CI was green with no integration test run
-  if the variable was ever missing.
-- **Why it is dangerous.** The protocol had no test on a real database at all; the categories that
-  need one (ordering, idempotency, access) were untested.
-- **Reproduce.** The audit script makes push report every mutation as a duplicate: `SELECT 1` passes,
-  the characterization suite fails.
-- **Fix.** A harness with a database per test file, the real app on an ephemeral port and fixtures
-  (`d9d4b23`); characterization tests of authentication, `/me`, push, pull, duplicates,
-  out-of-order ids, malformed bodies, status/part/tombstone changes, atomicity of a rejected
-  mutation, paging and the GC (`a9c598a`). `REQUIRE_DB=1` makes a missing database a failure.
-- **Commits.** `d9d4b23`, `a9c598a`.
-
-### F-06: `it.todo` tests named behaviour nothing checked (category 10)
-
-- **What.** "keeps unsynced mutations across a reload" and "does not lose mutations when two tabs
-  share one clientId" were `it.todo`.
-- **Why it is dangerous.** They read like a specification but never run, and both behaviours are
-  broken (F-10, F-11).
-- **Fix.** Both are real tests now, tracked as known defects F-10 and F-11.
-- **Commits.** `f943f8d`.
-
-### F-07: incremental pull returns other sites' changes (category 4)
-
-- **What.** `PullService.pull` filters by the user's sites only when `cursor` is 0; every later
-  pull returns changes of every site.
-- **Why it is dangerous.** Any technician receives every site's tickets after the first sync.
-- **Reproduce.** `pull-access.spec.ts`, "incremental pull returns only changes for sites the user
-  can access" (known defect); in the simulation, the signature `foreign-site-rows` in the
-  `multi-site` and `full` profiles.
-- **Fix.** Not fixed yet; owned by the access-control change. **Commits.** `1bac9ad` (test).
-
-### F-08: write access is checked against the `siteId` the client sends (category 4)
-
-- **What.** `authorize` checks `mutation.args.siteId`, not the site of the row the mutation
-  changes.
-- **Why it is dangerous.** A technician of North can change the status of a South ticket, or add a
-  part to it, by sending `siteId: North`.
-- **Reproduce.** `write-access.spec.ts`, two known-defect tests.
-- **Fix.** Not fixed yet; owned by the access-control change. **Commits.** `9edc67e` (tests).
-
-### F-09: client reuses a mutation id after a rejection (category 2)
-
-- **What.** `SyncClient.mutate` derives the id as `lastMutationId + pending.length + 1`. When the
-  server rejects a mutation without advancing `lastMutationId`, the queue shrinks and the next
-  mutation gets the rejected id.
-- **Why it is dangerous.** The server treats the new mutation as a duplicate and drops it.
-- **Reproduce.** `client.spec.ts`, "never reuses a mutation id after the server rejects a
-  mutation".
-- **Fix.** Ids come from a counter that only grows: each `mutate` takes the next one, and an answer
-  of the server can only move the counter past its last applied id, never back. The server now
-  advances its last mutation id for a rejected mutation too (F-23), so both sides agree on which
-  ids are used. Within one page load the counter is exact; across reloads it restarts after the
-  stored last applied id, which is safe only once the queue itself survives a reload (F-10).
-- **Alternatives.** Keeping the formula and relying on the server advancing its id on rejection:
-  any answer that removes a mutation from the queue before the id catches up (a lost response, a
-  future server) would reuse an id again. Random ids per mutation: the server could no longer tell
-  a gap from a duplicate, and ordering would need another field.
-- **Commits.** `1a3c31e` (test), `9df3a24` (fix).
-
-### F-10: pending mutations are lost on reload (category 8)
-
-- **What.** The client persisted the server's rows and its cursor (in `localStorage`) but not its
-  queue, and kept the list of rejected mutations only in memory.
-- **Why it is dangerous.** Work done offline disappears when the page reloads, and so does the
-  reason a change was refused: the user cannot tell that it never reached the server.
-- **Reproduce.** `client.spec.ts`, "keeps unsynced mutations across a reload" (a known defect from
-  the start); `idb-storage.spec.ts`, "serves a client across a reload"; e2e `offline-client.spec.ts`,
-  "keeps changes made without the server across a reload".
-- **Fix.** The client's whole state (meta, rows, queue, rejections) is in its storage, IndexedDB in
-  the browser (`IdbSyncStorage`, through `idb`), and every change of it is one transaction. A
-  mutation is shown once it is stored (see [3.3.3](#offline-first-client-333)).
-- **Alternatives.** The queue in `localStorage` next to the state: synchronous, a few megabytes for
-  every origin, no transactions across keys, shared by every tab without any coordination. A queue
-  kept in memory and written on `beforeunload`/`pagehide`: browsers do not guarantee those events
-  (a crash, a killed mobile tab).
-- **Commits.** `f943f8d` (test), `373c2a8` (fix).
-
-### F-11: two tabs sharing a `clientId` lose each other's mutations (category 8)
-
-- **What.** Tabs shared `clientId` and storage but allocated mutation ids in memory, so both used
-  id 1 and the server dropped the second as a duplicate.
-- **Why it is dangerous.** A user with two tabs open loses changes without any message.
-- **Reproduce.** `client.spec.ts`, "does not lose mutations when two tabs share one clientId" (a
-  known defect from the start); `tabs.spec.ts` (a property test over any order of mutations, syncs
-  and tabs closing); e2e "lets two tabs of one user work at once".
-- **Fix.** The storage gives a mutation its id in the transaction that queues it, so ids are unique
-  however many tabs queue (`373c2a8`); and one tab talks to the server for all of them (Web Locks and
-  BroadcastChannel, `298850b`), reading the queue as stored right before each push, so it never sends
-  a batch with a gap in the ids.
-- **Alternatives.** A client id per tab: the server would see every tab as its own device, and a
-  closed tab's queue would be stranded. A SharedWorker owning the queue: not available in Safari
-  before 16 or on Chrome for Android.
-- **Commits.** `f943f8d` (test), `373c2a8`, `298850b` (fix).
-
-### F-12: mutator names from `Object.prototype` crash the push (category 3)
-
-- **What.** The server looks mutators up with `MUTATORS[name]` on a plain object. `toString`,
-  `constructor`, `__proto__` and `hasOwnProperty` pass the "unknown mutator" check and then fail
-  with a `TypeError`.
-- **Why it is dangerous.** The whole push answers 500, so the client retries the same batch
-  forever; even with rejections handled, such a mutation would be reported as an internal error
-  rather than `UNKNOWN_MUTATOR`.
-- **Reproduce.** `mutator-lookup.spec.ts`.
-- **Fix.** `mutatorNamed(name)` in `sync-core` counts only the table's own entries
-  (`Object.hasOwn`), with `isMutatorName` as a type guard; the server rejects any other name with
-  `UNKNOWN_MUTATOR`. The push body's DTO accepts any name up to 64 characters, so an unknown name
-  rejects its own mutation, not the batch.
-- **Alternatives.** A `Map` of mutators: the same safety, but the table is also the typed
-  `Record<MutatorName, MutatorDef>` the client uses. `Object.create(null)` for the table: hides the
-  problem in one object instead of fixing the lookup.
-- **Commits.** `791bd98` (test), `009d032` (fix).
-
-### F-13: a request that never answers blocks syncing forever (category 6)
-
-- **What.** `HttpTransport` had no timeout or abort signal; sync attempts are deduplicated, so
-  while one request hung no other was made.
-- **Why it is dangerous.** After a half-open connection the client shows "syncing" forever and
-  never pushes again until the page reloads.
-- **Reproduce.** `client.spec.ts`, "gives up on a request that never answers and retries" (a known
-  defect from the start); the simulation's `hang` fault (the signature `stuck-request` in `full`).
-- **Fix.** Every request gets an abort signal; it is aborted after `requestTimeoutMs` (30 s by
-  default) on the client's clock, fails as `TIMEOUT` and is retried with backoff. The simulation no
-  longer tolerates `stuck-request`; a client without a timeout still produces it (checked).
-- **Alternatives.** `AbortSignal.timeout()`: real time, which the simulation and the tests cannot
-  control.
-- **Commits.** `22b61c2` (test), `c1605bb` (fix).
-
-### F-14: a failed rollback replaces the original error (other)
-
-- **What.** In `Db.tx`, when the callback failed and `ROLLBACK` failed too (the connection was
-  gone), the caller received the rollback's error ("Client has encountered a connection error and
-  is not queryable") instead of the one that caused the rollback.
-- **Why it is dangerous.** The cause of the failure is lost, and code that reacts to specific
-  errors (a rejected mutation, a serialization failure) sees a different one.
-- **Reproduce.** `transactions.spec.ts`, "reports the original error when the rollback after it
-  fails".
-- **Fix.** `Db.tx` on a TypeORM `QueryRunner` logs a failed rollback and rethrows the original
-  error; broken connections are discarded, not reused.
-- **Alternatives.** Wrapping both errors in an `AggregateError` would keep both but change the
-  error type every caller sees.
-- **Commits.** `f94fa7f` (test), `291d9bb` (fix).
-
-### F-15: a dropped database connection crashes the server (other)
-
-- **What.** Neither the `pg` pool nor the clients checked out by `Db.tx` had an `error` listener.
-  When Postgres terminated a connection (restart, failover, an idle-session timeout), `pg` emitted
-  `error` with nobody listening and the Node process exited.
-- **Why it is dangerous.** One dropped connection takes the whole API down for every user; with
-  idle connections in the pool this happens on any database restart.
-- **Reproduce.** `connection-loss.spec.ts`: terminating the server's idle connections, and
-  terminating its connection while a push waits for a row lock.
-- **Fix.** The TypeORM pool and query runners listen for connection errors: the affected request
-  fails (500), the server keeps serving, and the transaction leaves no partial write.
-- **Commits.** `c0229d5` (test), `291d9bb` (fix).
-
-### F-16: unvalidated settings (other)
-
-- **What.** Settings were read as `Number(process.env.X ?? default)`. `GC_INTERVAL_MS=1h` became
-  `NaN`, which `setInterval` treats as 1 ms: the server ran the change-log `DELETE` about once per
-  millisecond (126 runs in 100 ms in the test). An invalid `PORT` or retention behaved similarly
-  badly; nothing was reported.
-- **Reproduce.** `config.spec.ts` (integration), "refuses to start with a non-numeric GC interval
-  instead of collecting every millisecond"; unit tests in `apps/server/test/config.spec.ts`.
-- **Fix.** A validated, typed configuration loaded once at startup; invalid values stop the server
-  with a readable report (see [Configuration](#configuration)).
-- **Alternatives.** Joi as `validationSchema` (the other approach the `@nestjs/config`
-  documentation shows; another dependency next to `class-validator`, which the request DTOs use
-  anyway), or a hand-written loader (what the fix first was; replaced by `@nestjs/config` to follow
-  the framework's documented approach, see [Server configuration](#server-configuration)).
-- **Commits.** `6312140` (test), `84c1a44` (fix).
-
-### F-17: Docker images (other)
-
-- **What.** Both images ran as root, copied the whole package directories (including any local
-  `.env`, `node_modules` and build output) because there was no `.dockerignore`, installed
-  without a lockfile, and shipped dev dependencies. Compose had no migration step and no
-  healthchecks; `web` started as soon as the server container existed.
-- **Why it is dangerous.** Secrets from a developer's `.env` end up in image layers; a compromised
-  process has root in the container; builds are not reproducible.
-- **Reproduce.** `scripts/docker-smoke.sh` (it plants canary `.env` files). On the original setup
-  it reports: both images run as root, both contain `.env` files, no migrate step, no
-  healthchecks.
-- **Fix.** `.dockerignore`; multi-stage builds with `npm ci`; runtime stages with production
-  dependencies (server) or the Next.js standalone output (web), running as `node`, with
-  healthchecks; compose runs `migrate` before the server and starts web when the server is healthy.
-- **Commits.** `25302fc` (check), `0c80ddb` (fix).
-
-### F-18: CI was not reproducible and did not typecheck the web app (other)
-
-- **What.** There was no lockfile and CI ran `npm install`, so each run could resolve different
-  dependency versions; `npm run typecheck` skipped `apps/web`; the only custom lint rule was a
-  warning, and warnings never failed CI.
-- **Reproduce.** `npm ci` fails on the original repository (no lockfile).
-- **Fix.** The lockfile is committed and CI runs `npm ci`; typecheck covers every package; lint uses
-  type information (unhandled promises, unsafe `any`, exhaustive switches) and fails on warnings;
-  formatting is checked with Prettier; CI is split into lint/format/typecheck/unit/build,
-  integration (Postgres 16, `REQUIRE_DB=1`), e2e and docker jobs.
-- **Commits.** `6472816`, `c07f58e`, `b67ea1e`, `7024909`.
-
-### F-19: `ticket.create` makes up its own id (category 7)
-
-- **What.** The mutator called `crypto.randomUUID()` itself. The client ran it once per
-  recomputation of its optimistic view and the server ran it once more, so every run produced a
-  different id.
-- **Why it is dangerous.** An optimistic ticket changed its id on every render, so its link broke
-  at once; edits and parts added to it before the first sync named an id the server never stored
-  and were rejected (`NOT_FOUND`); after the sync the ticket "jumped" to the server's id.
-- **Reproduce.** `mutators.spec.ts` ("creates the ticket under the id the client chose", "writes
-  the same ticket every time…"), `client.spec.ts` ("keeps an optimistic ticket under the id the
-  caller chose"), `client-ids.spec.ts` ("stores a created ticket under the id the client chose").
-  With the old behaviour put back, the property tests in `determinism.spec.ts` fail on a minimal
-  `ticket.create`, and so does a baseline simulation seed (`detection.spec.ts`).
-- **Fix.** `ticket.create` takes a required UUID `id` that the caller generates before queueing
-  (the web app uses `crypto.randomUUID()`). Because ids now come from the client, the server must
-  never let one id name two rows: creates go through a new `MutatorTx.insert`, which the server
-  executes as `INSERT … ON CONFLICT DO NOTHING RETURNING` and rejects with `ID_CONFLICT` when the id
-  is taken by a live row, a deleted row (tombstone) or a concurrent insert (it waits for that
-  transaction and then sees the conflict). The original upsert would have let a create overwrite
-  another site's ticket or revive a deleted one; `client-ids.spec.ts` checks both and 20 rounds of
-  two concurrent creates with one id (exactly one applies).
-- **Alternatives.** A temporary client id that the server maps to a real one: every later queued
-  mutation that names the ticket would need rewriting. Catching the unique violation (23505)
-  instead of `DO NOTHING`: the error aborts the transaction, so it needs a savepoint around every
-  insert. A `SELECT … FOR UPDATE` existence check: it locks nothing when the row does not exist yet,
-  so two concurrent creates both pass it.
-- **Protocol change.** `ticket.create` requires `id`. Until rejections are reported per mutation
-  (F-23), an `ID_CONFLICT` still fails the push with 500, but nothing is written.
-- **Commits.** `6d3bf48` (test), `5120e40` (fix).
-
-### F-20: mutators stamp rows with the clock of whatever environment runs them (category 7)
-
-- **What.** `createdAt` and `updatedAt` came from `new Date()` inside the mutators. On the server, a
-  row's data took the Node clock while its change-log entry (`created_at DEFAULT now()`) and the GC
-  cutoff took Postgres's clock.
-- **Why it is dangerous.** The optimistic row changed its timestamps on every recomputation of the
-  view; the client and the server stored different times for one change; two clocks on one server
-  disagree under skew; and nothing could be driven by a test clock.
-- **Reproduce.** `mutators.spec.ts` ("takes the timestamps … from the transaction"), `client.spec.ts`
-  ("keeps the timestamps of an optimistic ticket stable…"), `server-clock.spec.ts` ("stamps a
-  mutation's row and its log entry with one server clock"), and the property tests in
-  `determinism.spec.ts`, which run every mutator with `Math.random`, `Date` and `crypto` stubbed
-  out. With the old behaviour put back into `ticket.create`, one simulation seed gives two
-  different traces (`detection.spec.ts`).
-- **Fix.** `MutatorTx.now()`: on the client, the time the mutation was queued, kept with it; on the
-  server, a new `Clock` provider (`SystemClock` in production), read once per mutation and also used
-  for `change_log.created_at` and the GC cutoff. An ESLint override forbids `Date`, `crypto`,
-  `performance`, `globalThis`, timers and `Math.random()` in the mutators file
-  (`mutator-lint.spec.ts` checks that the rules report each of them).
-- **Alternatives.** The client sends its own time and the server keeps it: client clocks are wrong
-  and untrusted. Postgres `now()` everywhere: the mutator runs in Node and would need the time passed
-  in anyway, and `now()` is the transaction's start time.
-- **Commits.** `b8479c4` (test), `7f88005` (fix), `abafac7` (lint rules).
-
-### F-21: mutators accept arguments the server cannot store (category 7)
-
-- **What.** Ids were checked as UUIDs only on the server (`assertUuids`), not by the shared
-  mutators; text could contain NUL or an unpaired UTF-16 surrogate, which Postgres refuses in
-  `text` and `jsonb`; and `description.slice(0, 5000)` could cut an emoji in half, leaving exactly
-  such a surrogate.
-- **Why it is dangerous.** The client applies the mutation optimistically while the server fails
-  on it (a database error, so HTTP 500): the user sees a change that can never be stored, and the
-  push fails every time it is retried.
-- **Reproduce.** `arguments.spec.ts` (every mutator, every id field, NUL and both kinds of unpaired
-  surrogate, the cut at the limit) and `unstorable-arguments.spec.ts` on Postgres (a rejection, not
-  a `QueryFailedError`).
-- **Fix.** The shared mutators check their id arguments as UUIDs and reject unstorable text with
-  `BAD_ARGS`: NUL, or a string that is not well-formed UTF-16 (`String.prototype.isWellFormed`,
-  built into Node.js 20; the web app imports the `core-js` polyfill for it, since Next.js 14 supports
-  browsers that lack it and does not polyfill it). Long descriptions are still cut to 5000 UTF-16
-  units, but never between the halves of a surrogate pair.
-- **Alternatives.** Silently strip NUL and replace unpaired surrogates (`String.prototype.toWellFormed`):
-  it changes what the user typed without telling them. A hand-written surrogate scan instead of
-  `isWellFormed`: more code for the same check, which the standard method already does.
-- **Commits.** `376c8ca` (test), `60ffa0b` (fix), `e0018cf` (`isWellFormed`).
-
-### F-22: queued mutations keep a live reference to the caller's arguments (category 7)
-
-- **What.** `SyncClient.mutate` queued the `args` object itself.
-- **Why it is dangerous.** A caller that changes the object afterwards changes the optimistic view
-  but not what the server receives (it was serialised when the push started), so the client and
-  the server apply different arguments. A value JSON cannot encode (a `BigInt`) made every push
-  throw, so the whole queue stayed offline behind it.
-- **Reproduce.** `client.spec.ts`, "queues the arguments as they were when mutate was called" and
-  "refuses arguments that cannot be sent instead of blocking the queue behind them".
-- **Fix.** `mutate` queues and applies a JSON round trip of the arguments, exactly what the server
-  will receive, and throws a `TypeError` without queueing anything when they cannot be serialised.
-- **Alternatives.** `structuredClone`: it keeps `Date`, `Map` and `BigInt` values that JSON would
-  change or reject, so the client would still apply different values than the server. Freezing the
-  caller's object: surprising for the caller, and not what the server receives either.
-- **Commits.** `a409b2c` (test), `15551bf` (fix).
-
-### F-23: a rejected mutation fails the whole push with HTTP 500 (category 3)
-
-- **What.** `PushService` does not catch `MutationRejected`: any mutation the mutator rejects
-  (`STATUS_CONFLICT`, `NOT_FOUND`, `NEGATIVE_QUANTITY`, `BAD_ARGS`, `ID_CONFLICT`, …) makes the push
-  answer 500, and the client's last mutation id does not advance.
-- **Why it is dangerous.** The client never learns the reason and retries the same batch forever;
-  every mutation queued after the rejected one is blocked (a poison mutation).
-- **Reproduce.** `rejections.spec.ts` and `client-ids.spec.ts` ("tells the client that a create
-  was rejected with ID_CONFLICT"), known defects until the fix; in the simulation, the signature
-  `rejected-mutation-500` in the `rejections` and `full` profiles, which no longer tolerate it (see
-  [Simulation](#simulation)).
-- **Fix.** Each mutation's transaction runs the mutator inside a savepoint. A rejection rolls back
-  to it, which undoes the mutator's writes and the locks they took, and the same transaction then
-  advances the client's last mutation id, exactly as an application does: the rejected mutation is
-  final, and the ones after it are applied. The answer names the reason:
-  `{ id, status: 'rejected', code, message, details? }` (codes and details in
-  [3.3.5](#merge-semantics-335)), and the client drops the mutation from its queue and keeps the
-  rejection for the user. The characterization test "leaves no trace of a mutation that the mutator
-  rejects" changed with this fix: it pinned the 500 behaviour (last mutation id left at 1) and now
-  expects the rejection in the answer and the id advanced. In the simulation, rejections are checked
-  by code: a profile may only see the codes its actions can cause (`unexpected-rejection`).
-- **Alternatives.** Rolling back the whole batch: one bad mutation would still block every other
-  one. A transaction per mutation without a savepoint, recording the rejection in a second
-  transaction: between the two, a retried copy of the mutation could run again. Answering 4xx for
-  the batch: the client could not tell which mutation was refused.
-- **Commits.** `34047d5` (test), `5120e40` (`ID_CONFLICT` test), `c0e1b7d` (simulation corpus),
-  `3c0b884` (rejection format), `78ef268` (savepoints), `0abb406` (fix).
-
-### F-24: adding a part under a taken id is reported as applied (other)
-
-- **What.** `part.add` returned early when a part with the given id existed, so the push reported
-  the new part as applied without storing it.
-- **Why it is dangerous.** The part the user entered disappears after the next pull, silently; with
-  a deleted part's id the upsert would have revived the part, possibly in another site.
-- **Reproduce.** `mutators.spec.ts`, "rejects a part whose id is already taken…", and
-  `client-ids.spec.ts`, "does not report a part as added when its id already names another part".
-- **Fix.** `part.add` writes through `MutatorTx.insert` like `ticket.create`: a taken id (also a
-  deleted part's) is rejected with `ID_CONFLICT`. Retried pushes are deduplicated by mutation id, so
-  the early return was not needed for idempotency.
-- **Commits.** `dec7ec0` (test), `dfe8082` (fix).
+Ids are the ones used in commit messages, pull requests and code comments, so they have gaps. F-09
+is part of F-23, F-20 of F-19, F-32 of F-30 and F-36 of F-35. The other ids name work described with
+its area: F-06 in [Changes to starter tests](#changes-to-starter-tests); F-14 and F-15 in
+[Data access](#data-access-typeorm); F-16 in [Configuration](#configuration); F-17 in
+[With Docker](#with-docker); F-18 in [Checks and tests](#checks-and-tests); F-21 and F-22 in
+[3.3.2](#deterministic-simulation-332); F-12, F-28 and F-29 in
+[3.3.1](#protocol-correctness-331); F-24 and F-31 in [3.3.5](#merge-semantics-335); F-13, F-38,
+F-39 and F-40 in [3.3.3](#offline-first-client-333).
 
 ### F-25: a change that commits after a later one is never delivered (category 1)
 
@@ -1238,143 +923,67 @@ reproduce and fix it.
   but a conflict becomes a retry of the whole transaction, and retries are what caused the problem.
 - **Commits.** `e5831da` (test), `9755602` (fix).
 
-### F-27: an edit of one ticket field overwrites another client's edit of the other field (category 9)
+### F-23: a rejected mutation fails the whole push and blocks the queue (category 3)
 
-- **What.** `ticket.update` always wrote both the title and the description, with the values the
-  user's form held. Two technicians who edit the same ticket offline, one the title and one the
-  description, sync in some order, and the second sync writes back the first one's field as it was
-  before. An edit of one field alone was refused (`title` was required) or emptied the description.
-- **Why it is dangerous.** A confirmed edit is lost silently, on every client and the server. The
-  convergence check cannot see it: every client loses the same edit, so they all still converge.
-- **Reproduce.** `merge.spec.ts`. In the simulation, the property "no lost edits" reports it as
-  `lost-edit` (`detection.spec.ts` puts the original behaviour back).
-- **Fix.** An edit names only the fields the user changed, with `base`: the value each had on the
-  user's screen (`ticketEdit()` in `sync-core` builds it; the ticket page and the simulation use it).
-  Edits of different fields merge. An edit of a field someone else changed since is rejected with
-  `FIELD_CONFLICT`, naming for each such field the value it has now and the one the user typed, so
-  the user can keep either (decision record [3.3.5](#merge-semantics-335)). An edit without `base`
-  writes its fields (the last write in server order wins), so mutations queued by the original
-  client still apply. The simulation's edits change one field or both, and the profiles allow
-  `FIELD_CONFLICT` as a legitimate rejection.
-- **Alternatives.** Last writer wins per field without a base: different fields merge, but of two
-  edits of the same field one disappears without anybody being told, which the task asks to avoid.
-  A version per ticket (optimistic locking of the row): edits of different fields would conflict
-  too. Merging text (operational transform, CRDT): out of scope (task, section 9).
-- **Commits.** `b9d7f5e` (test), `bcff851` (fix), `ec2ef0a` (simulation property).
+- **What.** On the server, `PushService` does not catch `MutationRejected`: any mutation the mutator
+  rejects (`STATUS_CONFLICT`, `NOT_FOUND`, `NEGATIVE_QUANTITY`, `BAD_ARGS`, …) makes the push answer
+  500, and the client's last mutation id does not advance. In the client, which already handles a
+  `rejected` result, `SyncClient.mutate` derives the next id as `lastMutationId + pending.length + 1`
+  (F-09 in the commits): once a rejected mutation leaves the queue without that id advancing, the
+  next mutation gets the rejected one's id.
+- **Why it is dangerous.** The client never learns the reason and retries the same batch forever;
+  every mutation queued after the rejected one is blocked (a poison mutation). A reused id is taken
+  for a duplicate, so the server drops the new mutation.
+- **Reproduce.** `rejections.spec.ts` and `client-ids.spec.ts` ("tells the client that a create was
+  rejected with ID_CONFLICT"); `client.spec.ts`, "never reuses a mutation id after the server
+  rejects a mutation". Both were known defects until fixed; in the simulation, the server side is the
+  signature `rejected-mutation-500` in the `rejections` and `full` profiles, which no longer tolerate
+  it (see [Simulation](#simulation)).
+- **Fix.** Each mutation's transaction runs the mutator inside a savepoint. A rejection rolls back
+  to it, which undoes the mutator's writes and the locks they took, and the same transaction then
+  advances the client's last mutation id, exactly as an application does: the rejected mutation is
+  final, and the ones after it are applied. The answer names the reason:
+  `{ id, status: 'rejected', code, message, details? }` (codes and details in
+  [3.3.5](#merge-semantics-335)), and the client drops the mutation from its queue and keeps the
+  rejection for the user. In the client, ids come from a counter that only grows, stored with the
+  queue (F-10): each `mutate` takes the next one, and an answer of the server can only move the
+  counter past its last applied id, never back. The characterization test "leaves no trace of a
+  mutation that the mutator rejects" changed with this fix: it pinned the 500 behaviour (last
+  mutation id left at 1) and now expects the rejection in the answer and the id advanced. In the
+  simulation, rejections are checked by code: a profile may only see the codes its actions can cause
+  (`unexpected-rejection`).
+- **Alternatives.** Rolling back the whole batch: one bad mutation would still block every other
+  one. A transaction per mutation without a savepoint, recording the rejection in a second
+  transaction: between the two, a retried copy of the mutation could run again. Answering 4xx for
+  the batch: the client could not tell which mutation was refused. For the ids, keeping the formula
+  and relying on the server to advance its id on a rejection: any answer that removes a mutation from
+  the queue before the id catches up (a lost response, a future server) would reuse an id again.
+  Random ids per mutation: the server could no longer tell a gap from a duplicate, and ordering would
+  need another field.
+- **Commits.** `1a3c31e`, `34047d5` (tests), `5120e40` (`ID_CONFLICT` test), `c0e1b7d` (simulation
+  corpus), `9df3a24` (client fix), `3c0b884` (rejection format), `78ef268` (savepoints), `0abb406`
+  (server fix).
 
-### F-28: a batch of long mutations is refused with 413 on every retry (category 3)
+### F-07: incremental pull returns other sites' changes (category 4)
 
-- **What.** The client put up to 100 mutations in one push whatever their size, and the server kept
-  Express's default JSON body limit of 100 KB. Ten tickets with a 5000-character description are
-  already more than that.
-- **Why it is dangerous.** The server refuses the whole body with 413 before any mutation runs; the
-  client retries the same batch forever, so everything queued behind it never reaches the server
-  (the same poison effect as F-23, for valid mutations).
-- **Reproduce.** `body-limit.spec.ts`, "accepts a push body as large as the client sends", and
-  `push-batches.spec.ts`, "splits a queue of long mutations into bodies the server accepts, in order".
-- **Fix.** The protocol fixes the largest push body (`MAX_PUSH_BODY_BYTES`, 1 MiB of UTF-8 JSON, in
-  `sync-core`). The client splits its queue into bodies of at most 100 mutations and that many
-  bytes, and `mutate` refuses a single mutation that could never fit (a `TypeError`, like an
-  unsendable value in F-22). The server's JSON limit is `JSON_BODY_LIMIT_BYTES` (2 MiB by default,
-  never below the protocol's 1 MiB), set with `app.useBodyParser` as the NestJS documentation
-  describes; a larger body is still a 413 and applies nothing.
-- **Alternatives.** Only raising the server limit: the largest valid batch is about 3 MB (control
-  characters take six bytes each in JSON), and any fixed limit can be exceeded by a long enough
-  queue. Only fewer mutations per batch: the count does not bound the bytes. Skipping a mutation
-  the server refuses for its size: it would be lost although it is valid.
-- **Commits.** `acf00e3` (test), `360a4fe` (fix).
+- **What.** `PullService.pull` filters by the user's sites only when `cursor` is 0; every later
+  pull returns changes of every site.
+- **Why it is dangerous.** Any technician receives every site's tickets after the first sync.
+- **Reproduce.** `pull-access.spec.ts`, "incremental pull returns only changes for sites the user
+  can access" (known defect); in the simulation, the signature `foreign-site-rows` in the
+  `multi-site` and `full` profiles.
+- **Fix.** Not fixed yet; owned by the access-control change. **Commits.** `1bac9ad` (test).
 
-### F-29: unvalidated pull parameters and client ids (other)
+### F-08: write access is checked against the `siteId` the client sends (category 4)
 
-- **What.** Pull read `cursor` and `limit` with `Number(x) || 0`: `cursor=abc` became 0, a full
-  resync from the start of the log, and `-5`, `1e3` or a repeated parameter were accepted too;
-  `cursor=1.5`, `limit=1.5` and values beyond `bigint` reached Postgres and failed with 500. Push and
-  pull took any string as the client id, so one with a NUL character (which Postgres cannot store)
-  failed with 500.
-- **Why it is dangerous.** The server must not trust its input (task, section 4): a malformed
-  request silently changes what the client receives, or turns into a server error that hides the
-  client's bug.
-- **Reproduce.** `request-validation.spec.ts`.
-- **Fix.** `PushRequestDto` and `PullQueryDto` are checked by the global `ValidationPipe`: decimal
-  integers only (the same conversion as the settings, so `1e3` and `""` are refused), cursors and
-  mutation ids up to 2^53 − 1 (the integers JSON numbers carry exactly), a page of 1 to 500 changes,
-  and UUID client ids, which is what every client generates. Anything else is a 400. The mutator
-  arguments are not part of the DTO check: they reach the mutator untouched and are validated there,
-  in the code the client runs too, so one bad argument rejects only its own mutation.
-- **Alternatives.** `ParseIntPipe` per parameter: it checks the digits but no range, and has no
-  answer for the client id. `enableImplicitConversion`: turns `""` into 0 and `1e3` into 1000.
-  Clamping an out-of-range `limit` instead of refusing it: hides the client's mistake.
-- **Commits.** `0432efb` (test), `6b19648` (fix).
-
-### F-30: an applied mutation disappears from the view when the sync is interrupted (category 8)
-
-- **What.** The client dropped a mutation from its queue as soon as the push answered that it was
-  applied, and again as soon as any pull page reported a last mutation id covering it, even when
-  the change itself was still on a later page. Its optimistic view is the pulled state plus the
-  queue, so until a later pull delivered the change the user's edit was gone from the screen.
-- **Why it is dangerous.** Interrupted syncs are the normal case for the client (a dropped
-  connection between push and pull, or between two pages): the user sees their change vanish and
-  may enter it again, which creates a real duplicate. Found while making the protocol's
-  acknowledgement exact; category 8 belongs to the offline-client change, but the fix is the
-  acknowledgement itself, so it is made here.
-- **Reproduce.** `acknowledgement.spec.ts`.
-- **Fix.** An applied (or duplicate) result carries the change-log version of the mutation's last
-  change. The client keeps the mutation in its queue, applied optimistically but not sent again,
-  until its cursor reaches that version, and then drops it, so it is never shown twice either. A
-  mutation without a version (it changed nothing) or with a version the cursor already passed is
-  dropped at once. The last mutation id a pull reports removes mutations whose push answer was lost
-  only on the last page (`hasMore` false): that page comes from the same snapshot as the id, and the
-  pages before it held every change up to it.
-- **Alternatives.** Using only the pull's last mutation id on the last page (the plan's first idea):
-  a client that never reaches the end of the log under constant writes would never shorten its
-  queue. Keeping the server's rows of a mutation in the push answer: the answer would grow with the
-  mutation and duplicate what the pull delivers.
-- **Commits.** `ec9fe40` (test), `9ad66be` (fix).
-
-### F-31: deleting a ticket leaves its parts behind (category 9)
-
-- **What.** `ticket.delete` deleted the ticket row only. Its parts stayed live on the server and on
-  every client, and an adjustment of such a part, made by someone who had not seen the deletion
-  yet, was still applied.
-- **Why it is dangerous.** Concurrent edits do not merge into a consistent result: a delete and a
-  part edit leave a part that belongs to nothing, kept forever in every client's state (and in any
-  snapshot of it), and edited as if the ticket existed.
-- **Reproduce.** `delete-ticket.spec.ts`.
-- **Fix.** A mutator can declare the ticket whose parts it needs (`partsOf`); the server loads and
-  locks them after the ticket, in id order, through a new partial expression index
-  (`entities_part_ticket_idx`, built `CONCURRENTLY`; the test checks the planner can use it).
-  `ticket.delete` deletes the parts with the ticket in the same mutation, each published as a `del`;
-  a later adjustment of such a part is rejected with `NOT_FOUND`. A migration deletes the orphans an
-  existing database already has and publishes their deletion through the log head, so clients drop
-  them too. The client and the reference server of the simulation find a ticket's parts in their
-  state. Parts are found by comparing the ticket id as text, so ids are accepted only in lower case
-  (the form Postgres prints and `crypto.randomUUID()` makes); the same migration first stores the
-  ids inside existing tickets and parts (`id`, `siteId`, `ticketId`) in lower case and publishes
-  that, since the original server kept them as the client sent them.
-- **Alternatives.** A foreign key with `ON DELETE CASCADE`: rows are never deleted (tombstones keep
-  ids taken), and a cascade would not write the change log. Hiding parts of deleted tickets in the
-  UI only: the data stays and keeps diverging from what the user expects.
-- **Commits.** `6bde1c5` (test), `5042988` (fix).
-
-### F-32: after a reload, a new mutation reuses an id the server already handled (category 8)
-
-- **What.** The client stored its last applied mutation id only after a completed pull. When a push
-  was applied but the pull after it failed (the network went down) and the page was reloaded, the
-  client started numbering again after the stale stored id. The server answered the next mutation
-  as a duplicate of the old one with that id, and the client dropped it from its queue.
-- **Why it is dangerous.** The user's change is shown as synced, but the server never applies it,
-  and nobody is told. It needs only a lost connection between a push and a pull, and a reload.
-- **Reproduce.** `packages/sync-core/test/reload.spec.ts`.
-- **Fix.** The client stores its state, the last applied id included, right after every push
-  answer, not only after a pull. Ids after a reload continue after the last id the server handled.
-- **Alternatives.** Storing the next id by itself: the same effect, but a second storage format
-  next to the state; the queue that survives a reload (F-10) needs this state stored anyway. Random
-  ids: the server could no longer tell a gap from a duplicate (see F-09).
-- **Commits.** `479a024` (test), `5a998ac` (fix).
+- **What.** `authorize` checks `mutation.args.siteId`, not the site of the row the mutation
+  changes.
+- **Why it is dangerous.** A technician of North can change the status of a South ticket, or add a
+  part to it, by sending `siteId: North`.
+- **Reproduce.** `write-access.spec.ts`, two known-defect tests.
+- **Fix.** Not fixed yet; owned by the access-control change. **Commits.** `9edc67e` (tests).
 
 ### F-33: a client id is not bound to its user (category 4)
-
-The fix belongs to the access-control change; this change adds the known-defect test.
 
 - **What.** The server takes any client id with any token. The `clients` row records the user who
   pushed first, but nothing checks it. Another user who knows a client id can push mutations under
@@ -1384,12 +993,12 @@ The fix belongs to the access-control change; this change adds the known-defect 
   told. Client ids are random UUIDs, so this needs one to leak (for example from a log of pull URLs).
 - **Reproduce.** `client-ownership.spec.ts`, "does not let another user's push take the next
   mutation id of the owner's client" (known defect, owner `access-control`).
-- **What this change does.** Copies of a handled mutation are answered with their stored outcome
-  (rejection details include stored field values) only for the client's owner; anyone else gets a
+- **Fix.** Not fixed yet; owned by the access-control change: 403 for a client id that belongs to
+  another user, in push and pull. Until then, only the client's owner is answered with the stored
+  outcome of a handled mutation (rejection details include stored field values); anyone else gets a
   bare `duplicate` (`client-ownership.spec.ts`, "never tells another user the outcome of the owner's
   mutations").
-- **Planned fix.** Answer 403 for a client id that belongs to another user, in push and pull. The
-  web app then needs one client id per user in a browser (it shares one for every user today).
+- **Commits.** `b481bba` (the known-defect test and the owner-only replay).
 
 ### F-34: the change-log GC drops changes without telling anyone (category 5)
 
@@ -1419,36 +1028,30 @@ The fix belongs to the access-control change; this change adds the known-defect 
   changes between two reloads and reloads everyone needlessly.
 - **Commits.** `54c3486` (test), `f17f51d` (fix).
 
-### F-35: notification streams outlive their connection, and get no heartbeat (category 6)
+### F-35: notification streams are never released, and keep the server from shutting down (category 6)
 
 - **What.** `StreamService` added every stream's response to a set and never removed it; nothing was
-  written to an idle stream.
+  written to an idle stream. And `app.close()` closes the HTTP server, which waits for every open
+  connection, while an event stream never ends (F-36 in the commits).
 - **Why it is dangerous.** Every reload of a page left a subscriber behind for the life of the
   process: memory grows, and every notification writes to dead sockets. Without traffic a proxy
-  drops an idle stream, and neither end notices a dead connection.
-- **Reproduce.** `stream.spec.ts` (integration, over real HTTP: a client goes away and the count
-  stays at 1; a hundred connections and closes; no byte on an idle stream).
+  drops an idle stream, and neither end notices a dead connection. A deploy or restart hangs until
+  the orchestrator kills the process, which cuts the requests in progress too.
+- **Reproduce.** `stream.spec.ts` (integration, over real HTTP): a client goes away and the count
+  stays at 1; a hundred connections and closes; no byte on an idle stream; "lets the application
+  close while a stream is open".
 - **Fix.** The stream is a `@Sse()` Observable: Nest unsubscribes when the connection closes, and the
   teardown removes the subscriber. The handler is synchronous, since Nest 10 listens for the close
   only once the handler has returned its Observable. An idle stream gets a `heartbeat` event every
   `STREAM_HEARTBEAT_MS` (Nest 10 cannot write SSE comments); pokes are merged within 250 ms; a client
-  whose writes stay backed up for a whole interval is dropped.
+  whose writes stay backed up for a whole interval is dropped. On shutdown,
+  `StreamService.onModuleDestroy` ends every stream and refuses new ones; how the HTTP server then
+  closes is part of [3.3.3](#offline-first-client-333).
 - **Alternatives.** Keeping `res.write` and removing the subscriber on `res.on('close')`: works, but
-  bypasses the framework's SSE support and its backpressure handling.
-- **Commits.** `0da3a2d` (test), `4fdea61` (fix).
-
-### F-36: open notification streams keep the server from shutting down (category 6)
-
-- **What.** `app.close()` closes the HTTP server, which waits for every open connection, and an event
-  stream never ends.
-- **Why it is dangerous.** A deploy or restart hangs until the orchestrator kills the process, which
-  cuts the requests in progress too.
-- **Reproduce.** `stream.spec.ts`, "lets the application close while a stream is open".
-- **Fix.** `StreamService.onModuleDestroy` ends every stream and refuses new ones; the HTTP server
-  then closes normally, and requests in progress finish.
-- **Alternatives.** `forceCloseConnections: true` (a standard Nest option): destroys every socket,
-  also those of pushes in the middle of their answer.
-- **Commits.** `cf610a7` (test), `d1f61da` (fix).
+  bypasses the framework's SSE support and its backpressure handling. For the shutdown,
+  `forceCloseConnections: true` (a standard Nest option): destroys every socket, also those of pushes
+  in the middle of their answer.
+- **Commits.** `0da3a2d`, `cf610a7` (tests), `4fdea61`, `d1f61da` (fixes).
 
 ### F-37: the web app never closes its client and stream; a disposed client keeps working (category 6)
 
@@ -1464,50 +1067,163 @@ The fix belongs to the access-control change; this change adds the known-defect 
   client and closes its storage in its cleanup, also when the cleanup comes before the asynchronous
   open finished (`e84f17b`); development renders use React strict mode, which runs effects twice and
   shows a missing cleanup at once.
+- **Alternatives.** One client in a module variable for the life of the page: strict mode would no
+  longer make two, but a change of token still has to dispose of the old one. Leaving it to the page
+  unload: the browser closes the connections then, but not when the token changes.
 - **Commits.** `26d01b8` (test), `4e8aaac`, `e84f17b` (fix).
 
-### F-38: a write the browser storage refuses is ignored (category 8)
+### F-19: mutators are not deterministic: they make up ids and read the clock (category 7)
 
-- **What.** `LocalStorageSyncStorage.save` caught every error (a full quota) and the client went on
-  as if the state were stored.
-- **Why it is dangerous.** The user is shown "synced" while nothing survives a reload.
-- **Reproduce.** `storage-errors.spec.ts`.
-- **Fix.** A refused write rejects; the client reports `STORAGE` with the status `error`, a mutation
-  it cannot store is not shown and its `mutate` rejects, and IndexedDB writes abort their whole
-  transaction on any failure (also one thrown synchronously, which IndexedDB would otherwise commit
-  around).
-- **Commits.** `b7bb646` (test), `4aa2581`, `373c2a8` (fix).
+- **What.** `ticket.create` called `crypto.randomUUID()` itself: the client ran it once per
+  recomputation of its optimistic view and the server once more, so every run produced another id.
+  `createdAt` and `updatedAt` came from `new Date()` inside the mutators (F-20 in the commits); on
+  the server, a row's data took the Node clock while its change-log entry
+  (`created_at DEFAULT now()`) and the GC cutoff took Postgres's clock.
+- **Why it is dangerous.** An optimistic ticket changed its id on every render, so its link broke
+  at once; edits and parts added to it before the first sync named an id the server never stored
+  and were refused (`NOT_FOUND`); after the sync the ticket "jumped" to the server's id. The
+  optimistic row changed its timestamps on every recomputation of the view, the client and the
+  server stored different times for one change, two clocks on one server disagree under skew, and
+  nothing could be driven by a test clock.
+- **Reproduce.** Ids: `mutators.spec.ts` ("creates the ticket under the id the client chose",
+  "writes the same ticket every time…"), `client.spec.ts` ("keeps an optimistic ticket under the id
+  the caller chose"), `client-ids.spec.ts` ("stores a created ticket under the id the client
+  chose"). Clocks: `mutators.spec.ts` ("takes the timestamps … from the transaction"),
+  `client.spec.ts` ("keeps the timestamps of an optimistic ticket stable…"), `server-clock.spec.ts`
+  ("stamps a mutation's row and its log entry with one server clock"). The property tests in
+  `determinism.spec.ts` run every mutator with `Math.random`, `Date` and `crypto` stubbed out. With
+  the old id put back they fail on a minimal `ticket.create`, and so does a baseline simulation
+  seed; with the old clock put back, one simulation seed gives two different traces
+  (`detection.spec.ts`).
+- **Fix.** `ticket.create` takes a required UUID `id` that the caller generates before queueing (the
+  web app uses `crypto.randomUUID()`). Since ids now come from the client, the server must never let
+  one id name two rows: creates go through `MutatorTx.insert`, which the server executes as
+  `INSERT … ON CONFLICT DO NOTHING RETURNING` and rejects with `ID_CONFLICT` when the id is taken by
+  a live row, a deleted row (tombstone) or a concurrent insert (it waits for that transaction and
+  then sees the conflict). The original upsert would have let a create overwrite another site's
+  ticket or revive a deleted one; `client-ids.spec.ts` checks both and 20 rounds of two concurrent
+  creates with one id (exactly one applies). Time comes from `MutatorTx.now()`: on the client, the
+  time the mutation was queued, kept with it; on the server, a `Clock` provider (`SystemClock` in
+  production), read once per mutation and also used for `change_log.created_at` and the GC cutoff.
+  An ESLint override forbids `Date`, `crypto`, `performance`, `globalThis`, timers and
+  `Math.random()` in the mutators file (`mutator-lint.spec.ts` checks that the rules report each of
+  them).
+- **Alternatives.** A temporary client id that the server maps to a real one: every later queued
+  mutation that names the ticket would need rewriting. Catching the unique violation (23505) instead
+  of `DO NOTHING`: the error aborts the transaction, so it needs a savepoint around every insert. A
+  `SELECT … FOR UPDATE` existence check: it locks nothing when the row does not exist yet, so two
+  concurrent creates both pass it. The client sends its own time and the server keeps it: client
+  clocks are wrong and untrusted. Postgres `now()` everywhere: the mutator runs in Node and would
+  need the time passed in anyway, and `now()` is the transaction's start time.
+- **Protocol change.** `ticket.create` requires `id`.
+- **Commits.** `6d3bf48`, `b8479c4` (tests), `5120e40`, `7f88005` (fixes), `abafac7` (lint rules).
 
-### F-39: a notification that arrives while a sync is running is lost (category 1)
+### F-10: pending mutations are lost on reload (category 8)
 
-- **What.** `sync()` returned the sync already running. A poke that arrived after that sync's pull
-  had read its page was dropped, and the client did not see the change until something else made it
-  sync.
-- **Why it is dangerous.** Delivery is incomplete for an indefinite time: the stream announced the
-  change, the client discarded the announcement. Category 1 belongs to the protocol change, which was
-  done; it was found here, with the stream.
-- **Reproduce.** `pokes.spec.ts`.
-- **Fix.** A sync asked for while one runs makes one more run after it (unless the running one
-  failed; the retry timer runs the next) and resolves when that one ends.
-- **Commits.** `5643cea` (test), `2e2ebe2` (fix).
+- **What.** The client persisted the server's rows and its cursor (in `localStorage`) but not its
+  queue, and kept the list of rejected mutations only in memory.
+- **Why it is dangerous.** Work done offline disappears when the page reloads, and so does the
+  reason a change was refused: the user cannot tell that it never reached the server.
+- **Reproduce.** `client.spec.ts`, "keeps unsynced mutations across a reload" (a known defect from
+  the start); `idb-storage.spec.ts`, "serves a client across a reload"; e2e `offline-client.spec.ts`,
+  "keeps changes made without the server across a reload".
+- **Fix.** The client's whole state (meta, rows, queue, rejections) is in its storage, IndexedDB in
+  the browser (`IdbSyncStorage`, through `idb`), and every change of it is one transaction. A
+  mutation is shown once it is stored (see [3.3.3](#offline-first-client-333)).
+- **Alternatives.** The queue in `localStorage` next to the state: synchronous, a few megabytes for
+  every origin, no transactions across keys, shared by every tab without any coordination. A queue
+  kept in memory and written on `beforeunload`/`pagehide`: browsers do not guarantee those events
+  (a crash, a killed mobile tab).
+- **Commits.** `f943f8d` (test), `373c2a8` (fix).
 
-### F-40: the next user of the browser sees the previous user's data (category 4)
+### F-11: two tabs sharing a `clientId` lose each other's mutations (category 8)
 
-- **What.** Every user of the browser shared one stored state (`fs_state`) and one client id
-  (`fs_client_id`). There was no way to sign out; a user who signed in after another (a new token)
-  saw the other's rows, of sites they have no access to, and pushed under the other's client id.
-- **Why it is dangerous.** A read path that bypasses the server's access checks: the local cache.
-  Category 4 belongs to the access-control change, still to come; the offline client owns local data,
-  so the fix is here.
-- **Reproduce.** e2e `user-switch.spec.ts`.
-- **Fix.** Each user's state is in a database of its own, named after a SHA-256 of the token
-  (`databaseNameFor`): it works offline from the first sign-in and does not contain the token. A
-  sign-out button (with a confirmation when changes are not synced) removes the token and deletes
-  every FieldSync database; a start with nobody signed in deletes any left behind; other tabs close
-  on the deletion and show the sign-in form.
-- **Alternatives.** A namespace by user id from `/me`: the first sign-in would need the network.
-  Keeping a signed-out user's database: their data stays in the browser.
-- **Commits.** `aae9a1a` (test), `4eddf32` (fix).
+- **What.** Tabs shared `clientId` and storage but allocated mutation ids in memory, so both used
+  id 1 and the server dropped the second as a duplicate.
+- **Why it is dangerous.** A user with two tabs open loses changes without any message.
+- **Reproduce.** `client.spec.ts`, "does not lose mutations when two tabs share one clientId" (a
+  known defect from the start); `tabs.spec.ts` (a property test over any order of mutations, syncs
+  and tabs closing); e2e "lets two tabs of one user work at once".
+- **Fix.** The storage gives a mutation its id in the transaction that queues it, so ids are unique
+  however many tabs queue (`373c2a8`); and one tab talks to the server for all of them (Web Locks and
+  BroadcastChannel, `298850b`), reading the queue as stored right before each push, so it never sends
+  a batch with a gap in the ids.
+- **Alternatives.** A client id per tab: the server would see every tab as its own device, and a
+  closed tab's queue would be stranded. A SharedWorker owning the queue: not available in Safari
+  before 16 or on Chrome for Android.
+- **Commits.** `f943f8d` (test), `373c2a8`, `298850b` (fix).
+
+### F-30: an interrupted sync loses the user's change (category 8)
+
+- **What.** Two ways. The client dropped a mutation from its queue as soon as the push answered that
+  it was applied, and again as soon as any pull page reported a last mutation id covering it, even
+  when the change itself was still on a later page: its view is the pulled state plus the queue, so
+  until a later pull delivered the change the user's edit was gone from the screen. And the client
+  stored its last applied mutation id only after a completed pull (F-32 in the commits): when a push
+  was applied, the pull after it failed and the page was reloaded, it numbered again after the stale
+  id; the server answered the next mutation as a duplicate of the old one with that id, and the
+  client dropped it.
+- **Why it is dangerous.** Interrupted syncs are the normal case for this client (a dropped
+  connection between push and pull, or between two pages). The user sees the change vanish and may
+  enter it again, which creates a real duplicate; or, after a reload, a new change is shown as synced
+  although the server never applies it, and nobody is told.
+- **Reproduce.** `acknowledgement.spec.ts` and `reload.spec.ts` in `packages/sync-core/test`.
+- **Fix.** An applied (or duplicate) result carries the change-log version of the mutation's last
+  change. The client keeps the mutation in its queue, applied optimistically but not sent again,
+  until its cursor reaches that version, and then drops it, so it is never shown twice either. A
+  mutation without a version (it changed nothing) or with a version the cursor already passed is
+  dropped at once. The last mutation id a pull reports removes mutations whose push answer was lost
+  only on the last page (`hasMore` false): that page comes from the same snapshot as the id, and the
+  pages before it held every change up to it. The client also stores its state, the last applied id
+  included, right after every push answer, so ids after a reload continue after the last one the
+  server handled.
+- **Alternatives.** Using only the pull's last mutation id on the last page: a client that never
+  reaches the end of the log under constant writes would never shorten its queue. Keeping the
+  server's rows of a mutation in the push answer: the answer would grow with the mutation and
+  duplicate what the pull delivers. For the ids, storing only the next one: the same effect, but a
+  second storage format next to the state. Random ids: the server could no longer tell a gap from a
+  duplicate (see F-23).
+- **Commits.** `ec9fe40`, `479a024` (tests), `9ad66be`, `5a998ac` (fixes).
+
+### F-27: an edit of one ticket field overwrites another client's edit of the other field (category 9)
+
+- **What.** `ticket.update` always wrote both the title and the description, with the values the
+  user's form held. Two technicians who edit the same ticket offline, one the title and one the
+  description, sync in some order, and the second sync writes back the first one's field as it was
+  before. An edit of one field alone was refused (`title` was required) or emptied the description.
+- **Why it is dangerous.** A confirmed edit is lost silently, on every client and the server. The
+  convergence check cannot see it: every client loses the same edit, so they all still converge.
+- **Reproduce.** `merge.spec.ts`. In the simulation, the property "no lost edits" reports it as
+  `lost-edit` (`detection.spec.ts` puts the original behaviour back).
+- **Fix.** An edit names only the fields the user changed, with `base`: the value each had on the
+  user's screen (`ticketEdit()` in `sync-core` builds it; the ticket page and the simulation use it).
+  Edits of different fields merge. An edit of a field someone else changed since is rejected with
+  `FIELD_CONFLICT`, naming for each such field the value it has now and the one the user typed, so
+  the user can keep either (decision record [3.3.5](#merge-semantics-335)). An edit without `base`
+  writes its fields (the last write in server order wins), so mutations queued by the original
+  client still apply. The simulation's edits change one field or both, and the profiles allow
+  `FIELD_CONFLICT` as a legitimate rejection.
+- **Alternatives.** Last writer wins per field without a base: different fields merge, but of two
+  edits of the same field one disappears without anybody being told, which the task asks to avoid.
+  A version per ticket (optimistic locking of the row): edits of different fields would conflict
+  too. Merging text (operational transform, CRDT): out of scope (task, section 9).
+- **Commits.** `b9d7f5e` (test), `bcff851` (fix), `ec2ef0a` (simulation property).
+
+### F-01–F-05: five starter tests cannot fail when the behaviour they name is broken (category 10)
+
+- **Why it is dangerous.** The suite reported access, merge and protocol rules as tested while they
+  were broken or unchecked, so a change that broke them stayed green.
+- **Reproduce.** `scripts/audit-starter-tests.sh` breaks the behaviour each test is named after and
+  runs the starter test and its replacement (the table in
+  [Changes to starter tests](#changes-to-starter-tests)).
+
+| Id | Starter test | Why it could not fail | Fix, and the alternative not taken | Commits |
+|---|---|---|---|---|
+| F-01 | `pull.spec.ts`, "only returns changes for sites the user can access" | The database was mocked so that every query returned no rows: a pull that ignores access entirely still returns nothing (it did: F-07) | Replaced by `pull-access.spec.ts` on Postgres: the initial pull is filtered by site, the incremental one is known defect F-07. A mock that evaluates `WHERE` would re-implement SQL and test the mock | `1bac9ad` |
+| F-02 | `mutators.spec.ts`, "rejects an invalid status transition" | The assertion sat in a `catch` with no assertion count, so an allowed transition passed; the other rejection tests accepted any `MutationRejected`, whatever its code, which clients act on | Every rejection test requires the exact code and an unchanged state; "creates a ticket" checks that one row is written. `expect.assertions(1)` alone would leave codes and state unchecked | `9766718` |
+| F-03 | `client.spec.ts`, "numbers local mutations sequentially" | It counted rows and pending mutations and never read an id (the ids the server deduplicates by): it passed with every id equal to 1; "shows a locally created ticket…" counted rows only | A recording transport captures what is pushed and the test expects ids `[1, 2, 3]`; the optimistic create checks the row's content. Reading the client's private queue would tie the test to its internals, not to what the server receives | `a96263e` |
+| F-04 | `access.spec.ts`, "rejects a mutation on a site the user cannot access" | The fake database answered every query alike and ignored the role; the test only varied the client's `siteId` argument, pinning the trust in it (F-08). The admin branch was untested | Renamed to what they check; the fake answers by table and user; admin and missing-`siteId` cases added. The real rule is tested on Postgres as known defect F-08. Dropping the unit tests for the Postgres ones would leave the `siteId` argument and the admin branch without a test that runs with no database | `9edc67e` |
+| F-05 | `sync.integration.spec.ts`, "sync protocol (integration)" | It ran `SELECT 1`, and was skipped without `DATABASE_URL`, so CI stayed green with no integration test | A harness with a database per test file, the real app and fixtures; characterization tests of authentication, push, pull, duplicates, order, malformed input, atomicity and the GC; `REQUIRE_DB=1` makes a missing database a failure. Failing every run without a database would keep the unit tests from running on a machine that has none | `d9d4b23`, `a9c598a` |
 
 ## Changes to starter tests
 
@@ -1516,8 +1232,8 @@ The fix belongs to the access-control change; this change adds the known-defect 
 | `packages/sync-core/test/mutators.spec.ts` | Rejection tests require the exact code and unchanged state; "creates a ticket" checks that one row is written | F-02 |
 | `packages/sync-core/test/client.spec.ts` "shows a locally created ticket…" | Checks the row content, not only the count | F-03 |
 | `packages/sync-core/test/client.spec.ts` "numbers local mutations sequentially" | Checks the ids the client pushes | F-03 |
-| `packages/sync-core/test/client.spec.ts` two `it.todo` | Real tests, tracked as known defects F-10, F-11 | F-06 |
-| `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Passes an `id`; the fake transaction implements `insert` and `now` | Protocol change of F-19: `ticket.create` requires a client-chosen id and writes through `MutatorTx.insert`; timestamps come from `MutatorTx.now` (F-20) |
+| `packages/sync-core/test/client.spec.ts` two `it.todo` | Real tests, first tracked as known defects F-10 and F-11 (`f943f8d`) | An `it.todo` never runs: both behaviours read like a specification, were broken and were checked by nothing (F-06 in the commits) |
+| `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Passes an `id`; the fake transaction implements `insert` and `now` | Protocol change of F-19: `ticket.create` requires a client-chosen id and writes through `MutatorTx.insert`; timestamps come from `MutatorTx.now` (F-19) |
 | `packages/sync-core/test/client.spec.ts` "shows a locally created ticket…", "numbers local mutations sequentially" | Every `ticket.create` passes an `id` | Protocol change of F-19 |
 | `packages/sync-core/test/mutators.spec.ts` "creates a ticket in the open status" | Reads the created row with optional chaining (`created?.status`) | `sync-core` compiles with `noUncheckedIndexedAccess`: an array element may be `undefined`, so the type checker rejects the unguarded access |
 | `packages/sync-core/test/client.spec.ts` `OfflineTransport` | Implements `snapshot` (it fails like the other requests) | Protocol change of F-34: a `Transport` also reads snapshots, and a client without a stored state starts with one |
@@ -1525,9 +1241,9 @@ The fix belongs to the access-control change; this change adds the known-defect 
 | `packages/sync-core/test/client.spec.ts` (all that call `mutate`) | `await client.mutate(...)`; the tests that read the view right after it are `async`; the unsendable-arguments test expects a rejection instead of a throw | The queue is written to IndexedDB before a mutation is shown, so `mutate` is asynchronous (F-10) |
 | `packages/sync-core/test/client.spec.ts` fake transports | Pull answers and snapshot pages carry `head` | Protocol change of the offline-client work: the head bounds every sync under constant writes |
 | `packages/sync-core/test/client.spec.ts` "retries and stamps optimistic rows…" | The client gets `random: () => 0.5` and the retry comes after 500 ms instead of 5 s | Retries use exponential backoff with jitter (task 3.3.3) instead of a fixed 5 s |
-| `packages/sync-core/test/client.spec.ts` F-10, F-11, F-13 | Known defects become regular tests; F-10 waits for `ready`, F-13 uses the client's clock and checks the `TIMEOUT` error | Fixed by the offline-client change |
+| `packages/sync-core/test/client.spec.ts` known defects (reload, two tabs, a request that never answers) | They become regular tests; the reload test waits for `ready`, the timeout test uses the client's clock and checks the `TIMEOUT` error | Fixed by the offline-client change |
 | `e2e/ticket-sharing.spec.ts` | Expects `synced · 0 pending` instead of `idle · 0 pending` | The status line shows the indicator of task 3.3.3 |
-| `packages/sync-core/test/client.spec.ts` (all that name a client or answer with ids), `apps/server/test/access.spec.ts` | The client id `c1` becomes a UUID constant, and the mutation ids of fake answers and mutations are built with `asMutationId`; no assertion changed | Mutation and client ids are branded types, so a version cannot stand in for a mutation id; a client id is a lower-case UUID (the server has accepted UUIDs only since F-29) |
+| `packages/sync-core/test/client.spec.ts` (all that name a client or answer with ids), `apps/server/test/access.spec.ts` | The client id `c1` becomes a UUID constant, and the mutation ids of fake answers and mutations are built with `asMutationId`; no assertion changed | Mutation and client ids are branded types, so a version cannot stand in for a mutation id; a client id is a lower-case UUID (the server accepts only UUIDs, see [3.3.1](#protocol-correctness-331)) |
 | `apps/server/test/access.spec.ts` | Tests renamed to what they check; the fake answers per query; admin and missing-`siteId` cases added | F-04 |
 | `apps/server/test/pull.spec.ts` | Removed; replaced by `test/integration/pull-access.spec.ts` | F-01 |
 | `apps/server/test/sync.integration.spec.ts` | Removed; replaced by `test/integration/sync.characterization.spec.ts` | F-05 |
@@ -1657,7 +1373,7 @@ Each violation has a **signature**:
 | `unexpected-rejection` | the server rejected a mutation with a code none of the profile's actions can cause | — |
 | `lost-edit` | a ticket field does not hold the last applied write of that field | — |
 | `foreign-site-rows` | a client holds rows of a site its user cannot access | F-07 (access-control change) |
-| `stuck-request` | a client waits forever on a request that never completes | — (F-13, fixed: requests time out) |
+| `stuck-request` | a client waits forever on a request that never completes | — (fixed: requests time out) |
 | `livelock` | a queue never drained for another reason | — |
 | `divergence` | a client's rows differ from the server's within its sites | — |
 | `client-error` | the client code threw (for example while computing its view) | — |
@@ -1763,8 +1479,8 @@ The `sim-cli` job checks the command itself on Linux, macOS and Windows without 
   shrinks to fewer steps that still fail, and its seed, path and `replayPath` replay it to the same
   trace.
 - Against the real server, putting a determinism defect back into `ticket.create` must fail the
-  simulation: an id made up by the mutator (F-19) fails a baseline run, and a wall-clock timestamp
-  (F-20) makes one seed give two different traces, and a `ticket.update` that empties the
+  simulation: an id made up by the mutator fails a baseline run, a wall-clock timestamp (both
+  F-19) makes one seed give two different traces, and a `ticket.update` that empties the
   description an edit leaves out, as the original one did (F-27), is reported as `lost-edit`
   (`detection.spec.ts`).
 
@@ -1788,7 +1504,7 @@ simulation: the same counts and per-run figures in every profile, as expected of
 
 The same search before the change (no reloads, tabs or stream in the simulation): `baseline` and
 `rejections` 1000 / 1000, `multi-site` 119 without violations (F-07 in 881), `full` 105 (F-07 in 762,
-`stuck-request` (F-13) in 370).
+`stuck-request` in 370).
 
 After the log lifecycle change, a local search of 1000 runs per profile from seed 20261127
 (`npm run sim -- --profile <name> --seed 20261127 --runs 1000`, one process per profile, about
@@ -1801,7 +1517,7 @@ retention in every profile.
 | `baseline` | 1000 / 1000 | — | 0.38 | 1.49 | 432 ms |
 | `rejections` | 1000 / 1000 | — | 0.44 | 1.57 | 429 ms |
 | `multi-site` | 126 / 1000 | `foreign-site-rows` (F-07): 874 | 0.38 | 1.49 | 433 ms |
-| `full` | 137 / 1000 | `foreign-site-rows` (F-07): 729; `stuck-request` (F-13): 359 | 0.36 | 1.57 | 405 ms |
+| `full` | 137 / 1000 | `foreign-site-rows` (F-07): 729; `stuck-request`: 359 | 0.36 | 1.57 | 405 ms |
 
 The same search before the change (no compaction in the simulation) found the same known defects;
 the simulation could not see category 5 at all, since the GC never ran.
@@ -1816,7 +1532,7 @@ divergence, a lost edit, an unexpected rejection or `rejected-mutation-500`:
 | `baseline` | 1000 / 1000 | — | — | 253 ms |
 | `rejections` | 1000 / 1000 | — | — | 226 ms |
 | `multi-site` | 123 / 1000 | `foreign-site-rows` (F-07): 877 | 0, 1, 2 | 224 ms |
-| `full` | 100 / 1000 | `foreign-site-rows` (F-07): 777; `stuck-request` (F-13): 415 | F-07: 0, 1, 2; F-13: 0, 1, 3 | 204 ms |
+| `full` | 100 / 1000 | `foreign-site-rows` (F-07): 777; `stuck-request`: 415 | `foreign-site-rows`: 0, 1, 2; `stuck-request`: 0, 1, 3 | 204 ms |
 
 Per run on average: about 90 fault-phase steps, 4.5 dropped requests, 1.7 duplicates, 1.7 held
 copies redelivered later, 2.9 dropped answers, 0.9 bad gateways, 0.9 truncated bodies, one link down
@@ -1827,7 +1543,7 @@ profile's actions can cause.
 Before the protocol change, the same search from seed 1 found `rejected-mutation-500` (F-23) in 703
 of 1000 `rejections` runs and 644 of 1000 `full` runs (first path 0; for example
 `npm run sim -- --profile full --seed 1 --path 3 --trace` on the commit before `0abb406` shows the
-hung request of F-13 together with F-23 and F-07).
+request that hung without a timeout, together with F-23 and F-07).
 
 ### Limitations
 
@@ -1886,7 +1602,7 @@ work.
   reports 20 known vulnerabilities (1 critical in `next`; high in `body-parser` and `multer`
   through `@nestjs/platform-express`, and in `eslint-config-next`; moderate ones elsewhere). The
   API has no multipart endpoints, so `multer` is never used; the JSON body limit is set explicitly
-  (`JSON_BODY_LIMIT_BYTES`, F-28). The upgrade path is Node 22 or 24 LTS, NestJS 11 and a current Next.js
+  (`JSON_BODY_LIMIT_BYTES`). The upgrade path is Node 22 or 24 LTS, NestJS 11 and a current Next.js
   release, each with its own change and the full test suite as the safety net.
 - `typeorm` is flagged (moderate) through its `glob` dependency's command-line tool, which is never
   run: migrations are listed explicitly, not globbed.
@@ -1898,7 +1614,7 @@ work.
   there.
 - E2e runs on one Postgres share the database name `fieldsync_e2e` unless `E2E_DATABASE` is set;
   two simultaneous runs against the same server would collide.
-- Four defects are reproduced but not fixed yet (F-07, F-08, F-33, all of the access-control
+- Three defects are reproduced but not fixed yet (F-07, F-08, F-33, all of the access-control
   change); each is a known-defect test with an owner and is listed by every test run.
 - Writes are serialized on the change log's head for the last statement of each mutation, which
   bounds write throughput per database (see [3.3.1](#protocol-correctness-331)).
