@@ -704,7 +704,12 @@ export class SyncClient {
         this.leadership.signal.removeEventListener('abort', onDispose);
       }
       if (this.leadership.signal.aborted) return;
-      if (failure instanceof TransportError && failure.code === 'CLIENT_UPDATE_REQUIRED') return;
+      if (failure instanceof TransportError && failure.code === 'CLIENT_UPDATE_REQUIRED') {
+        // An idle client may make no other request: this answer is how it learns of it.
+        this.lastError = syncErrorOf(failure);
+        await this.requireUpdate(failure);
+        return;
+      }
       const retryAfterMs = failure instanceof TransportError ? (failure.retryAfterSeconds ?? 0) * 1000 : 0;
       const delay = backoffDelay(failures, this.backoff, this.random, retryAfterMs);
       failures += 1;

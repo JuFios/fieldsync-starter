@@ -179,4 +179,21 @@ describe('a leading tab that cannot sync any more', () => {
     expect(server.titles).toEqual([]);
   });
 
+  it('says that an update is required when it is the stream that the server refuses', async () => {
+    const storage = new MemoryStorage();
+    const server = new Server();
+    let refuseStream: (err: Error) => void = () => undefined;
+    const stream = () => new Promise<void>((_resolve, reject) => (refuseStream = reject));
+    const c = await tab({ ...server.transport(), stream }, storage, new TabGroup().tab(), true);
+    await c.sync();
+    expect(c.status).toBe('idle');
+    const before = server.requests;
+
+    refuseStream(tooOld());
+    await settle();
+
+    expect({ status: c.status, leads: c.isLeader }).toEqual({ status: 'update-required', leads: false });
+    expect((await storage.load()).meta.updateRequired?.min).toBe(PROTOCOL_VERSION + 1);
+    expect(server.requests).toBe(before);
+  });
 });
