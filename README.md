@@ -102,7 +102,7 @@ With `API_DOCS_ENABLED=true` the server describes its API at <http://localhost:3
 | `npm run test:e2e` | Playwright, Chromium, against the production builds | `npm run build`, `DATABASE_URL`, `npx playwright install chromium` once |
 | `scripts/docker-smoke.sh` | Builds the images, checks them (non-root, no `.env` files, resource limits) and starts the compose stack | Docker |
 | `scripts/scan-images.sh IMAGE...` | Known vulnerabilities of the images (Trivy, report only; CI puts it in the job summary) | Docker |
-| `scripts/audit-starter-tests.sh` | Shows the rewritten starter tests were vacuous (see [Changes to starter tests](#changes-to-starter-tests)) | `DATABASE_URL`, built packages |
+| `scripts/audit-starter-tests.sh` | Reproduces the audit of the rewritten starter tests on two fixed versions (see [Changes to starter tests](#changes-to-starter-tests)) | `DATABASE_URL`, git history (not a shallow clone), npm: it installs its own dependencies |
 
 CI installs from the committed lockfile with `npm ci` (the original repository had none and ran
 `npm install`, so each run could resolve other versions), type-checks every package (the original
@@ -1213,16 +1213,17 @@ F-39 and F-40 in [3.3.3](#offline-first-client-333).
 
 - **Why it is dangerous.** The suite reported access, merge and protocol rules as tested while they
   were broken or unchecked, so a change that broke them stayed green.
-- **Reproduce.** `scripts/audit-starter-tests.sh` breaks the behaviour each test is named after and
-  runs the starter test and its replacement (the table in
-  [Changes to starter tests](#changes-to-starter-tests)).
+- **Reproduce.** `scripts/audit-starter-tests.sh` (results in
+  [Changes to starter tests](#changes-to-starter-tests)). For F-01, F-02, F-03 and F-05 it breaks
+  the behaviour the test is named after and runs the starter test and its replacement. For F-04 it
+  breaks nothing: the starter code itself lacks the behaviour its test names.
 
 | Id | Starter test | Why it could not fail | Fix, and the alternative not taken | Commits |
 |---|---|---|---|---|
 | F-01 | `pull.spec.ts`, "only returns changes for sites the user can access" | The database was mocked so that every query returned no rows: a pull that ignores access entirely still returns nothing (it did: F-07) | Replaced by `pull-access.spec.ts` on Postgres: the initial pull is filtered by site, the incremental one is known defect F-07. A mock that evaluates `WHERE` would re-implement SQL and test the mock | `1bac9ad` |
 | F-02 | `mutators.spec.ts`, "rejects an invalid status transition" | The assertion sat in a `catch` with no assertion count, so an allowed transition passed; the other rejection tests accepted any `MutationRejected`, whatever its code, which clients act on | Every rejection test requires the exact code and an unchanged state; "creates a ticket" checks that one row is written. `expect.assertions(1)` alone would leave codes and state unchecked | `9766718` |
 | F-03 | `client.spec.ts`, "numbers local mutations sequentially" | It counted rows and pending mutations and never read an id (the ids the server deduplicates by): it passed with every id equal to 1; "shows a locally created ticket…" counted rows only | A recording transport captures what is pushed and the test expects ids `[1, 2, 3]`; the optimistic create checks the row's content. Reading the client's private queue would tie the test to its internals, not to what the server receives | `a96263e` |
-| F-04 | `access.spec.ts`, "rejects a mutation on a site the user cannot access" | The fake database answered every query alike and ignored the role; the test only varied the client's `siteId` argument, pinning the trust in it (F-08). The admin branch was untested | Renamed to what they check; the fake answers by table and user; admin and missing-`siteId` cases added. The real rule is tested on Postgres as known defect F-08. Dropping the unit tests for the Postgres ones would leave the `siteId` argument and the admin branch without a test that runs with no database | `9edc67e` |
+| F-04 | `access.spec.ts`, "rejects a mutation on a site the user cannot access" | It only varied the `siteId` argument the client sends, so it stays green while the code lets a technician change another site's ticket by naming their own site (F-08). Its fake database answered every query alike, and the admin branch was untested | Renamed to what they check; the fake answers by table and user; admin and missing-`siteId` cases added. The real rule is tested on Postgres as known defect F-08. Dropping the unit tests for the Postgres ones would leave the `siteId` argument and the admin branch without a test that runs with no database | `9edc67e` |
 | F-05 | `sync.integration.spec.ts`, "sync protocol (integration)" | It ran `SELECT 1`, and was skipped without `DATABASE_URL`, so CI stayed green with no integration test | A harness with a database per test file, the real app and fixtures; characterization tests of authentication, push, pull, duplicates, order, malformed input, atomicity and the GC; `REQUIRE_DB=1` makes a missing database a failure. Failing every run without a database would keep the unit tests from running on a machine that has none | `d9d4b23`, `a9c598a` |
 
 ## Changes to starter tests
@@ -1252,17 +1253,24 @@ F-39 and F-40 in [3.3.3](#offline-first-client-333).
 All files, the starter's included, were formatted with Prettier in a separate formatting-only
 commit (`88d20f0`), listed in `.git-blame-ignore-revs` so that `git blame` skips it.
 
-Evidence, from `scripts/audit-starter-tests.sh` (each starter test runs against code that breaks
-the behaviour its name claims):
+Evidence, from `scripts/audit-starter-tests.sh`. It compares two fixed versions, so it reports the
+same however the code changes later: the starter code (`main`) and `476961a`, the merge of the
+change that rewrote these tests (today's versions of the replacements run with the rest of the test
+suite). For F-01, F-02, F-03 and F-05 a hand-written edit breaks the behaviour the starter test is
+named after: the starter test still passes, while its replacement fails, and passes on the intact
+code. F-04 needs no edit, since the starter code itself breaks what its test names. A result counts
+only if tests ran: Jest also exits with success when a name filter matches no test. Each check needs
+one chosen edit applied to two versions, so a mutation testing tool such as StrykerJS, which
+generates its mutants with its own mutators, is not used here.
 
 | Finding | Sabotage | Starter test, sabotaged | Replacement, sabotaged | Replacement, intact | Verdict |
 |---|---|---|---|---|---|
 | F-01 | pull ignores the site filter | PASS | FAIL | PASS | vacuous starter test |
 | F-02 | invalid status transition is allowed | PASS | FAIL | PASS | vacuous starter test |
 | F-03 | all local mutations get id 1 | PASS | FAIL | PASS | vacuous starter test |
-| F-04 | admins get no implicit access | PASS | FAIL | PASS | vacuous starter test |
 | F-05 | push reports applied mutations as duplicates | PASS | FAIL | PASS | vacuous starter test |
 
+F-04: no sabotage; the starter code lets a technician change another site's ticket (F-08). The starter access.spec: PASS; tests of the stored row that reproduce the defect: 2.
 F-06: the starter client.spec reports 2 todo tests (never executed); the replacement runs 2 known-defect tests that assert the behaviour.
 
 ## Simulation
