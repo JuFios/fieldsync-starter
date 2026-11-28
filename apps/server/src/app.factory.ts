@@ -16,7 +16,9 @@ export function configureApp(app: NestExpressApplication): NestExpressApplicatio
   // Replaces Express's 100 KB default (NestJS FAQ "Raw body", body parser size limit); registered
   // before init, so Nest does not add its default JSON parser.
   app.useBodyParser('json', { limit: config.get('JSON_BODY_LIMIT_BYTES', { infer: true }) });
-  app.enableCors();
+  // `Retry-After` is not a CORS-safelisted response header: without this the web app, on another
+  // origin, cannot read it.
+  app.enableCors({ exposedHeaders: ['Retry-After'] });
   app.enableShutdownHooks();
   if (config.get('API_DOCS_ENABLED', { infer: true })) {
     const document = new DocumentBuilder()

@@ -75,6 +75,20 @@ describeWithDb('protocol version', () => {
     expect(res.status).toBe(200);
   });
 
+  // The web app is on another origin: a browser lets its code read only the response headers the
+  // server exposes (Retry-After is not one of the CORS-safelisted ones), and the client's backoff
+  // waits at least as long as it says.
+  it('lets a web app on another origin read Retry-After', async () => {
+    const port = await listenOnLoopback(ctx.server.app);
+    const res = await fetch(`http://127.0.0.1:${port}/sync/pull?cursor=0`, {
+      headers: { origin: 'http://localhost:3000', [PROTOCOL_HEADER]: String(SUPPORTED_PROTOCOL.max + 1) },
+    });
+    expect({ status: res.status, exposed: res.headers.get('access-control-expose-headers') }).toEqual({
+      status: 503,
+      exposed: 'Retry-After',
+    });
+  });
+
   it('checks the stream too, and opens it for the current version', async () => {
     const tech = await ctx.fixtures.technician(await ctx.fixtures.site());
     const port = await listenOnLoopback(ctx.server.app);
