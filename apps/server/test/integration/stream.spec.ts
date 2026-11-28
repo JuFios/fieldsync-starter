@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Agent, request, type Server } from 'node:http';
+import { Logger } from '@nestjs/common';
 import { PROTOCOL_HEADER, PROTOCOL_VERSION, type PushResponse } from '@fieldsync/sync-core';
 import { StreamService } from '../../src/stream.service';
 import { startApp } from '../support/app';
@@ -60,6 +61,33 @@ describeWithDb('GET /sync/stream', () => {
   });
 
   const auth = () => ({ authorization: `Bearer ${user.token}` });
+
+  describe('a stream the server cannot open', () => {
+    it('ends without sending the error to the client, and logs it', async () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const running = await startApp(database.url);
+      try {
+        const port = await listenOnLoopback(running.app);
+        // The lookup of the user's sites, which runs once the response has started, fails.
+        await pool.query('ALTER TABLE user_sites RENAME TO user_sites_away');
+        let stream: Awaited<ReturnType<typeof openStream>>;
+        try {
+          stream = await openStream(port, auth());
+          await stream.ended;
+        } finally {
+          await pool.query('ALTER TABLE user_sites_away RENAME TO user_sites');
+        }
+        expect({ status: stream.status, text: stream.text().trim() }).toEqual({ status: 200, text: '' });
+        expect(logged).toHaveBeenCalledWith(
+          expect.stringContaining('user_sites'),
+          expect.stringContaining('QueryFailedError'),
+        );
+      } finally {
+        logged.mockRestore();
+        await running.close();
+      }
+    });
+  });
 
   describe('subscribers', () => {
     it('removes the subscriber of a stream whose client goes away', async () => {

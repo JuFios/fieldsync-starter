@@ -1,7 +1,8 @@
-import { Injectable, type MessageEvent, type OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, type MessageEvent, type OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   asyncScheduler,
+  catchError,
   defer,
   EMPTY,
   from,
@@ -56,6 +57,7 @@ interface Subscriber {
  */
 @Injectable()
 export class StreamService implements OnModuleDestroy {
+  private readonly logger = new Logger(StreamService.name);
   private readonly subscribers = new Set<Subscriber>();
   private readonly shutdown = new Subject<void>();
   private closed = false;
@@ -78,6 +80,15 @@ export class StreamService implements OnModuleDestroy {
     if (this.closed) return EMPTY;
     return defer(() => from(client.sites())).pipe(
       switchMap((sites) => this.subscribe(sites, client)),
+      // The Observable must not fail: Nest (10.4) writes its error's message to the client as an
+      // `error` event and logs nothing, and the response has started, so no problem answer can be
+      // sent. The stream ends instead, and the client reconnects with its backoff.
+      catchError((err: unknown) => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        // The message and the stack only: a query error object also carries the query's parameters.
+        this.logger.error(`A notification stream failed: ${error.message}`, error.stack);
+        return EMPTY;
+      }),
       takeUntil(this.shutdown),
     );
   }

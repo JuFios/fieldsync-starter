@@ -1,4 +1,4 @@
-import type { MessageEvent } from '@nestjs/common';
+import { Logger, type MessageEvent } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import type { Subscription } from 'rxjs';
@@ -61,6 +61,21 @@ describe('StreamService', () => {
   });
 
   describe('events', () => {
+    it('ends a stream whose sites cannot be read, without an error for Nest to send, and logs it', async () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const failing = { ...client([]).stream, sites: () => Promise.reject(new Error('relation does not exist')) };
+      const failed: unknown[] = [];
+      let completed = false;
+      streams.events(failing).subscribe({ error: (e) => failed.push(e), complete: () => (completed = true) });
+      await jest.advanceTimersByTimeAsync(0);
+      expect({ completed, failed, count: streams.count }).toEqual({ completed: true, failed: [], count: 0 });
+      expect(logged).toHaveBeenCalledWith(
+        'A notification stream failed: relation does not exist',
+        expect.stringContaining('relation does not exist'),
+      );
+      logged.mockRestore();
+    });
+
     it('starts with a ready event that carries the heartbeat interval, and counts the stream', async () => {
       const l = listen(streams, client([NORTH]).stream);
       await jest.advanceTimersByTimeAsync(0);
