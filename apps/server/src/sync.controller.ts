@@ -112,6 +112,10 @@ export class SyncController {
       'under the new id; copies of handled mutations still get their results. Idempotent.',
   })
   @ApiOkResponse({ type: RetiredClientDto })
+  @ApiBadRequestResponse({
+    description: 'A client id that is not a UUID (code BAD_REQUEST); or an unsupported protocol version, as above.',
+    type: ProblemDto,
+  })
   @ApiNotFoundResponse({ description: 'The id belongs to another user.', type: ProblemDto })
   @ApiServiceUnavailableResponse({
     description: 'A transient database failure (TRANSIENT, Retry-After).',

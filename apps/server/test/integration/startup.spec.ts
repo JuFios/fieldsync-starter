@@ -105,6 +105,18 @@ describeWithDb('server startup', () => {
       }
     });
 
+    it('says what a client id that is not a UUID is answered when it is retired', async () => {
+      const server = await startApp((await database()).url, { API_DOCS_ENABLED: 'true' });
+      try {
+        const res = await new Api(server.app).get<{
+          paths: Record<string, Record<string, { responses: Record<string, { description: string }> }>>;
+        }>('/docs-json');
+        expect(res.body.paths['/sync/clients/{clientId}'].delete.responses['400'].description).toContain('BAD_REQUEST');
+      } finally {
+        await server.close();
+      }
+    });
+
     it('describes the push body and the pull query from their DTOs', async () => {
       const server = await startApp((await database()).url, { API_DOCS_ENABLED: 'true' });
       try {
