@@ -663,15 +663,15 @@ ignored a refused write, had no request timeout, retried every 5 s, and its web 
 queue that survives reloads, tabs that do not break each other's queue, reconnection with
 exponential backoff and jitter, and a status that tells synced, pending, offline and rejected apart.
 
-**Storage.** IndexedDB through `idb` (decision Д-6), one database per user (named after a SHA-256
-of the token), four stores: `meta` (client id, cursor, last and next mutation ids, an update
-refusal, a client id being retired), `base` (the server's rows), `pending` (the queue, keyed by a
-generated position) and `rejections`. Every change of the state is one transaction that awaits only
-its own requests (a transaction commits once it has no pending request: MDN, `idb` "Transaction
-lifetime") and aborts on any failure; queue writes use `durability: 'strict'`, pull pages and
-snapshots, which the server can send again, `relaxed`. A mutation gets its id in the transaction that
-queues it and is shown only once stored: what the user sees survives a reload. `MemoryStorage`
-implements the same interface for tests and the simulation.
+**Storage.** IndexedDB through `idb`, one database per user (named after a SHA-256 of the token),
+four stores: `meta` (client id, cursor, last and next mutation ids, an update refusal, a client id
+being retired), `base` (the server's rows), `pending` (the queue, keyed by a generated position) and
+`rejections`. Every change of the state is one transaction that awaits only its own requests (a
+transaction commits once it has no pending request: MDN, `idb` "Transaction lifetime") and aborts on
+any failure; queue writes use `durability: 'strict'`, pull pages and snapshots, which the server can
+send again, `relaxed`. A mutation gets its id in the transaction that queues it and is shown only
+once stored: what the user sees survives a reload. `MemoryStorage` implements the same interface for
+tests and the simulation.
 
 A write the storage refuses (a full quota) rejects: the client reports `STORAGE` with the status
 `error`, a mutation it cannot store is not shown and its `mutate` rejects, and a transaction is
@@ -698,7 +698,7 @@ signed-out user's database would leave their data in the browser.
 | after a 409, before the old id is retired | the intent is stored; the next sync retires it first |
 | after signing out, before the database is deleted | nobody is signed in: the start deletes every FieldSync database |
 
-**Tabs** (decision Д-7). The tab that holds a Web Lock named after the user's database leads: it
+**Tabs.** The tab that holds a Web Lock named after the user's database leads: it
 pushes, pulls and keeps the stream open; the browser releases the lock when the tab closes or
 crashes and grants it to the next tab in line (checked in Chromium by crashing the leading tab's
 renderer). The others queue their mutations in the database and are told through a
@@ -706,22 +706,33 @@ BroadcastChannel to read what the leader stored; messages carry no data and no t
 checked as untrusted input. The leader reads the queue as stored right before each push, in the
 same step as it takes the batch, so a mutation another tab queued meanwhile never leaves a gap.
 
+A tab that can no longer sync gives up the lead, or its place in line, once the next tab can read
+the reason: it was told to update, or the queue holds a format newer than its own; and the web app
+disposes the client of a tab whose database was closed for a newer app or by the browser. Kept, the
+lead would leave the tab of the updated app a follower that sends nothing, and with a newer format
+in the queue the old leader would sync without pause (`leadership.spec.ts`, e2e "lets the tab of a
+newer local schema sync while the replaced tab is still open").
+
 **Network.** A request is aborted after 30 s (on the client's clock, so tests and the simulation
 control it; `AbortSignal.timeout()` would run on real time) and on `dispose()`, and fails as
 `TIMEOUT`. Without a limit one request that never answered stopped syncing until a reload, since a
 running sync is not started twice (`client.spec.ts`, the simulation's `hang` fault). Retries use
 exponential backoff with full jitter (a random delay below a ceiling that starts at 1 s and doubles
 up to 60 s; AWS Architecture Blog, "Exponential Backoff And Jitter"), never sooner than a
-`Retry-After`, reset after a success; the web app syncs at once on the browser's `online` event. The
-notification stream is read over `fetch` with `eventsource-parser`, so it carries the bearer token
-and the protocol version in headers like every other request (the browser's `EventSource` can send
-neither): on `ready` and on every `poke` the client syncs, a stream silent for three heartbeat
-intervals is reopened, every reopening waits a backoff delay. A sync asked for while one runs makes
-one more run after it, unless that one failed (the retry timer runs the next), and resolves when it
-ends; before, the poke of a change committed after the running sync's pull was dropped
-(`pokes.spec.ts`). A pull stops at the head of its first page, and a snapshot is installed once its
-tail reaches the highest head of its pages (each page says the head it was read at): under writes
-faster than a page per request, neither waits for a page without more changes, which never comes.
+`Retry-After` (which the server exposes to the web app's origin), reset after a success; the web app
+syncs at once on the browser's `online` event. The notification stream is read over `fetch` with
+`eventsource-parser`, so it carries the bearer token and the protocol version in headers like every
+other request (the browser's `EventSource` can send neither): on `ready` and on every `poke` the
+client syncs, a stream silent for three heartbeat intervals is reopened, every reopening waits a
+backoff delay. A stream the server cannot open ends without an error event, which would carry the
+error's text to the client, and the server logs why. A sync asked for while one runs makes one more
+run after it, unless that one failed (the retry timer runs the next), and resolves when it ends;
+before, the poke of a change committed after the running sync's pull was dropped (`pokes.spec.ts`).
+A pull stops at the head of its first page, and a snapshot is installed once its tail reaches the
+highest head of its pages (each page says the head it was read at): under writes faster than a page
+per request, neither waits for a page without more changes, which never comes. For the same reason a
+handled mutation that waits for its change leaves the queue once the cursor reaches the head of a
+read made after the server handled it (`termination.spec.ts`).
 
 **Shutdown.** The server ends every open stream (`onModuleDestroy`, F-35), then stops its HTTP
 server with `stoppable` before Nest closes it and the database pool: no new connections, every
@@ -741,7 +752,10 @@ is used without a grace period: a request that never ends (a body that never arr
 process until the process manager kills it (Docker: after 10 s by default).
 
 **Status.** `indicator`: `synced`, `pending`, `offline`, `rejected` (until the user dismisses the
-rejections), plus `loading`, `error` (the storage refuses writes) and `update-required`.
+rejections), plus `loading`, `error` (the storage refuses writes) and `update-required`. The pages get
+the client once it has loaded the stored state, so signing out knows what is not synced yet; a change
+the browser refuses to store goes back into its form, to be saved again (e2e
+`offline-client.spec.ts`).
 
 **Recovery from a 409.** A 409 `MUTATION_OUT_OF_ORDER` means the server misses mutations of this
 client id that the client no longer has. Renumbering them under the same id could let a late copy of
@@ -789,9 +803,10 @@ stream. A client without the header (every client before versioning) or below th
 `CLIENT_UPDATE_REQUIRED` with `details: { min, max }`; one above the range (updated before the
 server, during a rolling update) gets 503 `SERVER_UPDATE_REQUIRED` with `Retry-After`. Not 426: RFC
 9110 (15.5.22) requires a 426 to name, in an `Upgrade` header, a protocol to switch to on the same
-connection (7.8), which an API version is not; the problem code carries the meaning. A client told to
-update stores it, makes no more requests and shows `update-required`; its queue waits for the updated
-app, which clears the refusal.
+connection (7.8), which an API version is not; the problem code carries the meaning. A client told
+to update (by a request or by the stream, which may be all an idle client makes) stores it, makes no
+more requests, gives up the lead among the tabs and shows `update-required`; its queue waits for the
+updated app, which clears the refusal.
 
 **Local schema.** IndexedDB versions with one upgrade step per version in the upgrade transaction
 (an interrupted upgrade leaves the old version). Step 0 → 1 creates the stores and imports the
@@ -806,21 +821,24 @@ open that raises the version, so with the first local schema it cannot happen ye
 with the release that adds the second.
 
 **Queued mutations.** Each carries the format version of its arguments; a queue written by a newer
-app is kept and not sent (the client says it needs the update). The arguments of the first versioned
-format are what the server accepts (an edit without `base` is a last-writer-wins edit), so no
-upgrader is needed yet.
+app is kept and not sent (the tab says it needs the update, whether it finds such a mutation when it
+starts or while it runs, and hands over to a tab that can send it). The arguments of the first
+versioned format are what the server accepts (an edit without `base` is a last-writer-wins edit), so
+no upgrader is needed yet.
 
 **Options considered.** URI versions (`/v1/sync/...`, the usual default for HTTP APIs and a mode of
 Nest's `enableVersioning`): routes per version, no range, and Nest answers an unknown version with
 404, not "update required". No versions: an outdated client retries forever (the client before the log
 lifecycle change does that on 410).
 
-**Evidence.** `protocol-version.spec.ts` (every route and the stream, below, above, malformed, health
-not checked), `versioning.spec.ts`, `idb-storage.spec.ts` (import, interrupted import, `versionchange`,
+**Evidence.** `protocol-version.spec.ts` (every route and the stream, below, above, malformed,
+health not checked, `Retry-After` readable across origins), `versioning.spec.ts`,
+`leadership.spec.ts`, `idb-storage.spec.ts` (import, interrupted import, `versionchange`,
 `blocked`), e2e "moves the original client's id from localStorage into the database" and "asks to
 close the tab that keeps an older local schema open, and goes on once it is closed" (in Chromium: a
 connection without a `versionchange` handler, and a tab that acts as the next release because the
-test raises the version it asks for by one; the queued change survives the upgrade and is sent once).
+test raises the version it asks for by one; the queued change survives the upgrade and is sent
+once).
 
 **Remaining limitations.** A client before versioning (the original one) cannot understand the
 answer: it shows offline and retries; only a reload with the new app helps. The first local schema
