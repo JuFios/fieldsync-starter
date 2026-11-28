@@ -12,8 +12,6 @@ export const GC_INTERVAL_NAME = 'changelog-gc';
 export interface GcRun {
   /** Change-log entries removed. */
   log: number;
-  /** Tombstones (deleted entities) removed. */
-  tombstones: number;
   /** Mutation results removed. */
   results: number;
   /** The floor of the log after the run (as read when no batch ran): pulls with a cursor below it are reset. */
@@ -27,7 +25,6 @@ export interface GcRun {
 
 interface Batch {
   log: number;
-  tombstones: number;
   results: number;
   floor: number;
   /** More of the log may be collectable: the batch was full and reached no change younger than the cutoff. */
@@ -43,10 +40,14 @@ interface Batch {
  *
  * Each batch is its own short transaction that locks the `log_floor` row with SKIP LOCKED: a second
  * GC, in this process or on another instance, finds it taken and stops instead of waiting or
- * removing the same rows. In the same transaction the batch removes the tombstones and the results
- * of applied mutations whose versions it removes (a client that could still need them is behind the
- * floor and is reset), then raises the floor. Results that have no version (rejections, mutations
- * that changed nothing) are removed by age, after `MUTATION_RESULT_RETENTION_SECONDS`.
+ * removing the same rows. In the same transaction the batch removes the results of applied mutations
+ * whose versions it removes (a client that could still need them is behind the floor and is reset),
+ * then raises the floor. Results that have no version (rejections, mutations that changed nothing)
+ * are removed by age, after `MUTATION_RESULT_RETENTION_SECONDS`.
+ *
+ * Tombstones (deleted entities: key, site and version, no data) are kept for good: a deleted id is
+ * never taken again, so a command a client queued offline for the deleted entity can never reach a
+ * new one created under the same id, however long the client was away.
  */
 @Injectable()
 export class GcService implements OnModuleInit, OnModuleDestroy {
@@ -102,34 +103,27 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
 
   private async run(): Promise<GcRun> {
     // No query once the application shuts down: the pool closes after onModuleDestroy.
-    if (this.stopping) return { log: 0, tombstones: 0, results: 0, floor: 0, skipped: true };
+    if (this.stopping) return { log: 0, results: 0, floor: 0, skipped: true };
     // The cutoffs come from the same clock that stamps created_at, see Clock.
     const now = this.clock.now().getTime();
     const logCutoff = new Date(now - this.config.get('CHANGELOG_RETENTION_SECONDS', { infer: true }) * 1000);
     const resultCutoff = new Date(now - this.config.get('MUTATION_RESULT_RETENTION_SECONDS', { infer: true }) * 1000);
     const size = this.config.get('GC_BATCH_SIZE', { infer: true });
 
-    const total: GcRun = { log: 0, tombstones: 0, results: 0, floor: await this.floor(), skipped: false };
+    const total: GcRun = { log: 0, results: 0, floor: await this.floor(), skipped: false };
     for (;;) {
       if (this.stopping) return total;
       const batch = await this.db.tx((c) => this.batch(c, logCutoff, size));
       if (batch === undefined) return { ...total, skipped: true };
       total.log += batch.log;
-      total.tombstones += batch.tombstones;
       total.results += batch.results;
       total.floor = batch.floor;
       if (!batch.more) break;
     }
-    // What lies below the floor from before this GC ran (a database the original GC pruned).
+    // Results below the floor from before this GC ran (a database the original GC pruned).
     for (;;) {
       if (this.stopping) return total;
-      const removed = await this.belowFloor('tombstones', total.floor, size);
-      total.tombstones += removed;
-      if (removed < size) break;
-    }
-    for (;;) {
-      if (this.stopping) return total;
-      const removed = await this.belowFloor('results', total.floor, size);
+      const removed = await this.appliedResultsBelowFloor(total.floor, size);
       total.results += removed;
       if (removed < size) break;
     }
@@ -139,9 +133,9 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
       total.results += removed;
       if (removed < size) break;
     }
-    if (total.log + total.tombstones + total.results > 0) {
+    if (total.log + total.results > 0) {
       this.logger.log(
-        `Removed ${total.log} change-log entries, ${total.tombstones} tombstones and ${total.results} mutation results; the log now starts after version ${total.floor}`,
+        `Removed ${total.log} change-log entries and ${total.results} mutation results; the log now starts after version ${total.floor}`,
       );
     }
     return total;
@@ -169,15 +163,12 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
       [floor, cutoff, size],
     );
     const stop = rows[0].stop === null ? floor : Number(rows[0].stop);
-    if (stop <= floor) return { log: 0, tombstones: 0, results: 0, floor, more: false };
+    if (stop <= floor) return { log: 0, results: 0, floor, more: false };
 
     // One statement: its data-modifying CTEs all run to completion on one snapshot (PostgreSQL 16, 7.8.4).
-    const removed = await c.query<{ log: string; tombstones: string; results: string }>(
+    const removed = await c.query<{ log: string; results: string }>(
       `WITH log AS (
          DELETE FROM change_log WHERE version > $1 AND version <= $2 RETURNING 1
-       ),
-       tombstones AS (
-         DELETE FROM entities WHERE deleted AND version > $1 AND version <= $2 RETURNING 1
        ),
        results AS (
          DELETE FROM mutation_results WHERE status = 'applied' AND version > $1 AND version <= $2 RETURNING 1
@@ -185,14 +176,12 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
        floor AS (
          UPDATE log_floor SET version = $2 WHERE id = 1
        )
-       SELECT (SELECT count(*) FROM log) AS log, (SELECT count(*) FROM tombstones) AS tombstones,
-              (SELECT count(*) FROM results) AS results`,
+       SELECT (SELECT count(*) FROM log) AS log, (SELECT count(*) FROM results) AS results`,
       [floor, stop],
     );
     const r = removed.rows[0];
     return {
       log: Number(r.log),
-      tombstones: Number(r.tombstones),
       results: Number(r.results),
       floor: stop,
       more: rows[0].full && !rows[0].young,
@@ -205,21 +194,17 @@ export class GcService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Up to `size` tombstones, or results of applied mutations, at or below `floor`: rows a batch never
-   * covered because their changes were gone before the floor existed. Picked by `ctid` like
-   * {@link expiredResults}; through the partial indexes on `version` the check is cheap once none
-   * are left.
+   * Up to `size` results of applied mutations at or below `floor`: rows a batch never covered because
+   * their changes were gone before the floor existed. Picked by `ctid` like {@link expiredResults};
+   * through the partial index on `version` the check is cheap once none are left.
    */
-  private async belowFloor(what: 'tombstones' | 'results', floor: number, size: number): Promise<number> {
-    const sql =
-      what === 'tombstones'
-        ? `DELETE FROM entities WHERE ctid = ANY (ARRAY(
-             SELECT ctid FROM entities WHERE deleted AND version <= $1 LIMIT $2
-           ))`
-        : `DELETE FROM mutation_results WHERE ctid = ANY (ARRAY(
-             SELECT ctid FROM mutation_results WHERE status = 'applied' AND version <= $1 LIMIT $2
-           ))`;
-    const { rowCount } = await this.db.query(sql, [floor, size]);
+  private async appliedResultsBelowFloor(floor: number, size: number): Promise<number> {
+    const { rowCount } = await this.db.query(
+      `DELETE FROM mutation_results WHERE ctid = ANY (ARRAY(
+         SELECT ctid FROM mutation_results WHERE status = 'applied' AND version <= $1 LIMIT $2
+       ))`,
+      [floor, size],
+    );
     return rowCount;
   }
 

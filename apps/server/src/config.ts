@@ -141,6 +141,15 @@ export class EnvironmentVariables {
   @IntegerIn(MAX_PUSH_BODY_BYTES, 67_108_864)
   JSON_BODY_LIMIT_BYTES = 2_097_152;
 
+  /**
+   * Interval of the heartbeat event on an idle notification stream. Clients treat a stream that
+   * stays silent for three intervals as dead and reconnect; a proxy that drops idle connections sees
+   * traffic (the HTML standard suggests a keep-alive "every 15 seconds or so"). At most a minute.
+   */
+  @Expose()
+  @IntegerIn(1_000, 60_000)
+  STREAM_HEARTBEAT_MS = 15_000;
+
   /** Serve the OpenAPI description and Swagger UI at /docs. */
   @Expose()
   @ToBoolean()

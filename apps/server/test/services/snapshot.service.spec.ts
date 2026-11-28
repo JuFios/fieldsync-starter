@@ -48,6 +48,7 @@ describe('SnapshotService', () => {
     const page = await service.page(TECH, { limit: 2 });
     expect(page).toEqual({
       watermark: 10,
+      head: 10,
       rows: [
         { entity: 'ticket', id: 'a', siteId: NORTH, data: { id: 'a', title: 'a' } },
         { entity: 'ticket', id: 'b', siteId: NORTH, data: { id: 'b', title: 'b' } },
@@ -64,7 +65,11 @@ describe('SnapshotService', () => {
 
   it('continues after the key of the previous page, under the watermark of its first page', async () => {
     const after = { siteId: NORTH, entity: 'ticket' as const, id: 'b' };
-    await expect(service.page(TECH, { watermark: 7, after, limit: 2 })).resolves.toMatchObject({ watermark: 7 });
+    // A later page keeps the watermark and carries the head it was read at, here past the watermark.
+    await expect(service.page(TECH, { watermark: 7, after, limit: 2 })).resolves.toMatchObject({
+      watermark: 7,
+      head: 10,
+    });
     expect(entityQuery()?.[1]).toEqual([[NORTH], NORTH, 'ticket', 'b', 3]);
   });
 

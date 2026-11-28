@@ -17,7 +17,14 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
-import { MAX_PUSH_MUTATIONS, REJECTION_CODES } from '@fieldsync/sync-core';
+import {
+  asClientId,
+  asMutationId,
+  MAX_PUSH_MUTATIONS,
+  REJECTION_CODES,
+  type ClientId,
+  type ReceivedMutation,
+} from '@fieldsync/sync-core';
 import { PROBLEM_CODES } from './problem';
 import { IntegerIn } from './validation';
 
@@ -81,6 +88,22 @@ export class PushRequestDto {
   @ValidateNested({ each: true })
   @Type(() => MutationDto)
   mutations!: MutationDto[];
+}
+
+/**
+ * The client id of a validated request. A UUID may arrive in any case (`@IsUUID` accepts it, and it
+ * is the same id, RFC 9562 section 4), so it is lowered before it is taken for a client id.
+ */
+export function clientIdOf(value: string): ClientId {
+  return asClientId(value.toLowerCase());
+}
+
+/** A validated push body as the protocol types name it: its ids go on through their constructors. */
+export function pushRequestOf(body: PushRequestDto): { clientId: ClientId; mutations: ReceivedMutation[] } {
+  return {
+    clientId: clientIdOf(body.clientId),
+    mutations: body.mutations.map(({ id, name, args }) => ({ id: asMutationId(id), name, args })),
+  };
 }
 
 export class PullQueryDto {
@@ -212,6 +235,13 @@ export class PullResponseDto {
 
   @ApiProperty({ description: 'The last mutation id the server handled for clientId (0 without one).' })
   lastMutationId!: number;
+
+  @ApiProperty({
+    description:
+      'Head of the change log in the snapshot this page was read from (lastMutationId is from the same one). ' +
+      'Pull until the cursor reaches the head of the first page, then stop until the next sync.',
+  })
+  head!: number;
 }
 
 export class SnapshotRowDto {
@@ -245,6 +275,13 @@ export class SnapshotPageDto {
   })
   watermark!: number;
 
+  @ApiProperty({
+    description:
+      'Head of the change log when this page was read; no row of the page holds a later change. After pulling ' +
+      'the log up to the highest head of the pages, the rows and the log are one state of the server.',
+  })
+  head!: number;
+
   @ApiProperty({ type: [SnapshotRowDto], description: "Live rows of the user's sites, ordered by siteId, entity, id." })
   rows!: SnapshotRowDto[];
 
@@ -255,6 +292,20 @@ export class SnapshotPageDto {
       'Key of the last row; pass it as afterSite, afterEntity, afterId for the next page. Null on the last page.',
   })
   next!: SnapshotKeyDto | null;
+}
+
+export class ClientParamsDto {
+  @ApiProperty({ description: 'Id of the client installation.', format: 'uuid' })
+  @IsUUID()
+  clientId!: string;
+}
+
+export class RetiredClientDto {
+  @ApiProperty({
+    description:
+      'The last mutation id the server handled under the retired id; final, since nothing more is applied under it.',
+  })
+  lastMutationId!: number;
 }
 
 export class ProblemDto {

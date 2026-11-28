@@ -7,8 +7,10 @@ import type { SimRequest, SimResponse, SimServer } from './types';
  * - `duplicate`: the server handles it twice in a row (a retrying proxy); the client gets the second answer.
  * - `hold-copy`: handled normally, and a copy is kept to be delivered again later (a stale retransmission).
  * - `hang`: the server handles it, but the answer never arrives and the connection never closes.
+ * - `cut-request`: the connection breaks in the middle of the request body; the server gets half of
+ *   the body (a request without a body never reaches it), the client gets no answer.
  */
-export const REQUEST_FAULTS = ['none', 'drop-request', 'duplicate', 'hold-copy', 'hang'] as const;
+export const REQUEST_FAULTS = ['none', 'drop-request', 'duplicate', 'hold-copy', 'hang', 'cut-request'] as const;
 export type RequestFault = (typeof REQUEST_FAULTS)[number];
 
 /**
@@ -184,6 +186,19 @@ export class SimNetwork {
         exchange.response = response;
         exchange.state = effective === 'hang' ? 'hung' : 'answered';
         if (effective === 'hold-copy') this.held.push({ client, exchange: exchange.id, request: exchange.request });
+        break;
+      }
+      case 'cut-request': {
+        const body = exchange.request.body;
+        if (body !== undefined && body.length > 0) {
+          const response = await this.server.send({
+            ...exchange.request,
+            body: body.slice(0, Math.floor(body.length / 2)),
+          });
+          responses.push(answer(response));
+        }
+        this.remove(exchange);
+        exchange.reject(connectionError('connection reset while sending (simulated)'));
         break;
       }
       case 'duplicate': {

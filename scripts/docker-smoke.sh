@@ -100,7 +100,9 @@ for published in "postgres 5432" "server 3001" "web 3000"; do
 done
 
 curl --fail --silent "http://localhost:$SERVER_PORT/health" >/dev/null || fail "server /health did not answer"
-curl --fail --silent -H 'authorization: Bearer tech-a-token' "http://localhost:$SERVER_PORT/me" >/dev/null ||
+# Every sync route checks the protocol version the client speaks (FieldSync-Protocol, see README 3.3.7).
+curl --fail --silent -H 'authorization: Bearer tech-a-token' -H 'FieldSync-Protocol: 1' \
+  "http://localhost:$SERVER_PORT/me" >/dev/null ||
   fail "server /me did not answer for the demo technician"
 curl --fail --silent "http://localhost:$WEB_PORT/" >/dev/null || fail "web did not answer"
 

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { describeWithDb, useIntegration } from '../support/integration';
@@ -19,9 +20,13 @@ describeWithDb('lock order under contention', () => {
     const tickets = Array.from({ length: 3 }, () => randomUUID());
     const parts = tickets.map(() => [randomUUID(), randomUUID()]);
     const setup: Mutation[] = tickets.flatMap((t, i) => [
-      { id: i * 3 + 1, name: 'ticket.create', args: { id: t, siteId: site, title: `T${i}`, description: '' } },
+      {
+        id: asMutationId(i * 3 + 1),
+        name: 'ticket.create',
+        args: { id: t, siteId: site, title: `T${i}`, description: '' },
+      },
       ...parts[i].map((p, j) => ({
-        id: i * 3 + 2 + j,
+        id: asMutationId(i * 3 + 2 + j),
         name: 'part.add' as const,
         args: { id: p, ticketId: t, siteId: site, name: 'Seal', quantity: 50 },
       })),
@@ -40,11 +45,19 @@ describeWithDb('lock order under contention', () => {
         for (let id = 1; id <= ROUNDS; id += 1) {
           const i = (c + id) % tickets.length;
           const kinds: Mutation[] = [
-            { id, name: 'part.adjust', args: { id: parts[i][id % 2], siteId: site, delta: c % 2 ? 1 : -1 } },
-            { id, name: 'ticket.update', args: { id: tickets[i], siteId: site, title: `c${c} r${id}` } },
-            { id, name: 'ticket.delete', args: { id: tickets[i], siteId: site } },
             {
-              id,
+              id: asMutationId(id),
+              name: 'part.adjust',
+              args: { id: parts[i][id % 2], siteId: site, delta: c % 2 ? 1 : -1 },
+            },
+            {
+              id: asMutationId(id),
+              name: 'ticket.update',
+              args: { id: tickets[i], siteId: site, title: `c${c} r${id}` },
+            },
+            { id: asMutationId(id), name: 'ticket.delete', args: { id: tickets[i], siteId: site } },
+            {
+              id: asMutationId(id),
               name: 'part.add',
               args: { id: randomUUID(), ticketId: tickets[i], siteId: site, name: 'X', quantity: 1 },
             },

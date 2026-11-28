@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
+import { PROTOCOL_HEADER, PROTOCOL_VERSION } from '@fieldsync/sync-core';
 import request from 'supertest';
 import { PullService } from '../../src/pull.service';
 import { describeWithDb, useIntegration } from '../support/integration';
@@ -7,7 +8,9 @@ import { describeWithDb, useIntegration } from '../support/integration';
 /** Every error answer is a problem (RFC 9457) with a code, on every route. */
 describeWithDb('error answers', () => {
   const ctx = useIntegration({ JSON_BODY_LIMIT_BYTES: '1048576' });
-  const http = () => request(ctx.server.app.getHttpServer() as Server);
+  // Every request speaks the current protocol, so only the case under test makes it fail.
+  const http = () =>
+    request.agent(ctx.server.app.getHttpServer() as Server).set(PROTOCOL_HEADER, String(PROTOCOL_VERSION));
 
   it('answers a missing token with a 401 problem', async () => {
     const res = await http().get('/sync/pull');

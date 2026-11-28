@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import type { TestUser } from '../support/fixtures';
@@ -19,7 +20,7 @@ describeWithDb('merging concurrent edits of a ticket', () => {
     const tech = await ctx.fixtures.technician(site);
     const id = randomUUID();
     const res = await push(tech, [
-      { id: 1, name: 'ticket.create', args: { id, siteId: site, title: 'Pump', description: 'Leaks' } },
+      { id: asMutationId(1), name: 'ticket.create', args: { id, siteId: site, title: 'Pump', description: 'Leaks' } },
     ]);
     precondition(res.body.results?.[0]?.status === 'applied', `create answered ${JSON.stringify(res.body)}`);
     return { id, site, tech };
@@ -33,7 +34,7 @@ describeWithDb('merging concurrent edits of a ticket', () => {
     return { title: rows[0].data.title, description: rows[0].data.description };
   }
 
-  const update = (args: Record<string, unknown>): Mutation => ({ id: 1, name: 'ticket.update', args });
+  const update = (args: Record<string, unknown>): Mutation => ({ id: asMutationId(1), name: 'ticket.update', args });
 
   it('keeps the edits of different fields made by two clients', async () => {
     const { id, site, tech } = await ticket();

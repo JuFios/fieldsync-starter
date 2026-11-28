@@ -1,10 +1,21 @@
-import { knownDefect, precondition } from '@fieldsync/test-kit';
-import { asVersion, MemoryStorage, SyncClient, type SyncClientOptions, type TimerHandle, type Transport } from '../src';
+import { precondition } from '@fieldsync/test-kit';
+import {
+  asVersion,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MemoryStorage,
+  SyncClient,
+  type SyncClientOptions,
+  type TimerHandle,
+  type Transport,
+  type LastMutationId,
+  asMutationId,
+} from '../src';
 import type { SyncClock } from '../src';
 import type { PullResponse, PushRequest, PushResponse, SnapshotPage } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 /** The snapshot of an empty server. */
-const EMPTY_SNAPSHOT: SnapshotPage = { watermark: asVersion(0), rows: [], next: null };
+const EMPTY_SNAPSHOT: SnapshotPage = { watermark: asVersion(0), head: asVersion(0), rows: [], next: null };
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 
@@ -51,7 +62,13 @@ class RejectingTransport implements Transport {
   }
 
   pull(): Promise<PullResponse> {
-    return Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 0 });
+    return Promise.resolve({
+      changes: [],
+      nextCursor: asVersion(0),
+      hasMore: false,
+      lastMutationId: 0,
+      head: asVersion(0),
+    });
   }
 
   snapshot(): Promise<SnapshotPage> {
@@ -62,11 +79,16 @@ class RejectingTransport implements Transport {
 /** A transport whose requests never complete unless the caller aborts them. */
 class HangingTransport implements Transport {
   pushCalls = 0;
+  /** Requests whose signal was aborted. */
+  aborted = 0;
 
   push(_req: PushRequest, init?: { signal?: AbortSignal }): Promise<PushResponse> {
     this.pushCalls += 1;
     return new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      init?.signal?.addEventListener('abort', () => {
+        this.aborted += 1;
+        reject(new Error('aborted'));
+      });
     });
   }
 
@@ -89,7 +111,7 @@ class HangingTransport implements Transport {
  */
 class FakeServer {
   readonly applied: Array<{ clientId: string; id: number; title: unknown }> = [];
-  private readonly last = new Map<string, number>();
+  private readonly last = new Map<string, LastMutationId>();
 
   transport(): Transport {
     return {
@@ -109,6 +131,7 @@ class FakeServer {
           nextCursor: asVersion(0),
           hasMore: false,
           lastMutationId: this.last.get(clientId) ?? 0,
+          head: asVersion(0),
         }),
       snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
@@ -163,7 +186,7 @@ function newClient(opts: SyncClientOptions): SyncClient {
 }
 
 function makeClient(transport: Transport = new OfflineTransport()): SyncClient {
-  return newClient({ clientId: 'c1', transport, storage: new MemoryStorage() });
+  return newClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage() });
 }
 
 afterEach(() => {
@@ -172,27 +195,27 @@ afterEach(() => {
 });
 
 describe('SyncClient', () => {
-  it('shows a locally created ticket before the server confirms it', () => {
+  it('shows a locally created ticket before the server confirms it', async () => {
     const client = makeClient();
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Leaking valve', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Leaking valve', description: '' });
     const tickets = client.rows('ticket');
     expect(tickets).toHaveLength(1);
     expect(tickets[0]).toMatchObject({ siteId: SITE, title: 'Leaking valve', status: 'open' });
     expect(client.pendingCount).toBe(1);
   });
 
-  it('keeps an optimistic ticket under the id the caller chose', () => {
+  it('keeps an optimistic ticket under the id the caller chose', async () => {
     const client = makeClient();
     const id = '44444444-4444-4444-8444-444444444444';
-    client.mutate('ticket.create', { id, siteId: SITE, title: 'Leaking valve', description: '' });
+    await client.mutate('ticket.create', { id, siteId: SITE, title: 'Leaking valve', description: '' });
     expect(client.rows('ticket').map((t) => t.id)).toEqual([id]);
     expect(client.rows('ticket').map((t) => t.id)).toEqual([id]);
   });
 
-  it('keeps the timestamps of an optimistic ticket stable while it waits for the server', () => {
+  it('keeps the timestamps of an optimistic ticket stable while it waits for the server', async () => {
     jest.useFakeTimers({ now: new Date('2030-01-01T00:00:00.000Z') });
     const client = makeClient();
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Leaking valve', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Leaking valve', description: '' });
     const before = client.rows('ticket')[0];
     jest.setSystemTime(new Date('2030-01-01T00:10:00.000Z'));
     const after = client.rows('ticket')[0];
@@ -200,10 +223,10 @@ describe('SyncClient', () => {
     expect(before?.createdAt).toBe('2030-01-01T00:00:00.000Z');
   });
 
-  it('queues the arguments as they were when mutate was called', () => {
+  it('queues the arguments as they were when mutate was called', async () => {
     const client = makeClient();
     const args = { id: ticketId(), siteId: SITE, title: 'Typed by the user', description: '' };
-    client.mutate('ticket.create', args);
+    await client.mutate('ticket.create', args);
     args.title = 'Changed by the caller afterwards';
     expect(client.rows('ticket').map((t) => t.title)).toEqual(['Typed by the user']);
   });
@@ -212,10 +235,10 @@ describe('SyncClient', () => {
     const server = new FakeServer();
     const client = makeClient(server.transport());
     const unsendable = { id: ticketId(), siteId: SITE, title: 'Big', description: '', estimate: 10n };
-    expect(() => client.mutate('ticket.create', unsendable)).toThrow(TypeError);
+    await expect(client.mutate('ticket.create', unsendable)).rejects.toThrow(TypeError);
     expect(client.pendingCount).toBe(0);
 
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Next', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Next', description: '' });
     await client.sync();
     expect(client.status).toBe('idle');
     expect(server.applied.map((m) => m.title)).toEqual(['Next']);
@@ -224,14 +247,21 @@ describe('SyncClient', () => {
   it('retries and stamps optimistic rows on the clock it is given', async () => {
     const clock = new ManualClock();
     const transport = new OfflineTransport();
-    const client = newClient({ clientId: 'c1', transport, storage: new MemoryStorage(), clock });
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
+    // Half of the first ceiling (1 s): the retry comes after 500 ms.
+    const client = newClient({
+      clientId: CLIENT_ID,
+      transport,
+      storage: new MemoryStorage(),
+      clock,
+      random: () => 0.5,
+    });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
     await client.sync();
     expect(client.rows('ticket')[0]?.createdAt).toBe('2030-01-01T00:00:00.000Z');
     expect(transport.pushedIds).toHaveLength(1);
     expect(clock.pendingTimers).toBe(1);
 
-    await clock.advance(4_999);
+    await clock.advance(499);
     expect(transport.pushedIds).toHaveLength(1);
     await clock.advance(1);
     expect(transport.pushedIds).toHaveLength(2);
@@ -240,12 +270,66 @@ describe('SyncClient', () => {
     expect(clock.pendingTimers).toBe(0);
   });
 
+  it('waits longer after each failure in a row, and starts over after a success', async () => {
+    const clock = new ManualClock();
+    let online = false;
+    const pushes: number[] = [];
+    const transport: Transport = {
+      push: (req) => {
+        pushes.push(clock.now());
+        return online
+          ? Promise.resolve({
+              results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
+              lastMutationId: req.mutations.at(-1)?.id ?? 0,
+            })
+          : Promise.reject(new Error('offline'));
+      },
+      pull: () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(0),
+          hasMore: false,
+          lastMutationId: 0,
+          head: asVersion(0),
+        }),
+      snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
+    };
+    // Just below the ceiling: delays of about 1, 2, 4, 8 s.
+    const client = newClient({
+      clientId: CLIENT_ID,
+      transport,
+      storage: new MemoryStorage(),
+      clock,
+      random: () => 0.999,
+    });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
+    await client.sync();
+    const start = clock.now();
+    // Each step is exactly the next expected delay; a retry then fires at its end.
+    for (const delay of [998, 1, 1997, 1, 3995, 1]) await clock.advance(delay);
+    expect(pushes.map((t) => t - start)).toEqual([0, 999, 999 + 1998, 999 + 1998 + 3996]);
+
+    online = true;
+    await clock.advance(10_000);
+    expect(client.status).toBe('idle');
+    online = false;
+    const before = pushes.length;
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'B', description: '' });
+    await client.sync();
+    expect(pushes).toHaveLength(before + 1);
+    // The first delay again (999 ms), not the fifth.
+    await clock.advance(998);
+    expect(pushes).toHaveLength(before + 1);
+    await clock.advance(1);
+    expect(pushes).toHaveLength(before + 2);
+  });
+
   it('numbers local mutations sequentially', async () => {
     const transport = new OfflineTransport();
     const client = makeClient(transport);
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'B', description: '' });
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'C', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'A', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'B', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'C', description: '' });
     await client.sync(); // the attempt started by the first mutation
     await client.sync(); // a fresh attempt sends the whole queue
     expect(transport.pushedIds.at(-1)).toEqual([1, 2, 3]);
@@ -269,13 +353,20 @@ describe('SyncClient', () => {
             message: 'Status is now "done"',
             details,
           })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
-      pull: () => Promise.resolve({ changes: [], nextCursor: asVersion(0), hasMore: false, lastMutationId: 1 }),
+      pull: () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(0),
+          hasMore: false,
+          lastMutationId: asMutationId(1),
+          head: asVersion(0),
+        }),
       snapshot: () => Promise.resolve(EMPTY_SNAPSHOT),
     };
     const client = makeClient(transport);
-    client.mutate('ticket.setStatus', { id: SITE, siteId: SITE, from: 'open', to: 'in_progress' });
+    await client.mutate('ticket.setStatus', { id: SITE, siteId: SITE, from: 'open', to: 'in_progress' });
     await client.sync();
     expect(client.rejections).toEqual([
       {
@@ -291,63 +382,59 @@ describe('SyncClient', () => {
   it('never reuses a mutation id after the server rejects a mutation', async () => {
     const transport = new RejectingTransport();
     const client = makeClient(transport);
-    client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
+    await client.mutate('ticket.update', { id: SITE, siteId: SITE, title: 'gone', description: '' });
     await client.sync();
-    client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'next', description: '' });
     await client.sync();
     const [first, second] = transport.pushedIds;
     precondition(first?.length === 1 && first[0] === 1, `first push sent ids ${JSON.stringify(first)}`);
     expect(second).toEqual([2]);
   });
 
-  knownDefect(
-    {
-      id: 'F-13',
-      owner: 'offline-client',
-      reason: 'requests have no timeout, so a hung request blocks syncing forever',
-    },
-    'gives up on a request that never answers and retries',
-    async () => {
-      jest.useFakeTimers();
-      const transport = new HangingTransport();
-      const client = makeClient(transport);
-      client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
-      precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
-      await jest.advanceTimersByTimeAsync(5 * 60_000);
-      expect(client.status).not.toBe('syncing');
-      expect(transport.pushCalls).toBeGreaterThan(1);
-    },
-  );
+  it('gives up on a request that never answers and retries', async () => {
+    const clock = new ManualClock();
+    const transport = new HangingTransport();
+    const client = newClient({ clientId: CLIENT_ID, transport, storage: new MemoryStorage(), clock });
+    await client.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Stuck', description: '' });
+    precondition(client.status === 'syncing', `status is ${client.status} right after mutate`);
+    // The push starts once the client read its queue; its timeout runs from then.
+    await new Promise((resolve) => setImmediate(resolve));
 
-  knownDefect(
-    { id: 'F-10', owner: 'offline-client', reason: 'the pending queue is never persisted' },
-    'keeps unsynced mutations across a reload',
-    async () => {
-      const storage = new MemoryStorage();
-      const before = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
-      before.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Written offline', description: '' });
-      await before.sync();
-      before.dispose(); // the page goes away
+    await clock.advance(DEFAULT_REQUEST_TIMEOUT_MS - 1);
+    expect(client.status).toBe('syncing');
+    await clock.advance(1);
+    expect({ status: client.status, error: client.syncError }).toEqual({
+      status: 'offline',
+      error: { status: 0, code: 'TIMEOUT' },
+    });
+    expect(transport.aborted).toBe(1);
 
-      const after = newClient({ clientId: 'c1', transport: new OfflineTransport(), storage });
-      expect(after.pendingCount).toBe(1);
-      expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
-    },
-  );
+    await clock.advance(60_000);
+    expect(transport.pushCalls).toBeGreaterThan(1);
+  });
 
-  knownDefect(
-    { id: 'F-11', owner: 'offline-client', reason: 'tabs sharing one clientId allocate the same mutation ids' },
-    'does not lose mutations when two tabs share one clientId',
-    async () => {
-      const server = new FakeServer();
-      const storage = new MemoryStorage();
-      const tabA = newClient({ clientId: 'c1', transport: server.transport(), storage });
-      const tabB = newClient({ clientId: 'c1', transport: server.transport(), storage });
-      tabA.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab A', description: '' });
-      await tabA.sync();
-      tabB.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab B', description: '' });
-      await tabB.sync();
-      expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
-    },
-  );
+  it('keeps unsynced mutations across a reload', async () => {
+    const storage = new MemoryStorage();
+    const before = newClient({ clientId: CLIENT_ID, transport: new OfflineTransport(), storage });
+    await before.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'Written offline', description: '' });
+    await before.sync();
+    before.dispose(); // the page goes away
+
+    const after = newClient({ clientId: CLIENT_ID, transport: new OfflineTransport(), storage });
+    await after.ready;
+    expect(after.pendingCount).toBe(1);
+    expect(after.rows('ticket').map((t) => t.title)).toEqual(['Written offline']);
+  });
+
+  it('does not lose mutations when two tabs share one clientId', async () => {
+    const server = new FakeServer();
+    const storage = new MemoryStorage();
+    const tabA = newClient({ clientId: CLIENT_ID, transport: server.transport(), storage });
+    const tabB = newClient({ clientId: CLIENT_ID, transport: server.transport(), storage });
+    await tabA.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab A', description: '' });
+    await tabA.sync();
+    await tabB.mutate('ticket.create', { id: ticketId(), siteId: SITE, title: 'From tab B', description: '' });
+    await tabB.sync();
+    expect(server.applied.map((m) => m.title).sort()).toEqual(['From tab A', 'From tab B']);
+  });
 });

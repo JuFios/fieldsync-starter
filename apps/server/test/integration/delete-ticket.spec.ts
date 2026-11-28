@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PullResponse, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { describeWithDb, useIntegration } from '../support/integration';
@@ -14,9 +15,13 @@ describeWithDb('deleting a ticket', () => {
     const parts = [randomUUID(), randomUUID()];
     const clientId = randomUUID();
     const mutations: Mutation[] = [
-      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'Pump', description: '' } },
+      {
+        id: asMutationId(1),
+        name: 'ticket.create',
+        args: { id: ticket, siteId: site, title: 'Pump', description: '' },
+      },
       ...parts.map((id, i) => ({
-        id: i + 2,
+        id: asMutationId(i + 2),
         name: 'part.add' as const,
         args: { id, ticketId: ticket, siteId: site, name: 'Seal', quantity: 1 },
       })),
@@ -102,13 +107,17 @@ describeWithDb('deleting a ticket', () => {
     const part = randomUUID();
     const clientId = randomUUID();
     const mutations: Mutation[] = [
-      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'Pump', description: '' } },
       {
-        id: 2,
+        id: asMutationId(1),
+        name: 'ticket.create',
+        args: { id: ticket, siteId: site, title: 'Pump', description: '' },
+      },
+      {
+        id: asMutationId(2),
         name: 'part.add',
         args: { id: part, ticketId: ticket.toUpperCase(), siteId: site, name: 'Seal', quantity: 1 },
       },
-      { id: 3, name: 'ticket.delete', args: { id: ticket, siteId: site } },
+      { id: asMutationId(3), name: 'ticket.delete', args: { id: ticket, siteId: site } },
     ];
     const res = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, tech.token);
     expect(res.body.results.map((r) => (r.status === 'rejected' ? r.code : r.status))).toEqual([

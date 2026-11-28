@@ -9,7 +9,9 @@ import { typeOrmOptions } from './database/typeorm';
 import { Db } from './db';
 import { GcService } from './gc.service';
 import { HealthController } from './health.controller';
+import { HttpShutdownService } from './http-shutdown.service';
 import { ProblemFilter } from './problem';
+import { ProtocolGuard } from './protocol.guard';
 import { PullService } from './pull.service';
 import { PushService } from './push.service';
 import { SnapshotService } from './snapshot.service';
@@ -26,7 +28,11 @@ import { SyncController } from './sync.controller';
     SnapshotService,
     StreamService,
     GcService,
-    // Every route requires a token unless it is marked @Public() (NestJS authentication docs).
+    HttpShutdownService,
+    // Global guards run in this order: the protocol version first, so an outdated client is told to
+    // update whatever else is wrong; then the token, required unless a route is @Public() (NestJS
+    // authentication docs).
+    { provide: APP_GUARD, useClass: ProtocolGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
     // Global validation, registered in the module so in-process test applications get it too. It
     // checks DTO-typed parameters; `whitelist` strips properties a DTO does not declare.

@@ -1,7 +1,11 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
+  asLastMutationId,
   asVersion,
   MutationRejected,
+  type ClientId,
+  type LastMutationId,
+  type MutationId,
   type MutationResult,
   type PushResponse,
   type ReceivedMutation,
@@ -30,7 +34,7 @@ interface StoredResult {
 }
 
 /** The result the client receives for a mutation the mutator refused. */
-function rejected(id: number, rejection: Rejection): MutationResult {
+function rejected(id: MutationId, rejection: Rejection): MutationResult {
   return {
     id,
     status: 'rejected',
@@ -55,7 +59,7 @@ export class PushService {
    * Effectively once: a mutation is applied at most once however many copies of it arrive, at once
    * or later, and every copy is answered with the original outcome (see {@link applyOne}).
    */
-  async push(user: AuthUser, req: { clientId: string; mutations: ReceivedMutation[] }): Promise<PushResponse> {
+  async push(user: AuthUser, req: { clientId: ClientId; mutations: ReceivedMutation[] }): Promise<PushResponse> {
     const results: MutationResult[] = [];
     for (const m of req.mutations) {
       // A transient failure is a 503: this mutation was not applied, the ones before it were, and
@@ -71,12 +75,35 @@ export class PushService {
     return { results, lastMutationId: await this.lastMutationId(req.clientId) };
   }
 
-  async lastMutationId(clientId: string): Promise<number> {
+  /**
+   * Retires a client id of this user: from now on no new mutation is applied under it (copies of
+   * handled ones are still answered). Idempotent; an id nobody used yet is recorded as retired, so it
+   * can never be used. Takes the client's row lock like a push, so a push in progress finishes first.
+   * Returns the last mutation id the server handled under it, which no later request can change.
+   * An id another user owns is answered 404, as if it did not exist.
+   */
+  async retire(user: AuthUser, clientId: ClientId): Promise<{ lastMutationId: LastMutationId }> {
+    const { rows } = await this.db
+      .query<{ last_mutation_id: string }>(
+        `INSERT INTO clients (client_id, user_id, last_mutation_id, retired_at) VALUES ($1, $2, 0, $3)
+         ON CONFLICT (client_id) DO UPDATE SET retired_at = coalesce(clients.retired_at, EXCLUDED.retired_at)
+          WHERE clients.user_id = EXCLUDED.user_id
+         RETURNING last_mutation_id`,
+        [clientId, user.id, this.clock.now()],
+      )
+      .catch((err: unknown) => {
+        throw isTransient(err) ? retryLater() : err;
+      });
+    if (rows.length === 0) throw new ProblemException(HttpStatus.NOT_FOUND, 'NOT_FOUND', 'No such client');
+    return { lastMutationId: asLastMutationId(Number(rows[0].last_mutation_id)) };
+  }
+
+  async lastMutationId(clientId: ClientId): Promise<LastMutationId> {
     const { rows } = await this.db.query<{ last_mutation_id: string }>(
       `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
       [clientId],
     );
-    return rows.length ? Number(rows[0].last_mutation_id) : 0;
+    return rows.length ? asLastMutationId(Number(rows[0].last_mutation_id)) : 0;
   }
 
   /**
@@ -86,14 +113,21 @@ export class PushService {
    * savepoint, taken after the lock so that rolling back to it keeps the lock (PostgreSQL 13.3.2).
    * Locks are always taken in this order: client row, entity rows by key, `log_head` last.
    */
-  private async applyOne(c: TxSql, user: AuthUser, clientId: string, m: ReceivedMutation): Promise<Outcome> {
-    const { last, ownerId } = await this.lockClient(c, clientId, user.id);
+  private async applyOne(c: TxSql, user: AuthUser, clientId: ClientId, m: ReceivedMutation): Promise<Outcome> {
+    const { last, ownerId, retired } = await this.lockClient(c, clientId, user.id);
     if (m.id <= last) {
       // Only the client's owner learns how its mutations ended (their rejections carry stored data).
       // That another user can push under this client id at all is a known defect (F-33).
       const result: MutationResult =
         ownerId === user.id ? await this.previousResult(c, clientId, m.id) : { id: m.id, status: 'duplicate' };
       return { result, touched: [] };
+    }
+    if (retired) {
+      // Its owner continues under another id: nothing new is applied under this one, so a late copy
+      // of an old request cannot apply a mutation the client has since sent again under the new id.
+      throw new ProblemException(HttpStatus.GONE, 'CLIENT_RETIRED', `Client ${clientId} was retired`, {
+        lastMutationId: last,
+      });
     }
     if (m.id !== last + 1) {
       // A gap: the mutations between were never received. The client cannot fill it (it would have
@@ -144,18 +178,26 @@ export class PushService {
     return { result, touched: [...new Set(entries.map((e) => e.siteId))] };
   }
 
-  /** Locks the client's row, creating it on its first push; returns its last applied id and its owner. */
-  private async lockClient(c: TxSql, clientId: string, userId: string): Promise<{ last: number; ownerId: string }> {
+  /**
+   * Locks the client's row, creating it on its first push; returns its last applied id, its owner and
+   * whether it was retired.
+   */
+  private async lockClient(
+    c: TxSql,
+    clientId: ClientId,
+    userId: string,
+  ): Promise<{ last: LastMutationId; ownerId: string; retired: boolean }> {
     await c.query(
       `INSERT INTO clients (client_id, user_id, last_mutation_id) VALUES ($1, $2, 0)
        ON CONFLICT (client_id) DO NOTHING`,
       [clientId, userId],
     );
-    const { rows } = await c.query<{ last_mutation_id: string; user_id: string }>(
-      `SELECT last_mutation_id, user_id FROM clients WHERE client_id = $1 FOR UPDATE`,
+    const { rows } = await c.query<{ last_mutation_id: string; user_id: string; retired: boolean }>(
+      `SELECT last_mutation_id, user_id, retired_at IS NOT NULL AS retired FROM clients WHERE client_id = $1 FOR UPDATE`,
       [clientId],
     );
-    return { last: Number(rows[0].last_mutation_id), ownerId: rows[0].user_id };
+    const last = asLastMutationId(Number(rows[0].last_mutation_id));
+    return { last, ownerId: rows[0].user_id, retired: rows[0].retired };
   }
 
   /**
@@ -163,7 +205,7 @@ export class PushService {
    * it was applied. Results older than the change-log retention are gone; such a copy is answered as
    * a duplicate (its client has to reload its state anyway).
    */
-  private async previousResult(c: TxSql, clientId: string, id: number): Promise<MutationResult> {
+  private async previousResult(c: TxSql, clientId: ClientId, id: MutationId): Promise<MutationResult> {
     const { rows } = await c.query<StoredResult>(
       `SELECT status, code, message, details, version FROM mutation_results WHERE client_id = $1 AND mutation_id = $2`,
       [clientId, id],

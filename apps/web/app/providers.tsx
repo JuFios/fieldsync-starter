@@ -4,51 +4,154 @@
 // Next.js 14 supports by default (Safari 12+, Chrome 64+) may lack. Next.js does not polyfill it, so
 // the specific polyfill is imported here, before the sync client is created.
 import 'core-js/stable/string/is-well-formed';
-import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { HttpTransport, LocalStorageSyncStorage, SyncClient } from '@fieldsync/sync-core';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
+import {
+  BrowserTabs,
+  databaseNameFor,
+  deleteSyncDatabases,
+  HttpTransport,
+  IdbSyncStorage,
+  localStorageLegacy,
+  SyncClient,
+  type StorageClosedReason,
+} from '@fieldsync/sync-core';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+const TOKEN_KEY = 'fs_token';
 
 const ClientContext = createContext<SyncClient | null>(null);
 
-function getClientId(): string {
-  let id = localStorage.getItem('fs_client_id');
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem('fs_client_id', id);
-  }
-  return id;
-}
+/**
+ * Why the app cannot work right now, other than being signed out. `blocked` passes: the other tab
+ * keeps an older local schema open, and the app goes on once it is closed.
+ */
+type Problem = 'storage' | 'superseded' | 'blocked';
 
 export function Providers({ children }: { children: ReactNode }) {
   const [client, setClient] = useState<SyncClient | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  // Undefined until localStorage was read (it exists only in the browser).
+  const [token, setToken] = useState<string | null | undefined>(undefined);
+  const [problem, setProblem] = useState<Problem | null>(null);
 
   useEffect(() => {
-    setToken(localStorage.getItem('fs_token'));
+    setToken(localStorage.getItem(TOKEN_KEY));
   }, []);
 
   useEffect(() => {
-    if (!token) return;
-    const c = new SyncClient({
-      clientId: getClientId(),
-      transport: new HttpTransport(API, token),
-      storage: new LocalStorageSyncStorage('fs_state'),
-    });
-    setClient(c);
-    void c.sync();
-    const es = new EventSource(`${API}/sync/stream?token=${encodeURIComponent(token)}`);
-    es.addEventListener('poke', () => void c.sync());
+    if (token === undefined) return;
+    if (token === null) {
+      // Nobody is signed in: no user's data may stay in the browser. This also finishes a sign-out
+      // that a closed page interrupted after removing the token.
+      void deleteSyncDatabases().catch(() => setProblem('storage'));
+      return;
+    }
+    // Everything this effect starts is stopped by its cleanup: on unmount, and before it runs again
+    // for another token. Opening is asynchronous, so a cleanup that comes first is remembered and the
+    // late result closed at once.
+    let stopped = false;
+    let opened: { client: SyncClient; storage: IdbSyncStorage } | undefined;
+    const unblocked = () => setProblem((current) => (current === 'blocked' ? null : current));
+    const onOnline = () => void opened?.client.sync();
+    const onClosed = (reason: StorageClosedReason) => {
+      if (stopped) return;
+      if (reason === 'deleted') {
+        // Signed out in another tab: that tab removed the token and deletes the database.
+        setToken(null);
+      } else {
+        // Without its storage the client can do nothing, but it would keep leading the user's tabs
+        // (its lock and its stream): disposed, it lets a tab that can sync take over.
+        opened?.client.dispose();
+        setProblem(reason === 'superseded' ? 'superseded' : 'storage');
+      }
+    };
+    void (async () => {
+      try {
+        // One database per user (F-40). The original client's id and last mutation id move into it
+        // from localStorage, where the token signed in now was stored next to them.
+        const name = await databaseNameFor(token);
+        const storage = await IdbSyncStorage.open(name, {
+          legacy: localStorageLegacy(localStorage),
+          onClosed,
+          onBlocked: () => {
+            if (!stopped) setProblem('blocked');
+          },
+        });
+        // The open is through; a newer app may have closed the database again meanwhile.
+        unblocked();
+        if (stopped) {
+          storage.close();
+          return;
+        }
+        // Ask the browser not to evict the queue under storage pressure (it decides; Firefox asks
+        // the user). Best-effort storage keeps working without it.
+        void navigator.storage?.persist?.().catch(() => false);
+        // The user's tabs share the database; the one that leads talks to the server and keeps the
+        // notification stream open (with the token in a header), the others follow it.
+        const c = new SyncClient({ transport: new HttpTransport(API, token), storage, tabs: new BrowserTabs(name) });
+        opened = { client: c, storage };
+        // The pages (and sign-out, which must know what is not synced) get the client once it has
+        // loaded the stored state; until then they would show an empty queue.
+        void c.ready.then(() => {
+          if (!stopped) setClient(c);
+        });
+        void c.sync();
+        // Back online: sync now instead of waiting for the backoff delay.
+        window.addEventListener('online', onOnline);
+      } catch {
+        // IndexedDB unavailable (some private modes) or refused: the app cannot keep any work.
+        if (!stopped) setProblem('storage');
+      }
+    })();
+    return () => {
+      stopped = true;
+      unblocked();
+      window.removeEventListener('online', onOnline);
+      setClient(null);
+      if (opened) {
+        opened.client.dispose();
+        opened.storage.close();
+      }
+    };
   }, [token]);
 
-  if (!token) {
+  const signOut = useCallback(() => {
+    const unsynced = client?.pendingCount ?? 0;
+    if (unsynced > 0 && !window.confirm(`${unsynced} changes are not synced yet and will be lost. Sign out?`)) {
+      return;
+    }
+    // The token goes first: a page closed before the deletion finishes deletes the data on its next
+    // start, since nobody is signed in then. The effect's cleanup closes this tab's database; other
+    // tabs close theirs when the deletion asks them to.
+    localStorage.removeItem(TOKEN_KEY);
+    setToken(null);
+  }, [client]);
+
+  if (problem === 'storage') {
+    return <p role="alert">This browser does not let FieldSync keep data on this device, so it cannot work offline.</p>;
+  }
+  if (problem === 'blocked') {
+    return <p role="alert">FieldSync is open in another tab with an older version. Close it to continue.</p>;
+  }
+  if (problem === 'superseded') {
+    return <p role="alert">A newer version of FieldSync is open in another tab. Reload this page to continue.</p>;
+  }
+  if (token === undefined) return null;
+  if (token === null) {
     return (
       <form
         onSubmit={(e) => {
           e.preventDefault();
           const value = new FormData(e.currentTarget).get('token');
           if (typeof value === 'string' && value) {
-            localStorage.setItem('fs_token', value);
+            localStorage.setItem(TOKEN_KEY, value);
             setToken(value);
           }
         }}
@@ -61,7 +164,16 @@ export function Providers({ children }: { children: ReactNode }) {
     );
   }
 
-  return <ClientContext.Provider value={client}>{children}</ClientContext.Provider>;
+  return (
+    <ClientContext.Provider value={client}>
+      <div style={{ textAlign: 'right' }}>
+        <button type="button" onClick={signOut} disabled={client === null}>
+          Sign out
+        </button>
+      </div>
+      {children}
+    </ClientContext.Provider>
+  );
 }
 
 export function useSyncClient(): SyncClient | null {

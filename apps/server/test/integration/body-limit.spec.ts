@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { describeWithDb, useIntegration } from '../support/integration';
 
@@ -19,7 +20,7 @@ describeWithDb('push body size', () => {
     // (100 of them, as many as one push may carry, take about 1 MB).
     while (mutations.length < MAX_PUSH_MUTATIONS && size() < MAX_PUSH_BODY_BYTES - 20_000) {
       mutations.push({
-        id: mutations.length + 1,
+        id: asMutationId(mutations.length + 1),
         name: 'ticket.create',
         args: { id: randomUUID(), siteId: site, title: 'T', description: 'é'.repeat(5000) },
       });
@@ -40,7 +41,7 @@ describeWithDb('push body size', () => {
       const id = randomUUID();
       const mutations: Mutation[] = [
         {
-          id: 1,
+          id: asMutationId(1),
           name: 'ticket.create',
           args: { id, siteId: site, title: 'T', description: 'x'.repeat(MAX_PUSH_BODY_BYTES) },
         },

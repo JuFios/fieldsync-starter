@@ -1,10 +1,12 @@
-import { Body, Controller, Get, Header, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, Param, Post, Query, Req, Sse, type MessageEvent } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiGoneResponse,
+  ApiNotFoundResponse,
+  ApiHeader,
   ApiInternalServerErrorResponse,
   ApiOkResponse,
   ApiOperation,
@@ -14,26 +16,46 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import type { Response } from 'express';
+import type { Observable } from 'rxjs';
+import { PROTOCOL_HEADER } from '@fieldsync/sync-core';
 import { accessibleSites } from './access';
 import type { AuthedRequest } from './auth';
 import { Db } from './db';
 import { PullService } from './pull.service';
+import { SUPPORTED_PROTOCOL } from './protocol.guard';
 import { PushService } from './push.service';
 import { SnapshotService } from './snapshot.service';
 import { StreamService } from './stream.service';
 import {
+  clientIdOf,
+  ClientParamsDto,
   ProblemDto,
   PullQueryDto,
   PullResponseDto,
   PushRequestDto,
   PushResponseDto,
+  pushRequestOf,
+  RetiredClientDto,
   SnapshotPageDto,
   SnapshotQueryDto,
 } from './sync.dto';
 
 @ApiTags('sync')
 @ApiBearerAuth()
+@ApiHeader({
+  name: PROTOCOL_HEADER,
+  required: true,
+  description: `Version of the sync protocol the client speaks (this server: ${SUPPORTED_PROTOCOL.min} to ${SUPPORTED_PROTOCOL.max}).`,
+})
+@ApiBadRequestResponse({
+  description:
+    'A client without a supported protocol version (CLIENT_UPDATE_REQUIRED, details.min/max): update the app.',
+  type: ProblemDto,
+})
+@ApiServiceUnavailableResponse({
+  description: 'A client newer than the server (SERVER_UPDATE_REQUIRED, Retry-After): retry later.',
+  type: ProblemDto,
+})
 @ApiUnauthorizedResponse({ description: 'Missing or unknown bearer token.', type: ProblemDto })
 @ApiInternalServerErrorResponse({ description: 'An unexpected failure (code INTERNAL).', type: ProblemDto })
 @Controller()
@@ -68,13 +90,40 @@ export class SyncController {
     description: 'A mutation id skips ahead of the last applied one (MUTATION_OUT_OF_ORDER, details.expected).',
     type: ProblemDto,
   })
+  @ApiGoneResponse({
+    description: 'The client id was retired (CLIENT_RETIRED, details.lastMutationId): continue under the new id.',
+    type: ProblemDto,
+  })
   @ApiPayloadTooLargeResponse({ description: 'The body exceeds JSON_BODY_LIMIT_BYTES.', type: ProblemDto })
   @ApiServiceUnavailableResponse({
     description: 'A transient database failure (TRANSIENT, Retry-After); the mutations before it were applied.',
     type: ProblemDto,
   })
   push(@Req() req: AuthedRequest, @Body() body: PushRequestDto) {
-    return this.pushService.push(req.user, body);
+    return this.pushService.push(req.user, pushRequestOf(body));
+  }
+
+  @Delete('sync/clients/:clientId')
+  @ApiOperation({
+    summary: 'Retire a client id of the user',
+    description:
+      'After a 409 MUTATION_OUT_OF_ORDER the client continues under a new id. Once retired, an id applies no new ' +
+      'mutation (410 CLIENT_RETIRED), so a late copy of an old request cannot apply what the client sends again ' +
+      'under the new id; copies of handled mutations still get their results. Idempotent.',
+  })
+  @ApiOkResponse({ type: RetiredClientDto })
+  @ApiBadRequestResponse({
+    description: 'A client id that is not a UUID (code BAD_REQUEST); or an unsupported protocol version, as above.',
+    type: ProblemDto,
+  })
+  @ApiNotFoundResponse({ description: 'The id belongs to another user.', type: ProblemDto })
+  @ApiServiceUnavailableResponse({
+    description: 'A transient database failure (TRANSIENT, Retry-After).',
+    type: ProblemDto,
+  })
+  @Header('Cache-Control', 'no-store')
+  retire(@Req() req: AuthedRequest, @Param() params: ClientParamsDto) {
+    return this.pushService.retire(req.user, clientIdOf(params.clientId));
   }
 
   @Get('sync/pull')
@@ -96,7 +145,8 @@ export class SyncController {
   // Sync answers are the user's data and change with every write: never stored by a cache.
   @Header('Cache-Control', 'no-store')
   pull(@Req() req: AuthedRequest, @Query() query: PullQueryDto) {
-    return this.pullService.pull(req.user, query.cursor, query.limit, query.clientId);
+    const clientId = query.clientId === undefined ? undefined : clientIdOf(query.clientId);
+    return this.pullService.pull(req.user, query.cursor, query.limit, clientId);
   }
 
   @Get('sync/snapshot')
@@ -129,15 +179,24 @@ export class SyncController {
     return this.snapshotService.page(req.user, { watermark: query.watermark, after, limit: query.limit });
   }
 
-  @Get('sync/stream')
+  @Sse('sync/stream')
   @ApiOperation({
     summary: 'Server-sent events: a `poke` event whenever an accessible site changes',
-    description: 'The client pulls after a poke.',
+    description:
+      'The first event is `ready` with `{ heartbeatMs }`; then `poke` (merged within 250 ms) whenever a site of the ' +
+      'user changes, and `heartbeat` every heartbeatMs. The client pulls after `ready` and after every poke, and ' +
+      'reconnects when the stream stays silent for three heartbeat intervals.',
   })
   @ApiProduces('text/event-stream')
   @ApiOkResponse({ description: 'An open event stream.' })
-  async stream(@Req() req: AuthedRequest, @Res() res: Response) {
-    const sites = await accessibleSites(this.db, req.user);
-    this.streams.add(sites, res);
+  // Synchronous on purpose: Nest 10 starts listening for the connection's close only once the handler
+  // has returned the Observable, so a client that left while an async handler awaited would leave
+  // its subscription behind. The sites are looked up inside the Observable instead.
+  stream(@Req() req: AuthedRequest): Observable<MessageEvent> {
+    return this.streams.events({
+      sites: () => accessibleSites(this.db, req.user),
+      backedUp: () => req.socket.writableNeedDrain,
+      drop: () => req.socket.destroy(),
+    });
   }
 }

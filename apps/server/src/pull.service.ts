@@ -1,5 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { asVersion, type Change, type PullResponse } from '@fieldsync/sync-core';
+import {
+  asLastMutationId,
+  asVersion,
+  type Change,
+  type ClientId,
+  type LastMutationId,
+  type PullResponse,
+} from '@fieldsync/sync-core';
 import { accessibleSites } from './access';
 import type { AuthUser } from './auth';
 import { Db, type TxSql } from './db';
@@ -25,12 +32,14 @@ export class PullService {
    * snapshot. Versions become visible in commit order (see `finishMutation`), so the snapshot holds
    * every version up to its head and no later one. When the page is not full the cursor moves to that
    * head, past changes the user does not see, so a client with nothing new does not read the same
-   * rows again; `hasMore` is true exactly when changes after the page exist in the snapshot.
+   * rows again; `hasMore` is true exactly when changes after the page exist in the snapshot. `head`
+   * is that snapshot's head: a client that pulls until its cursor reaches the head of its first page
+   * stops after a bounded number of pages however fast others write.
    *
    * Throws 410 RESET_REQUIRED when the cursor is below the floor of the log: the changes after it are
    * partly collected, so the client has to reload its state from a snapshot (see SnapshotService).
    */
-  pull(user: AuthUser, cursor: number, limit: number, clientId?: string): Promise<PullResponse> {
+  pull(user: AuthUser, cursor: number, limit: number, clientId?: ClientId): Promise<PullResponse> {
     return this.db
       .tx((c) => this.page(c, user, cursor, limit, clientId), { isolation: 'REPEATABLE READ', readOnly: true })
       .catch((err: unknown) => {
@@ -43,7 +52,7 @@ export class PullService {
     user: AuthUser,
     cursor: number,
     limit: number,
-    clientId?: string,
+    clientId?: ClientId,
   ): Promise<PullResponse> {
     const ends = await c.query<{ head: string; floor: string }>(
       `SELECT h.version AS head, f.version AS floor FROM log_head h, log_floor f WHERE h.id = 1 AND f.id = 1`,
@@ -74,13 +83,13 @@ export class PullService {
       data: r.data,
     }));
 
-    let lastMutationId = 0;
+    let lastMutationId: LastMutationId = 0;
     if (clientId) {
       const res = await c.query<{ last_mutation_id: string }>(
         `SELECT last_mutation_id FROM clients WHERE client_id = $1`,
         [clientId],
       );
-      lastMutationId = res.rows.length ? Number(res.rows[0].last_mutation_id) : 0;
+      lastMutationId = res.rows.length ? asLastMutationId(Number(res.rows[0].last_mutation_id)) : 0;
     }
 
     return {
@@ -89,6 +98,7 @@ export class PullService {
       nextCursor: hasMore ? changes[changes.length - 1].version : asVersion(Math.max(cursor, headVersion)),
       hasMore,
       lastMutationId,
+      head: asVersion(headVersion),
     };
   }
 }

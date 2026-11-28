@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { knownDefect, precondition } from '@fieldsync/test-kit';
 import { describeWithDb, useIntegration } from '../support/integration';
@@ -17,9 +18,17 @@ describeWithDb('a client id of another user', () => {
     const clientId = randomUUID();
     const ticket = randomUUID();
     const mutations: Mutation[] = [
-      { id: 1, name: 'ticket.create', args: { id: ticket, siteId: site, title: 'Pump', description: 'Leaks' } },
+      {
+        id: asMutationId(1),
+        name: 'ticket.create',
+        args: { id: ticket, siteId: site, title: 'Pump', description: 'Leaks' },
+      },
       // Rejected with the stored values in its details.
-      { id: 2, name: 'ticket.update', args: { id: ticket, siteId: site, title: 'X', base: { title: 'Old' } } },
+      {
+        id: asMutationId(2),
+        name: 'ticket.update',
+        args: { id: ticket, siteId: site, title: 'X', base: { title: 'Old' } },
+      },
     ];
     const first = await ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, owner.token);
     precondition(first.body.results?.[1]?.status === 'rejected', `setup answered ${JSON.stringify(first.body)}`);
@@ -41,7 +50,7 @@ describeWithDb('a client id of another user', () => {
       const { site, owner, other } = await twoTechnicians();
       const clientId = randomUUID();
       const create = (id: number): Mutation => ({
-        id,
+        id: asMutationId(id),
         name: 'ticket.create',
         args: { id: randomUUID(), siteId: site, title: `T${id}`, description: '' },
       });

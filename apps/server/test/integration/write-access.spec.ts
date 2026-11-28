@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PullResponse } from '@fieldsync/sync-core';
 import { knownDefect } from '@fieldsync/test-kit';
 import type { TestUser } from '../support/fixtures';
@@ -17,7 +18,7 @@ describeWithDb('write access is checked against the stored data', () => {
     const admin = await ctx.fixtures.admin();
     const title = `South ${randomUUID()}`;
     await push(admin, [
-      { id: 1, name: 'ticket.create', args: { id: randomUUID(), siteId: south, title, description: '' } },
+      { id: asMutationId(1), name: 'ticket.create', args: { id: randomUUID(), siteId: south, title, description: '' } },
     ]);
     const pulled = await ctx.api.get<PullResponse>('/sync/pull?cursor=0&limit=500', admin.token);
     const ticket = pulled.body.changes.find((c) => c.data?.title === title);
@@ -39,7 +40,7 @@ describeWithDb('write access is checked against the stored data', () => {
     const techNorth = await ctx.fixtures.technician(north);
     const title = `Forbidden ${randomUUID()}`;
     await push(techNorth, [
-      { id: 1, name: 'ticket.create', args: { id: randomUUID(), siteId: south, title, description: '' } },
+      { id: asMutationId(1), name: 'ticket.create', args: { id: randomUUID(), siteId: south, title, description: '' } },
     ]);
     const { rowCount } = await ctx.db.query(`SELECT 1 FROM entities WHERE data->>'title' = $1`, [title]);
     expect(rowCount).toBe(0);
@@ -51,7 +52,11 @@ describeWithDb('write access is checked against the stored data', () => {
     async () => {
       const { north, ticketId, techNorth } = await southTicketAndNorthTech();
       await push(techNorth, [
-        { id: 1, name: 'ticket.setStatus', args: { id: ticketId, siteId: north, from: 'open', to: 'cancelled' } },
+        {
+          id: asMutationId(1),
+          name: 'ticket.setStatus',
+          args: { id: ticketId, siteId: north, from: 'open', to: 'cancelled' },
+        },
       ]);
       expect((await storedTicket(ticketId)).data.status).toBe('open');
     },
@@ -64,7 +69,11 @@ describeWithDb('write access is checked against the stored data', () => {
       const { north, ticketId, techNorth } = await southTicketAndNorthTech();
       const part = randomUUID();
       await push(techNorth, [
-        { id: 1, name: 'part.add', args: { id: part, ticketId, siteId: north, name: 'Seal', quantity: 1 } },
+        {
+          id: asMutationId(1),
+          name: 'part.add',
+          args: { id: part, ticketId, siteId: north, name: 'Seal', quantity: 1 },
+        },
       ]);
       const { rowCount } = await ctx.db.query(`SELECT 1 FROM entities WHERE entity = 'part' AND id = $1`, [part]);
       expect(rowCount).toBe(0);

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Mutation, PushResponse } from '@fieldsync/sync-core';
 import { precondition } from '@fieldsync/test-kit';
 import { Clock } from '../../src/clock';
@@ -17,9 +18,9 @@ const RESULT_RETENTION_DAYS = 14;
 const PAST_EVERYTHING_DAYS = LOG_RETENTION_DAYS + 13;
 
 /**
- * What the GC removes besides the log: tombstones of deletions it collected, results of applied
- * mutations with their changes, and results without a version (rejections) only after their own,
- * longer retention.
+ * What the GC keeps and removes besides the log: tombstones stay for good (a deleted id is never
+ * taken again), results of applied mutations go with their changes, and results without a version
+ * (rejections) only after their own, longer retention.
  */
 describeWithDb('retention of tombstones and mutation results', () => {
   const ctx = useIntegration({
@@ -33,7 +34,7 @@ describeWithDb('retention of tombstones and mutation results', () => {
   const push = (user: TestUser, clientId: string, mutations: Mutation[]) =>
     ctx.api.post<PushResponse>('/sync/push', { clientId, mutations }, user.token);
   const create = (id: number, siteId: string, ticket: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: ticket, siteId, title, description: '' },
   });
@@ -50,73 +51,72 @@ describeWithDb('retention of tombstones and mutation results', () => {
   const tombstone = async (id: string) =>
     (await ctx.db.query(`SELECT 1 FROM entities WHERE id = $1 AND deleted`, [id])).rowCount ?? 0;
 
-  it('keeps a tombstone, and so the id taken, while its deletion is in the log', async () => {
+  it('keeps a tombstone after its deletion left the log, so the id is never taken again', async () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);
+    const ticket = randomUUID();
     const client = randomUUID();
-    const [old, recent] = [randomUUID(), randomUUID()];
-    await push(tech, client, [create(1, site, old, 'deleted long ago')]);
-    await push(tech, client, [{ id: 2, name: 'ticket.delete', args: { id: old, siteId: site } }]);
-    // The second ticket is created and deleted a week later, by the server's clock.
-    const later = jest.spyOn(ctx.server.app.get(Clock), 'now').mockReturnValue(new Date(Date.now() + 8 * DAY_MS));
-    try {
-      await push(tech, client, [create(3, site, recent, 'deleted recently')]);
-      await push(tech, client, [{ id: 4, name: 'ticket.delete', args: { id: recent, siteId: site } }]);
-    } finally {
-      later.mockRestore();
-    }
+    await push(tech, client, [create(1, site, ticket, 'deleted long ago')]);
+    await push(tech, client, [{ id: asMutationId(2), name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
 
-    // A day after that: the first deletion is older than the retention, the second is not.
-    const run = await collectAfterDays(9);
+    const run = await collectAfterDays(PAST_EVERYTHING_DAYS);
 
-    precondition(run.log > 0 && (await tombstone(old)) === 0, 'the old deletion was not collected');
-    expect(await tombstone(recent)).toBe(1);
-    const again = await push(tech, randomUUID(), [create(1, site, recent, 'same id')]);
+    precondition(run.log > 0, 'the deletion was not collected');
+    expect(await tombstone(ticket)).toBe(1);
+    const again = await push(tech, randomUUID(), [create(1, site, ticket, 'same id')]);
     expect(again.body.results[0]).toMatchObject({ status: 'rejected', code: 'ID_CONFLICT' });
   });
 
-  it('removes a tombstone with its deletion; a client that still holds the row is reset and drops it', async () => {
+  it('keeps a queued offline command on a deleted id from touching anything after the log is collected', async () => {
+    const site = await ctx.fixtures.site();
+    const tech = await ctx.fixtures.technician(site);
+    const ticket = randomUUID();
+    await push(tech, randomUUID(), [create(1, site, ticket, 'deleted')]);
+    await push(tech, randomUUID(), [
+      { id: asMutationId(1), name: 'ticket.delete', args: { id: ticket, siteId: site } },
+    ]);
+    await collectAfterDays(PAST_EVERYTHING_DAYS);
+    // Someone tries to create a ticket under the old id: refused, so nothing new exists under it.
+    const create2 = await push(tech, randomUUID(), [create(1, site, ticket, 'new ticket, old id')]);
+    precondition(create2.body.results[0]?.status === 'rejected', 'the id was reused');
+
+    // An offline client still holds a delete of the old ticket; it arrives now and finds nothing.
+    const stale = await push(tech, randomUUID(), [
+      { id: asMutationId(1), name: 'ticket.delete', args: { id: ticket, siteId: site } },
+    ]);
+
+    expect(stale.body.results[0]?.status).toBe('applied');
+    expect((await ctx.db.query(`SELECT 1 FROM entities WHERE id = $1 AND NOT deleted`, [ticket])).rowCount).toBe(0);
+  });
+
+  it('resets a client that still holds a row whose deletion was collected, and it drops the row', async () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);
     const ticket = randomUUID();
     const holder = await clients.create(tech);
-    holder.mutate('ticket.create', { id: ticket, siteId: site, title: 'held', description: '' });
+    await holder.mutate('ticket.create', { id: ticket, siteId: site, title: 'held', description: '' });
     await holder.sync();
     precondition(rowsById(holder, 'ticket').has(ticket), 'the holder does not have the ticket');
-    await push(tech, randomUUID(), [{ id: 1, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
+    await push(tech, randomUUID(), [
+      { id: asMutationId(1), name: 'ticket.delete', args: { id: ticket, siteId: site } },
+    ]);
 
-    const run = await collectAfterDays(PAST_EVERYTHING_DAYS);
+    await collectAfterDays(PAST_EVERYTHING_DAYS);
 
-    expect(run.tombstones).toBeGreaterThanOrEqual(1);
-    expect(await tombstone(ticket)).toBe(0);
     await holder.sync();
     expect(rowsById(holder, 'ticket').has(ticket)).toBe(false);
-    // The id is free again: a create under it is a new ticket (README, decision record 3.3.6).
-    const reused = await push(tech, randomUUID(), [create(1, site, ticket, 'new ticket, old id')]);
-    expect(reused.body.results[0]).toMatchObject({ status: 'applied' });
-  });
-
-  it('removes tombstones left below the floor, as a database the original GC pruned has them', async () => {
-    const site = await ctx.fixtures.site();
-    const ticket = randomUUID();
-    const floor = await ctx.db.query<{ version: string }>('SELECT version FROM log_floor');
-    // A deletion whose change the original GC removed before the floor existed.
-    await ctx.db.query(
-      `INSERT INTO entities (entity, id, site_id, data, deleted, version) VALUES ('ticket', $1, $2, NULL, true, $3)`,
-      [ticket, site, floor.rows[0].version],
-    );
-
-    const run = await ctx.server.app.get(GcService).collect();
-
-    expect(run.tombstones).toBeGreaterThanOrEqual(1);
-    expect(await tombstone(ticket)).toBe(0);
+    expect(await tombstone(ticket)).toBe(1);
   });
 
   it('answers a copy of a rejected mutation with its reason after the log retention, until its own ends', async () => {
     const site = await ctx.fixtures.site();
     const tech = await ctx.fixtures.technician(site);
     const client = randomUUID();
-    const bad: Mutation = { id: 1, name: 'ticket.update', args: { id: randomUUID(), siteId: site, title: 'x' } };
+    const bad: Mutation = {
+      id: asMutationId(1),
+      name: 'ticket.update',
+      args: { id: randomUUID(), siteId: site, title: 'x' },
+    };
     precondition((await push(tech, client, [bad])).body.results[0].status === 'rejected', 'not rejected');
 
     await collectAfterDays(LOG_RETENTION_DAYS + 1);

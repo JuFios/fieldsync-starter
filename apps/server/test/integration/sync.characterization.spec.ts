@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { asMutationId } from '@fieldsync/sync-core';
 import type { Change, Mutation, PullResponse, PushResponse } from '@fieldsync/sync-core';
 import { GcService } from '../../src/gc.service';
 import type { TestUser } from '../support/fixtures';
@@ -23,7 +24,7 @@ describeWithDb('sync API (characterization)', () => {
   };
 
   const create = (id: number, siteId: string, title: string): Mutation => ({
-    id,
+    id: asMutationId(id),
     name: 'ticket.create',
     args: { id: randomUUID(), siteId, title, description: '' },
   });
@@ -177,9 +178,17 @@ describeWithDb('sync API (characterization)', () => {
       const part = randomUUID();
 
       const res = await push(tech, clientId, [
-        { id: 2, name: 'ticket.setStatus', args: { id: ticket, siteId: site, from: 'open', to: 'in_progress' } },
-        { id: 3, name: 'part.add', args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 2 } },
-        { id: 4, name: 'part.adjust', args: { id: part, siteId: site, delta: 3 } },
+        {
+          id: asMutationId(2),
+          name: 'ticket.setStatus',
+          args: { id: ticket, siteId: site, from: 'open', to: 'in_progress' },
+        },
+        {
+          id: asMutationId(3),
+          name: 'part.add',
+          args: { id: part, ticketId: ticket, siteId: site, name: 'Seal', quantity: 2 },
+        },
+        { id: asMutationId(4), name: 'part.adjust', args: { id: part, siteId: site, delta: 3 } },
       ]);
       expect(res.status).toBe(201);
       expect(res.body.results.map((r) => r.status)).toEqual(['applied', 'applied', 'applied']);
@@ -213,7 +222,9 @@ describeWithDb('sync API (characterization)', () => {
       const clientId = randomUUID();
       const ticket = await createTicket(tech, clientId, 1, site, 'To delete');
 
-      const res = await push(tech, clientId, [{ id: 2, name: 'ticket.delete', args: { id: ticket, siteId: site } }]);
+      const res = await push(tech, clientId, [
+        { id: asMutationId(2), name: 'ticket.delete', args: { id: ticket, siteId: site } },
+      ]);
       expect(res.body.results).toEqual([{ id: 2, status: 'applied', version: expect.any(Number) }]);
 
       const del = (await initialPull(tech)).filter((c) => c.id === ticket).at(-1);
@@ -236,7 +247,7 @@ describeWithDb('sync API (characterization)', () => {
 
       const res = await push(tech, clientId, [
         {
-          id: 2,
+          id: asMutationId(2),
           name: 'part.add',
           args: { id: part, ticketId: randomUUID(), siteId: site, name: 'Seal', quantity: 1 },
         },

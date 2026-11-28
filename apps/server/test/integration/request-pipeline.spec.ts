@@ -1,4 +1,4 @@
-import type { PullResponse, PushResponse } from '@fieldsync/sync-core';
+import { PROTOCOL_HEADER, PROTOCOL_VERSION, type PullResponse, type PushResponse } from '@fieldsync/sync-core';
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import request from 'supertest';
@@ -67,6 +67,7 @@ describeWithDb('request pipeline', () => {
     const res = await request(ctx.server.app.getHttpServer() as Server)
       .post('/sync/push')
       .set('authorization', `Bearer ${tech.token}`)
+      .set(PROTOCOL_HEADER, String(PROTOCOL_VERSION))
       .set('content-type', 'application/json')
       .send(body);
     expect({ status: res.status, results: (res.body as PushResponse).results }).toEqual({

@@ -1,3 +1,4 @@
+import { storeState } from './support/stored';
 import {
   asVersion,
   HttpTransport,
@@ -15,7 +16,10 @@ import {
   type SnapshotRequest,
   type SyncStatus,
   type Transport,
+  asLastMutationId,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
@@ -63,17 +67,30 @@ class ScriptedTransport implements Transport {
 const page =
   (watermark: number, rows: SnapshotPage['rows'], next: SnapshotPage['next'] = null) =>
   () =>
-    Promise.resolve({ watermark: asVersion(watermark), rows, next });
+    Promise.resolve({ watermark: asVersion(watermark), head: asVersion(watermark), rows, next });
+/** A pull page; with more to come, the server's head is ahead of the page (by default one version). */
 const pulled =
-  (changes: Change[], nextCursor: number, lastMutationId = 0, hasMore = false) =>
+  (
+    changes: Change[],
+    nextCursor: number,
+    lastMutationId = 0,
+    hasMore = false,
+    head = hasMore ? nextCursor + 1 : nextCursor,
+  ) =>
   () =>
-    Promise.resolve({ changes, nextCursor: asVersion(nextCursor), hasMore, lastMutationId });
+    Promise.resolve({
+      changes,
+      nextCursor: asVersion(nextCursor),
+      hasMore,
+      lastMutationId: asLastMutationId(lastMutationId),
+      head: asVersion(head),
+    });
 
 const clients: SyncClient[] = [];
 function client(transport: Transport, stored?: { cursor: number; lastMutationId: number; base: Record<string, Row> }) {
   const storage = new MemoryStorage();
-  if (stored) storage.save(stored);
-  const c = new SyncClient({ clientId: 'c1', transport, storage });
+  if (stored) storeState(storage, stored);
+  const c = new SyncClient({ clientId: CLIENT_ID, transport, storage });
   clients.push(c);
   return { client: c, storage };
 }
@@ -102,7 +119,7 @@ describe('SyncClient snapshots', () => {
     expect(c.rows('part')).toEqual([part(2)]);
     expect(statuses).toContain('loading');
     expect(c.status).toBe('idle');
-    expect(storage.load()).toMatchObject({ cursor: 8 });
+    await expect(storage.load()).resolves.toMatchObject({ meta: { cursor: 8 } });
   });
 
   it('reloads a client whose pull is answered RESET_REQUIRED, dropping rows the server no longer has', async () => {
@@ -127,7 +144,7 @@ describe('SyncClient snapshots', () => {
       page(30, [{ entity: 'part', id: PART, siteId: SITE, data: part(9) }], { siteId: SITE, entity: 'part', id: PART }),
       () =>
         new Promise((resolve) => {
-          releasePage2 = () => resolve({ watermark: asVersion(30), rows: [], next: null });
+          releasePage2 = () => resolve({ watermark: asVersion(30), head: asVersion(30), rows: [], next: null });
         }),
     );
     t.pulls.push(pulled([], 30));
@@ -159,7 +176,7 @@ describe('SyncClient snapshots', () => {
 
     expect(c.status).toBe('offline');
     expect(c.rows('ticket')).toEqual([ticket('old')]);
-    expect(storage.load()).toMatchObject({ cursor: 3 });
+    await expect(storage.load()).resolves.toMatchObject({ meta: { cursor: 3 } });
     t.pulls.push(() => Promise.reject(reset()), pulled([], 31));
     t.snapshots.push(page(31, []));
     await c.sync();
@@ -195,7 +212,7 @@ describe('SyncClient snapshots', () => {
           results: req.mutations
             .filter((m) => m.id === 1)
             .map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(20) })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       );
       t.pulls.push(() => Promise.reject(reset()));
@@ -207,9 +224,9 @@ describe('SyncClient snapshots', () => {
       );
       t.pulls.push(pulled([], 25, 1));
       const { client: c } = client(t, stored);
-      c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
+      await c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
       // Mutation 2 is not answered in this sync (the push carries only the first one's result).
-      c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 10 });
+      await c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 10 });
 
       await c.sync();
 
@@ -223,10 +240,15 @@ describe('SyncClient snapshots', () => {
       const t = new ScriptedTransport();
       t.pushes.push(() => Promise.reject(new Error('answer lost')));
       const { client: c } = client(t, { cursor: 3, lastMutationId: 0, base: { [`part/${PART}`]: part(4) } });
-      c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
+      await c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
       await c.sync();
       // Next time the copy is answered as a duplicate whose result has expired, and the pull is reset.
-      t.pushes.push(() => Promise.resolve({ results: [{ id: 1, status: 'duplicate' as const }], lastMutationId: 1 }));
+      t.pushes.push(() =>
+        Promise.resolve({
+          results: [{ id: asMutationId(1), status: 'duplicate' as const }],
+          lastMutationId: asMutationId(1),
+        }),
+      );
       t.pulls.push(() => Promise.reject(reset()), pulled([], 40, 1));
       t.snapshots.push(page(40, [{ entity: 'part', id: PART, siteId: SITE, data: part(5) }]));
 
@@ -241,7 +263,7 @@ describe('SyncClient snapshots', () => {
       t.pushes.push((req) =>
         Promise.resolve({
           results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const, version: asVersion(50) })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       );
       // The snapshot was read before the mutation's change (watermark 40), and the log after it is interrupted.
@@ -249,7 +271,7 @@ describe('SyncClient snapshots', () => {
       t.snapshots.push(page(40, [{ entity: 'part', id: PART, siteId: SITE, data: part(4) }]));
       t.pulls.push(pulled([], 45, 1, true), () => Promise.reject(new Error('offline')));
       const { client: c } = client(t, { cursor: 3, lastMutationId: 0, base: { [`part/${PART}`]: part(4) } });
-      c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
+      await c.mutate('part.adjust', { id: PART, siteId: SITE, delta: 1 });
 
       await c.sync();
 
@@ -268,13 +290,13 @@ describe('SyncClient snapshots', () => {
             code: 'NOT_FOUND' as const,
             message: 'gone',
           })),
-          lastMutationId: 1,
+          lastMutationId: asMutationId(1),
         }),
       );
       t.pulls.push(() => Promise.reject(reset()), pulled([], 9, 1));
       t.snapshots.push(page(9, []));
       const { client: c } = client(t, { cursor: 3, lastMutationId: 0, base: {} });
-      c.mutate('ticket.update', { id: OTHER, siteId: SITE, title: 'x' });
+      await c.mutate('ticket.update', { id: OTHER, siteId: SITE, title: 'x' });
 
       await c.sync();
 
@@ -296,7 +318,7 @@ describe('HttpTransport.snapshot', () => {
     const urls: string[] = [];
     const fetchImpl: typeof fetch = (input) => {
       urls.push(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
-      return ok({ watermark: asVersion(4), rows: [], next: null })(input);
+      return ok({ watermark: asVersion(4), head: asVersion(4), rows: [], next: null })(input);
     };
     await new HttpTransport('http://api', 't', fetchImpl).snapshot({
       watermark: asVersion(4),
@@ -333,19 +355,32 @@ describe('HttpTransport.snapshot', () => {
 describe('isSnapshotPage', () => {
   const row = { entity: 'ticket', id: TICKET, siteId: SITE, data: {} };
   it.each([
-    ['a page', { watermark: asVersion(1), rows: [row], next: null }, true],
+    ['a page', { watermark: asVersion(1), head: asVersion(1), rows: [row], next: null }, true],
     [
       'a page with a key',
-      { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part', id: PART } },
+      { watermark: asVersion(1), head: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part', id: PART } },
       true,
     ],
     ['no watermark', { rows: [], next: null }, false],
-    ['a fractional watermark', { watermark: 1.5, rows: [], next: null }, false],
-    ['a negative watermark', { watermark: -1, rows: [], next: null }, false],
-    ['an unknown entity', { watermark: asVersion(1), rows: [{ ...row, entity: 'site' }], next: null }, false],
-    ['a row without data', { watermark: asVersion(1), rows: [{ ...row, data: null }], next: null }, false],
-    ['a key without an id', { watermark: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part' } }, false],
-    ['no next', { watermark: asVersion(1), rows: [] }, false],
+    ['a fractional watermark', { watermark: 1.5, head: 1.5, rows: [], next: null }, false],
+    ['a negative watermark', { watermark: -1, head: -1, rows: [], next: null }, false],
+    [
+      'an unknown entity',
+      { watermark: asVersion(1), head: asVersion(1), rows: [{ ...row, entity: 'site' }], next: null },
+      false,
+    ],
+    [
+      'a row without data',
+      { watermark: asVersion(1), head: asVersion(1), rows: [{ ...row, data: null }], next: null },
+      false,
+    ],
+    [
+      'a key without an id',
+      { watermark: asVersion(1), head: asVersion(1), rows: [], next: { siteId: SITE, entity: 'part' } },
+      false,
+    ],
+    ['no next', { watermark: asVersion(1), head: asVersion(1), rows: [] }, false],
+    ['no head', { watermark: asVersion(1), rows: [], next: null }, false],
     ['an array', [], false],
   ])('%s', (_case, body, expected) => {
     expect(isSnapshotPage(body)).toBe(expected);
@@ -359,29 +394,5 @@ describe('asVersion', () => {
 
   it.each([-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY])('refuses %p', (n) => {
     expect(() => asVersion(n)).toThrow(RangeError);
-  });
-});
-
-describe('a stored state with a cursor that is not a version', () => {
-  it('loads a snapshot instead, and keeps numbering mutations after the stored id', async () => {
-    const t = new ScriptedTransport();
-    t.snapshots.push(page(4, []));
-    t.pulls.push(pulled([], 4, 7));
-    const { client: c } = client(t, { cursor: -3, lastMutationId: 7, base: { [`ticket/${TICKET}`]: ticket('stale') } });
-    const pushed: number[] = [];
-    t.pushes.push((req) => {
-      pushed.push(...req.mutations.map((m) => m.id));
-      return Promise.resolve({
-        results: req.mutations.map((m) => ({ id: m.id, status: 'applied' as const })),
-        lastMutationId: 8,
-      });
-    });
-    c.mutate('ticket.create', { id: OTHER, siteId: SITE, title: 'new', description: '' });
-
-    await c.sync();
-
-    expect(pushed).toEqual([8]);
-    expect(t.snapshotRequests).toEqual([{ limit: 500 }]);
-    expect(c.rows('ticket').map((r) => r.id)).not.toContain(TICKET);
   });
 });

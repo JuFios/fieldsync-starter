@@ -90,6 +90,7 @@ describeWithDb('server startup', () => {
         expect(Object.keys(res.body.paths).sort()).toEqual([
           '/health',
           '/me',
+          '/sync/clients/{clientId}',
           '/sync/pull',
           '/sync/push',
           '/sync/snapshot',
@@ -99,6 +100,18 @@ describeWithDb('server startup', () => {
         // A token in the URL ends up in logs and history; the docs must not recommend it.
         expect(JSON.stringify(res.body.paths['/sync/stream'])).not.toMatch(/token=/);
         expect((await new Api(server.app).get('/docs')).status).toBe(200);
+      } finally {
+        await server.close();
+      }
+    });
+
+    it('says what a client id that is not a UUID is answered when it is retired', async () => {
+      const server = await startApp((await database()).url, { API_DOCS_ENABLED: 'true' });
+      try {
+        const res = await new Api(server.app).get<{
+          paths: Record<string, Record<string, { responses: Record<string, { description: string }> }>>;
+        }>('/docs-json');
+        expect(res.body.paths['/sync/clients/{clientId}'].delete.responses['400'].description).toContain('BAD_REQUEST');
       } finally {
         await server.close();
       }
@@ -116,6 +129,7 @@ describeWithDb('server startup', () => {
         }>('/docs-json');
         const pull = res.body.paths['/sync/pull'].get.parameters ?? [];
         expect(pull.map((p) => [p.name, p.in, p.required ?? false]).sort()).toEqual([
+          ['FieldSync-Protocol', 'header', true],
           ['clientId', 'query', false],
           ['cursor', 'query', false],
           ['limit', 'query', false],
@@ -124,11 +138,12 @@ describeWithDb('server startup', () => {
           Object.keys(
             (res.body.paths[path][method] as unknown as { responses: Record<string, unknown> }).responses,
           ).sort();
-        expect(responses('/sync/push', 'post')).toEqual(['201', '400', '401', '409', '413', '500', '503']);
+        expect(responses('/sync/push', 'post')).toEqual(['201', '400', '401', '409', '410', '413', '500', '503']);
         expect(responses('/sync/pull', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
         expect(responses('/sync/snapshot', 'get')).toEqual(['200', '400', '401', '410', '500', '503']);
         const snapshot = res.body.paths['/sync/snapshot'].get.parameters ?? [];
         expect(snapshot.map((p) => [p.name, p.in, p.required ?? false]).sort()).toEqual([
+          ['FieldSync-Protocol', 'header', true],
           ['afterEntity', 'query', false],
           ['afterId', 'query', false],
           ['afterSite', 'query', false],

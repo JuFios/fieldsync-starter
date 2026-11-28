@@ -1,3 +1,4 @@
+import { storeState } from './support/stored';
 import {
   asVersion,
   MemoryStorage,
@@ -7,7 +8,9 @@ import {
   type PushRequest,
   type PushResponse,
   type SnapshotPage,
+  asMutationId,
 } from '../src';
+import { CLIENT_ID } from './support/ids';
 
 const SITE = '33333333-3333-4333-8333-333333333333';
 const TICKET = '00000000-0000-4000-8000-000000000001';
@@ -45,8 +48,8 @@ class ScriptedTransport {
 /** A client that synced before: it has a stored state, so it reads the log and never a snapshot. */
 function client(transport: ScriptedTransport): SyncClient {
   const storage = new MemoryStorage();
-  storage.save({ cursor: 0, lastMutationId: 0, base: {} });
-  return new SyncClient({ clientId: 'c1', transport, storage });
+  storeState(storage, { cursor: 0, lastMutationId: 0, base: {} });
+  return new SyncClient({ clientId: CLIENT_ID, transport, storage });
 }
 
 /**
@@ -59,7 +62,7 @@ describe('acknowledged mutations', () => {
     const transport = new ScriptedTransport();
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect(c.rows('ticket').map((t) => t.title)).toEqual(['Mine']);
     } finally {
@@ -71,11 +74,18 @@ describe('acknowledged mutations', () => {
     const transport = new ScriptedTransport();
     // The first page ends before the change; it already reports the mutation as applied.
     transport.pulls = [
-      () => Promise.resolve({ changes: [], nextCursor: asVersion(2), hasMore: true, lastMutationId: 1 }),
+      () =>
+        Promise.resolve({
+          changes: [],
+          nextCursor: asVersion(2),
+          hasMore: true,
+          lastMutationId: asMutationId(1),
+          head: asVersion(3),
+        }),
     ];
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect(c.rows('ticket').map((t) => t.title)).toEqual(['Mine']);
     } finally {
@@ -87,11 +97,17 @@ describe('acknowledged mutations', () => {
     const transport = new ScriptedTransport();
     transport.pulls = [
       () =>
-        Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
+        Promise.resolve({
+          changes: [ticketChange(3)],
+          nextCursor: asVersion(3),
+          hasMore: false,
+          lastMutationId: asMutationId(1),
+          head: asVersion(3),
+        }),
     ];
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
         pending: 0,
@@ -112,7 +128,7 @@ describe('acknowledged mutations', () => {
       });
     const c = client(transport);
     try {
-      c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
+      await c.mutate('ticket.create', { id: TICKET, siteId: SITE, title: 'Mine', description: '' });
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({
         pending: 1,
@@ -120,7 +136,13 @@ describe('acknowledged mutations', () => {
       });
       transport.pulls = [
         () =>
-          Promise.resolve({ changes: [ticketChange(3)], nextCursor: asVersion(3), hasMore: false, lastMutationId: 1 }),
+          Promise.resolve({
+            changes: [ticketChange(3)],
+            nextCursor: asVersion(3),
+            hasMore: false,
+            lastMutationId: asMutationId(1),
+            head: asVersion(3),
+          }),
       ];
       await c.sync();
       expect({ pending: c.pendingCount, titles: c.rows('ticket').map((t) => t.title) }).toEqual({

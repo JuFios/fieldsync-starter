@@ -1,3 +1,4 @@
+import { asClientId } from '@fieldsync/sync-core';
 import { Test } from '@nestjs/testing';
 import { Db } from '../../src/db';
 import { ProblemException } from '../../src/problem';
@@ -6,6 +7,8 @@ import { mockDb, result, type MockDb } from './support';
 
 const TECH = { id: 'user-1', role: 'technician' as const };
 const NORTH = '00000000-0000-4000-8000-0000000000a1';
+const CLIENT = asClientId('00000000-0000-4000-8000-0000000000c1');
+const OTHER_CLIENT = asClientId('00000000-0000-4000-8000-0000000000c2');
 
 function logRow(version: number) {
   return {
@@ -68,7 +71,7 @@ describe('PullService', () => {
   const logQuery = () => db.inTx.query.mock.calls.find(([sql]) => sql.includes('FROM change_log'));
 
   it('reads everything in one read-only REPEATABLE READ transaction', async () => {
-    await pull.pull(TECH, 0, 500, 'client-1');
+    await pull.pull(TECH, 0, 500, CLIENT);
     expect(db.tx).toHaveBeenCalledTimes(1);
     expect(db.tx.mock.calls[0][1]).toEqual({ isolation: 'REPEATABLE READ', readOnly: true });
     expect(db.query).not.toHaveBeenCalled();
@@ -101,6 +104,12 @@ describe('PullService', () => {
     await expect(pull.pull(TECH, 5, 500)).resolves.toMatchObject({ changes: [], nextCursor: 5, hasMore: false });
   });
 
+  it("returns the snapshot's head, also when the page stops before it", async () => {
+    logOf(1, 2, 3);
+    await expect(pull.pull(TECH, 0, 2)).resolves.toMatchObject({ head: 3, hasMore: true });
+    await expect(pull.pull(TECH, 2, 2)).resolves.toMatchObject({ head: 3, hasMore: false });
+  });
+
   it('reports more, and stops the cursor at the page, only when changes follow the page', async () => {
     logOf(1, 2, 3);
     await expect(pull.pull(TECH, 0, 2)).resolves.toMatchObject({ nextCursor: 2, hasMore: true });
@@ -115,12 +124,10 @@ describe('PullService', () => {
 
   it('returns the client last mutation id, 0 for an unknown client and when none is asked for', async () => {
     lastMutationId = 9;
-    await expect(pull.pull(TECH, 0, 500, 'client-1')).resolves.toMatchObject({ lastMutationId: 9 });
-    expect(db.inTx.query).toHaveBeenCalledWith('SELECT last_mutation_id FROM clients WHERE client_id = $1', [
-      'client-1',
-    ]);
+    await expect(pull.pull(TECH, 0, 500, CLIENT)).resolves.toMatchObject({ lastMutationId: 9 });
+    expect(db.inTx.query).toHaveBeenCalledWith('SELECT last_mutation_id FROM clients WHERE client_id = $1', [CLIENT]);
     lastMutationId = undefined;
-    await expect(pull.pull(TECH, 0, 500, 'client-2')).resolves.toMatchObject({ lastMutationId: 0 });
+    await expect(pull.pull(TECH, 0, 500, OTHER_CLIENT)).resolves.toMatchObject({ lastMutationId: 0 });
     db.inTx.query.mockClear();
     await expect(pull.pull(TECH, 0, 500)).resolves.toMatchObject({ lastMutationId: 0 });
     expect(db.inTx.query.mock.calls.some(([sql]) => sql.includes('FROM clients'))).toBe(false);
