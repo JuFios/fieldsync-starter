@@ -9,6 +9,7 @@ import { typeOrmOptions } from './database/typeorm';
 import { Db } from './db';
 import { GcService } from './gc.service';
 import { HealthController } from './health.controller';
+import { HttpShutdownService } from './http-shutdown.service';
 import { ProblemFilter } from './problem';
 import { ProtocolGuard } from './protocol.guard';
 import { PullService } from './pull.service';
@@ -27,6 +28,7 @@ import { SyncController } from './sync.controller';
     SnapshotService,
     StreamService,
     GcService,
+    HttpShutdownService,
     // Global guards run in this order: the protocol version first, so an outdated client is told to
     // update whatever else is wrong; then the token, required unless a route is @Public() (NestJS
     // authentication docs).

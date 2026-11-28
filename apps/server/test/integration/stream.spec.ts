@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Server } from 'node:http';
+import { Agent, request, type Server } from 'node:http';
 import { PROTOCOL_HEADER, PROTOCOL_VERSION, type PushResponse } from '@fieldsync/sync-core';
 import { StreamService } from '../../src/stream.service';
 import { startApp } from '../support/app';
@@ -8,6 +8,33 @@ import { Fixtures, type TestUser } from '../support/fixtures';
 import { describeWithDb } from '../support/integration';
 import { eventually, listenOnLoopback, openStream } from '../support/stream';
 import { Pool } from 'pg';
+
+/** One request through `agent` (a POST when there is a body), with its answer read to the end. */
+function send(
+  agent: Agent,
+  port: number,
+  token: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const headers = {
+      authorization: `Bearer ${token}`,
+      [PROTOCOL_HEADER]: String(PROTOCOL_VERSION),
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    };
+    const method = body === undefined ? 'GET' : 'POST';
+    const req = request({ host: '127.0.0.1', port, path, method, headers, agent }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => (text += chunk));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+}
 
 /**
  * The notification stream over real HTTP connections: subscribers go away with their connection
@@ -102,25 +129,27 @@ describeWithDb('GET /sync/stream', () => {
     }, 15_000);
 
     // Experiment: steady state = a push of the client was applied; inject = the next push waits for
-    // its client row, which the test holds, and the application is closed meanwhile; expected = the
-    // push is answered as if nothing happened, applied once, and only then is the pool closed.
+    // its client row, which the test holds, the application is closed meanwhile, and the client
+    // keeps using its one connection afterwards; expected = the push is answered as if nothing
+    // happened, applied once, only then is the pool closed, and the client's later requests do not
+    // keep the application from closing.
     it.each([
       ['a push in flight', false],
       ['a push in flight and an open stream', true],
     ])(
-      'answers %s before the application is closed',
+      'answers %s, then closes although its client keeps using the connection',
       async (_case, withStream) => {
         // Longer than the test holds the row, so it is not the lock timeout that ends the push.
         const server = await startApp(database.url, { DB_LOCK_TIMEOUT_MS: '15000' });
         const port = await listenOnLoopback(server.app);
         const clientId = randomUUID();
         const ticket = randomUUID();
-        const push = (id: number, name: string, args: Record<string, unknown>) =>
-          fetch(`http://127.0.0.1:${port}/sync/push`, {
-            method: 'POST',
-            headers: { ...auth(), [PROTOCOL_HEADER]: String(PROTOCOL_VERSION), 'content-type': 'application/json' },
-            body: JSON.stringify({ clientId, mutations: [{ id, name, args }] }),
-          }).then(async (res) => ({ status: res.status, body: (await res.json()) as PushResponse }));
+        // One connection, kept alive between requests, as a browser or a proxy in front of it does.
+        const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+        const push = async (id: number, name: string, args: Record<string, unknown>) => {
+          const res = await send(agent, port, user.token, '/sync/push', { clientId, mutations: [{ id, name, args }] });
+          return { status: res.status, body: JSON.parse(res.text) as PushResponse };
+        };
         const lock = await pool.connect();
         const stream = withStream ? await openStream(port, auth()) : undefined;
         let closing: Promise<void> | undefined;
@@ -159,7 +188,13 @@ describeWithDb('GET /sync/stream', () => {
             status: 201,
             body: { results: [{ id: 2, status: 'applied', version: expect.any(Number) as number }], lastMutationId: 2 },
           });
-          expect(await eventually(() => closed, 10_000)).toBe(true);
+          // The client goes on at once, request after request. Left open, its connection would hold
+          // the shutdown for as long as it is used (and for the keep-alive timeout, 5 s, after).
+          const goingOn = async () => {
+            await send(agent, port, user.token, '/health').catch(() => undefined);
+            return closed;
+          };
+          expect(await eventually(goingOn, 2_000)).toBe(true);
           const { rows } = await pool.query<{ changes: string; last: string; status: string }>(
             `SELECT (SELECT count(*) FROM change_log WHERE entity_id = $1) AS changes,
                     (SELECT last_mutation_id FROM clients WHERE client_id = $2) AS last,
@@ -172,6 +207,7 @@ describeWithDb('GET /sync/stream', () => {
           await lock.query('ROLLBACK');
           lock.release();
           stream?.close();
+          agent.destroy();
           await (closing ?? server.close());
         }
       },

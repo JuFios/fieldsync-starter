@@ -630,6 +630,22 @@ head of its first page, and a snapshot is installed once its tail reaches the hi
 pages (each page says the head it was read at): under writes faster than a page per request,
 neither waits for a page without more changes, which never comes.
 
+**Shutdown.** The server ends every open stream (`onModuleDestroy`, F-36), then stops its HTTP
+server with `stoppable` before Nest closes it and the database pool: no new connections, every
+request in progress is answered, and each connection is closed once nothing on it waits for an answer
+(`stream.spec.ts` holds a push back on its client row while the application closes, with and without
+an open stream: it is answered 201 and applied once, and the application closes although its client
+goes on using the connection; `http-shutdown.service.spec.ts`). `server.close()`, which Nest calls,
+closes only the connections idle at that moment: one that was busy then and was kept alive was served
+for as long as its client used it (the built server was still running 15 s after `SIGTERM`), and held
+the process for the 5 s keep-alive timeout otherwise. Alternatives: Nest's `forceCloseConnections`
+destroys connections with requests in progress; `http-terminator` does so after a grace period (1 s
+by default) and brings four dependencies; setting `Connection: close` on the remaining responses is
+code of our own. `stoppable` sends no such header, so a request a client puts into a connection being
+closed fails on its side and is sent again (however many copies arrive, a push is applied once). It
+is used without a grace period: a request that never ends (a body that never arrives) holds the
+process until the process manager kills it (Docker: after 10 s by default).
+
 **Status.** `indicator`: `synced`, `pending`, `offline`, `rejected` (until the user dismisses the
 rejections), plus `loading`, `error` (the storage refuses writes) and `update-required`.
 
