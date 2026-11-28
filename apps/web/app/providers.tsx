@@ -66,6 +66,9 @@ export function Providers({ children }: { children: ReactNode }) {
         // Signed out in another tab: that tab removed the token and deletes the database.
         setToken(null);
       } else {
+        // Without its storage the client can do nothing, but it would keep leading the user's tabs
+        // (its lock and its stream): disposed, it lets a tab that can sync take over.
+        opened?.client.dispose();
         setProblem(reason === 'superseded' ? 'superseded' : 'storage');
       }
     };

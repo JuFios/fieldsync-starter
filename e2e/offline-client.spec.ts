@@ -11,6 +11,16 @@ const cutOffApi = (context: BrowserContext) =>
   context.route(`${API}/**`, (route) => route.abort('internetdisconnected'));
 const reconnectApi = (context: BrowserContext) => context.unroute(`${API}/**`);
 
+/** In a tab of this init script, the app asks for the local schema after the one it knows. */
+const raiseLocalSchemaVersion = () => {
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its factory below
+  const open = IDBFactory.prototype.open;
+  IDBFactory.prototype.open = function (this: IDBFactory, name: string, version?: number) {
+    const raised = version !== undefined && name.startsWith('fieldsync-') ? version + 1 : version;
+    return open.call(this, name, raised);
+  };
+};
+
 test.describe('the offline-first client', () => {
   test('keeps changes made without the server across a reload and sends each exactly once', async ({
     browser,
@@ -183,14 +193,7 @@ test.describe('the offline-first client', () => {
       // release has raised the local schema yet, so in this tab the test raises the version the app
       // asks for by one. Everything else is the app and the browser as they are.
       const next = new TicketsPage(await context.newPage());
-      await next.page.addInitScript(() => {
-        // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its factory below
-        const open = IDBFactory.prototype.open;
-        IDBFactory.prototype.open = function (this: IDBFactory, name: string, version?: number) {
-          const raised = version !== undefined && name.startsWith('fieldsync-') ? version + 1 : version;
-          return open.call(this, name, raised);
-        };
-      });
+      await next.page.addInitScript(raiseLocalSchemaVersion);
       await next.page.goto('/');
       // Next.js has an alert of its own (its route announcer), so the notice is found by its text.
       const notice = next.page.getByRole('alert').filter({ hasText: 'FieldSync' });
@@ -211,6 +214,34 @@ test.describe('the offline-first client', () => {
         title,
       ]);
       expect(rows).toHaveLength(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('lets the tab of a newer local schema sync while the replaced tab is still open', async ({
+    browser,
+    world,
+  }) => {
+    const site = await world.site('Superseded');
+    const tech = await world.technician(site);
+    const context = await browser.newContext();
+    try {
+      const today = new TicketsPage(await context.newPage());
+      await today.signIn(tech.token);
+      await today.expectSynced();
+
+      // The next release: in this tab the app asks for the next local schema (see the test above).
+      const next = new TicketsPage(await context.newPage());
+      await next.page.addInitScript(raiseLocalSchemaVersion);
+      await next.open();
+      await expect(today.page.getByRole('alert').filter({ hasText: 'FieldSync' })).toHaveText(
+        'A newer version of FieldSync is open in another tab. Reload this page to continue.',
+      );
+
+      // The replaced tab stays open: it must not keep the lead, or nothing is ever sent.
+      await next.create(unique('Sent by the newer app'), site);
+      await next.expectSynced();
     } finally {
       await context.close();
     }
