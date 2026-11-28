@@ -312,6 +312,32 @@ test.describe('the offline-first client', () => {
     }
   });
 
+  test('offers to sign out only once it knows what is not synced yet', async ({ browser, world }) => {
+    const site = await world.site('Opening');
+    const tech = await world.technician(site);
+    const context = await browser.newContext();
+    try {
+      // Holds the app while it opens: the stored state is loaded only once its leader lock is answered.
+      await context.addInitScript((token) => {
+        localStorage.setItem('fs_token', token);
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- applied to its manager below
+        const request = LockManager.prototype.request;
+        const held = new Promise<void>((release) => Object.assign(window, { releaseLocks: release }));
+        LockManager.prototype.request = function (this: LockManager, ...args: unknown[]) {
+          return held.then(() => Reflect.apply(request, this, args) as Promise<unknown>);
+        } as typeof request;
+      }, tech.token);
+      const page = await context.newPage();
+      await page.goto('/');
+      const signOut = page.getByRole('button', { name: 'Sign out' });
+      await expect(signOut).toBeDisabled();
+      await page.evaluate(() => (window as unknown as { releaseLocks(): void }).releaseLocks());
+      await expect(signOut).toBeEnabled();
+    } finally {
+      await context.close();
+    }
+  });
+
   test("moves the original client's id from localStorage into the database", async ({ browser, world, db }) => {
     const site = await world.site('Legacy');
     const tech = await world.technician(site);

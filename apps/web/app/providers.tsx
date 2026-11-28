@@ -97,7 +97,11 @@ export function Providers({ children }: { children: ReactNode }) {
         // notification stream open (with the token in a header), the others follow it.
         const c = new SyncClient({ transport: new HttpTransport(API, token), storage, tabs: new BrowserTabs(name) });
         opened = { client: c, storage };
-        setClient(c);
+        // The pages (and sign-out, which must know what is not synced) get the client once it has
+        // loaded the stored state; until then they would show an empty queue.
+        void c.ready.then(() => {
+          if (!stopped) setClient(c);
+        });
         void c.sync();
         // Back online: sync now instead of waiting for the backoff delay.
         window.addEventListener('online', onOnline);
@@ -163,7 +167,7 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ClientContext.Provider value={client}>
       <div style={{ textAlign: 'right' }}>
-        <button type="button" onClick={signOut}>
+        <button type="button" onClick={signOut} disabled={client === null}>
           Sign out
         </button>
       </div>
