@@ -100,7 +100,10 @@ describe('a mutation the server handled, under constant writes', () => {
   ])('leaves the queue once %s has reached the head it started from', async (_what, hasState) => {
     const server = new BusyServer();
     server.push = () =>
-      Promise.resolve({ results: [{ id: asMutationId(1), status: 'duplicate' as const }], lastMutationId: asMutationId(1) });
+      Promise.resolve({
+        results: [{ id: asMutationId(1), status: 'duplicate' as const }],
+        lastMutationId: asMutationId(1),
+      });
     const storage = new MemoryStorage();
     if (hasState) await storage.commit({ meta: { cursor: asVersion(1_000) } });
     const c = client(server, storage);

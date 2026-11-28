@@ -89,7 +89,9 @@ function seenByNewerApp(storage: MemoryStorage): SyncStorage {
     load: async () => {
       const state = await storage.load();
       const old = state.meta.updateRequired;
-      return old ? { ...state, meta: { ...state.meta, updateRequired: { ...old, version: PROTOCOL_VERSION - 1 } } } : state;
+      return old
+        ? { ...state, meta: { ...state.meta, updateRequired: { ...old, version: PROTOCOL_VERSION - 1 } } }
+        : state;
     },
     loadQueue: () => storage.loadQueue(),
     ensureClientId: (candidate) => storage.ensureClientId(candidate),
@@ -221,10 +223,10 @@ describe('a leading tab that cannot sync any more', () => {
   it('keeps saying so when the refusal arrives while a sync is storing its last page', async () => {
     const memory = new MemoryStorage();
     let release: () => void = () => undefined;
-    let held: Promise<void> | undefined;
-    // The same storage; once `held` is set, writing a pull page waits for it.
+    // The same storage; a pull page is written once `pageGate` resolves.
+    let pageGate = Promise.resolve();
     const storage = withCommit(memory, async (change) => {
-      if (change.base && held) await held;
+      if (change.base) await pageGate;
       await memory.commit(change);
     });
     let refuseStream: (err: Error) => void = () => undefined;
@@ -232,7 +234,7 @@ describe('a leading tab that cannot sync any more', () => {
     const c = await tab({ ...new Server().transport(), stream }, storage, new TabGroup().tab(), true);
     await c.sync();
 
-    held = new Promise<void>((resolve) => (release = resolve));
+    pageGate = new Promise<void>((resolve) => (release = resolve));
     const running = c.sync();
     await settle();
     refuseStream(tooOld());

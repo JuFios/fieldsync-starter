@@ -219,10 +219,7 @@ test.describe('the offline-first client', () => {
     }
   });
 
-  test('lets the tab of a newer local schema sync while the replaced tab is still open', async ({
-    browser,
-    world,
-  }) => {
+  test('lets the tab of a newer local schema sync while the replaced tab is still open', async ({ browser, world }) => {
     const site = await world.site('Superseded');
     const tech = await world.technician(site);
     const context = await browser.newContext();
@@ -325,7 +322,7 @@ test.describe('the offline-first client', () => {
         const held = new Promise<void>((release) => Object.assign(window, { releaseLocks: release }));
         LockManager.prototype.request = function (this: LockManager, ...args: unknown[]) {
           return held.then(() => Reflect.apply(request, this, args) as Promise<unknown>);
-        } as typeof request;
+        };
       }, tech.token);
       const page = await context.newPage();
       await page.goto('/');
